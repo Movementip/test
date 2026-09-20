@@ -105,7 +105,7 @@ private struct LaneBottomBar: View {
 
     var body: some View {
         HStack {
-            bottomButton(index: 0, title: "Home", asset: "bottom_main_unselected")
+            bottomButton(index: 0, title: "Home", asset: selection == 0 ? "bottom_main" : "bottom_main_unselected")
             Spacer()
             bottomButton(index: 1, title: "Search", asset: "bottom_search")
             Spacer()
