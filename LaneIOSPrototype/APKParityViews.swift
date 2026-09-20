@@ -26,6 +26,121 @@ struct APKLaneWordmark: View {
     }
 }
 
+private struct APKBundleImage: View {
+    let name: String
+    var contentMode: ContentMode = .fit
+
+    var body: some View {
+        if let url = Bundle.main.url(forResource: name, withExtension: "png"),
+           let image = UIImage(contentsOfFile: url.path) {
+            Image(uiImage: image.withRenderingMode(.alwaysOriginal))
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: contentMode)
+        } else {
+            Color.clear
+        }
+    }
+}
+
+struct APKFavoritePlaylistCard: View {
+    let trackCount: Int
+
+    var body: some View {
+        ZStack {
+            APKBundleImage(name: "lane_1_4_favourite_tracks_dark_theme__2", contentMode: .fill)
+                .opacity(0.95)
+
+            if Bundle.main.url(forResource: "lane_1_4_favourite_tracks_dark_theme__2", withExtension: "png") == nil {
+                LinearGradient(
+                    colors: [Color(red: 0.17, green: 0.11, blue: 0.13), Color(red: 0.08, green: 0.08, blue: 0.08)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            }
+
+            HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Favorite tracks")
+                        .font(.system(size: 16, weight: .bold))
+                    Text("\(trackCount) tracks")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.70))
+                }
+
+                Spacer()
+
+                ZStack {
+                    APKBundleImage(name: "cover_liked_tracks_dark", contentMode: .fill)
+                    if Bundle.main.url(forResource: "cover_liked_tracks_dark", withExtension: "png") == nil {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(apkPink.opacity(0.18))
+                        Image(systemName: "heart.fill")
+                            .font(.system(size: 30))
+                            .foregroundStyle(apkPink)
+                    }
+                }
+                .frame(width: 86, height: 86)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .shadow(color: .black.opacity(0.35), radius: 20)
+            }
+            .padding(16)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 100)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+    }
+}
+
+struct APKImportTracksCard: View {
+    var body: some View {
+        ZStack(alignment: .leading) {
+            APKBundleImage(name: "import_tracks_background_card", contentMode: .fill)
+                .scaleEffect(1.2)
+
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Import tracks")
+                        .font(.system(size: 14, weight: .bold))
+                    Text("Transfer your music to Lane")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.70))
+
+                    HStack(spacing: 10) {
+                        Image(systemName: "music.note")
+                        Image(systemName: "cloud.fill")
+                        Image(systemName: "paperplane.fill")
+                    }
+                    .font(.system(size: 16))
+                    .foregroundStyle(.white)
+                    .padding(.top, 12)
+                }
+                .padding(16)
+
+                Spacer()
+
+                APKBundleImage(name: "lane_logo_3d_wave")
+                    .frame(width: 92, height: 105)
+                    .scaleEffect(1.2)
+                    .offset(x: 2, y: 8)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 112)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.20), lineWidth: 1)
+        }
+    }
+}
+
 private struct APKRemoteImage: View {
     let url: String?
     var cornerRadius: CGFloat = 8
