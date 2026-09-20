@@ -67,6 +67,7 @@ final class LaneSession: ObservableObject {
     @Published var localPlaylists: [LocalPlaylist] = []
     @Published var history: [TrackCandidate] = []
     @Published var downloadedTrackIDs: Set<String> = []
+    private var localTrackStore: [String: TrackCandidate] = [:]
 
     func fetchArtistDetail(_ artist: LaneArtist) async -> LaneArtist {
         guard let id = artist.id, !id.isEmpty else { return artist }
@@ -120,11 +121,20 @@ final class LaneSession: ObservableObject {
         do {
             await configureAPI()
             trackResolveMessage = ""
-            let tracks = try await LaneAPI.shared.tracksByIds(
-                token: token,
-                ids: clean,
-                prefetch: prefetch
-            )
+            var tracks: [TrackData] = []
+
+            // Android resolves large collections in pages. Keeping each
+            // read-only /user/tracks body small also avoids carrier/proxy body
+            // limits that are common when the phone is used without a VPN.
+            for start in stride(from: 0, to: clean.count, by: 50) {
+                let end = min(start + 50, clean.count)
+                let batch = try await LaneAPI.shared.tracksByIds(
+                    token: token,
+                    ids: Array(clean[start..<end]),
+                    prefetch: prefetch
+                )
+                tracks.append(contentsOf: batch)
+            }
             return applyingRefID(refID, to: tracks.map { TrackCandidate($0) })
         } catch {
             output = "Track resolve error: \(error.localizedDescription)"
@@ -801,12 +811,76 @@ final class LaneSession: ObservableObject {
     }
 
     func tracksForImportPreview(_ playlist: LanePlaylist) async -> [TrackCandidate] {
-        if let tracks = playlist.playlistTracks, !tracks.isEmpty {
+        let ids = playlist.playlistTracksIds ?? []
+        if let tracks = playlist.playlistTracks,
+           !tracks.isEmpty,
+           ids.isEmpty || tracks.count == ids.count {
             return tracks.map { TrackCandidate($0, refID: playlist.playlistId) }
         }
 
+        // The preview only renders the first rows. Resolve one page here so a
+        // 1,000+ track Yandex list opens quickly; the full local import resolves
+        // every remaining page after the user confirms it.
+        return await resolveTracksByIDs(
+            Array(ids.prefix(50)),
+            prefetch: false,
+            refID: playlist.playlistId
+        )
+    }
+
+    func tracksForLocalImport(_ playlist: LanePlaylist) async -> [TrackCandidate] {
         let ids = playlist.playlistTracksIds ?? []
-        return await resolveTracksByIDs(ids, prefetch: false, refID: playlist.playlistId)
+        guard !ids.isEmpty else {
+            return (playlist.playlistTracks ?? []).map {
+                TrackCandidate($0, refID: playlist.playlistId)
+            }
+        }
+
+        await configureAPI()
+        var loaded: [TrackData] = []
+
+        // Resolve independently so one temporarily bad page does not discard
+        // hundreds of already loaded tracks. Failed pages get one complete
+        // regional retry before the partial result is returned for a resumable
+        // local save.
+        for start in stride(from: 0, to: ids.count, by: 50) {
+            let end = min(start + 50, ids.count)
+            let page = Array(ids[start..<end])
+            var resolvedPage: [TrackData]?
+
+            for attempt in 0..<2 {
+                do {
+                    resolvedPage = try await LaneAPI.shared.tracksByIds(
+                        token: token,
+                        ids: page,
+                        prefetch: false
+                    )
+                    break
+                } catch {
+                    output = "Local import page error: \(error.localizedDescription)"
+                    if attempt == 0 {
+                        try? await Task.sleep(nanoseconds: 400_000_000)
+                    }
+                }
+            }
+
+            if let resolvedPage {
+                loaded.append(contentsOf: resolvedPage)
+            }
+        }
+
+        let embedded = playlist.playlistTracks ?? []
+        let candidates = loaded + embedded
+        let byID = Dictionary(
+            candidates.compactMap { track in track.songId.map { ($0, track) } },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var seen = Set<String>()
+        let ordered = ids.compactMap { byID[$0] }.filter {
+            guard let id = $0.songId else { return false }
+            return seen.insert(id).inserted
+        }
+        return ordered.map { TrackCandidate($0, refID: playlist.playlistId) }
     }
 
     func importTracks(_ trackIDs: [String], into playlistID: String) async throws {
@@ -1114,15 +1188,31 @@ final class LaneSession: ObservableObject {
 
     private func userFacingPlaybackError(_ error: Error) -> String {
         let detail = error.localizedDescription
+        let code = playbackDiagnosticCode(error)
         if isPremiumRequired(error) {
-            return "The audio stream is unavailable. Try again or choose another track."
+            return "The audio stream is unavailable. Try again or choose another track. [\(code)]"
         }
         if detail.localizedCaseInsensitiveContains("timed out") ||
             detail.localizedCaseInsensitiveContains("HTTP 5") ||
             detail.localizedCaseInsensitiveContains("network") {
-            return "The track could not be loaded. Check your connection and try again."
+            return "The track could not be loaded. Check your connection and try again. [\(code)]"
         }
-        return "The track is temporarily unavailable."
+        return "The track is temporarily unavailable. [\(code)]"
+    }
+
+    private func playbackDiagnosticCode(_ error: Error) -> String {
+        if case let LaneAPIError.http(status, _) = error {
+            return "STREAM-\(status)"
+        }
+
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            return nsError.code == NSURLErrorTimedOut ? "NETWORK-TIMEOUT" : "NETWORK-\(abs(nsError.code))"
+        }
+        if nsError.domain == "LanePlayer" {
+            return "PLAYER-\(nsError.code)"
+        }
+        return "STREAM-UNKNOWN"
     }
 
     func requestStream(for track: TrackCandidate) {
@@ -2127,16 +2217,45 @@ final class LaneSession: ObservableObject {
     func add(_ track: TrackCandidate, to localPlaylistID: UUID) {
         guard let index = localPlaylists.firstIndex(where: { $0.id == localPlaylistID }) else { return }
         let key = favoriteKey(track)
+        localTrackStore[key] = track
         if !localPlaylists[index].trackKeys.contains(key) {
             localPlaylists[index].trackKeys.append(key)
-            saveLocalPlaylists()
         }
+        saveLocalPlaylists()
+    }
+
+    @discardableResult
+    func saveLocalImport(name: String, tracks: [TrackCandidate]) -> Int {
+        var seen = Set<String>()
+        let unique = tracks.filter { seen.insert(favoriteKey($0)).inserted }
+        guard !unique.isEmpty else { return 0 }
+
+        let baseName = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Imported playlist"
+            : name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keys = unique.map { track -> String in
+            let key = favoriteKey(track)
+            localTrackStore[key] = track
+            return key
+        }
+
+        if let index = localPlaylists.firstIndex(where: { $0.name == baseName }) {
+            for key in keys where !localPlaylists[index].trackKeys.contains(key) {
+                localPlaylists[index].trackKeys.append(key)
+            }
+            saveLocalPlaylists()
+            return localPlaylists[index].trackKeys.count
+        }
+
+        localPlaylists.append(LocalPlaylist(name: baseName, trackKeys: keys))
+        saveLocalPlaylists()
+        return keys.count
     }
 
     func tracks(in playlist: LocalPlaylist) -> [TrackCandidate] {
         let all = history + searchTracks + queue + homeTracks + recentTracks
         return playlist.trackKeys.compactMap { key in
-            all.first { favoriteKey($0) == key }
+            localTrackStore[key] ?? all.first { favoriteKey($0) == key }
         }
     }
 
@@ -2192,6 +2311,11 @@ final class LaneSession: ObservableObject {
             localPlaylists = decoded
         }
 
+        if let data = UserDefaults.standard.data(forKey: "lane.localTrackStore"),
+           let decoded = try? JSONDecoder().decode([String: TrackCandidate].self, from: data) {
+            localTrackStore = decoded
+        }
+
         if let data = UserDefaults.standard.data(forKey: "lane.history"),
            let decoded = try? JSONDecoder().decode([TrackCandidate].self, from: data) {
             history = decoded
@@ -2201,6 +2325,9 @@ final class LaneSession: ObservableObject {
     private func saveLocalPlaylists() {
         if let data = try? JSONEncoder().encode(localPlaylists) {
             UserDefaults.standard.set(data, forKey: "lane.localPlaylists")
+        }
+        if let data = try? JSONEncoder().encode(localTrackStore) {
+            UserDefaults.standard.set(data, forKey: "lane.localTrackStore")
         }
     }
 

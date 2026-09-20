@@ -669,6 +669,18 @@ private struct LibraryScreen: View {
                 }
                 .buttonStyle(.plain)
 
+                ForEach(session.localPlaylists) { playlist in
+                    NavigationLink {
+                        LocalPlaylistDetailScreen(
+                            playlist: playlist,
+                            showPlayer: $showPlayer
+                        )
+                    } label: {
+                        LocalPlaylistRow(playlist: playlist)
+                    }
+                    .buttonStyle(.plain)
+                }
+
                 ForEach(Array(session.serverPlaylists.enumerated()), id: \.offset) { _, playlist in
                     NavigationLink {
                         PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
@@ -720,7 +732,8 @@ private struct LibraryScreen: View {
             .padding(.horizontal, 8)
         }
 
-        if session.serverPlaylists.isEmpty &&
+        if session.localPlaylists.isEmpty &&
+            session.serverPlaylists.isEmpty &&
             session.serverAlbums.isEmpty &&
             session.serverArtists.isEmpty &&
             session.recentTracks.isEmpty &&
@@ -1266,6 +1279,58 @@ private struct PlaylistRow: View {
 
                 let count = playlist.tracksCount ?? playlist.playlistTracks?.count ?? 0
                 Text(count == 1 ? "1 track" : "\(count) tracks")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.58))
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Color(red: 29.0 / 255.0, green: 29.0 / 255.0, blue: 29.0 / 255.0),
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+    }
+}
+
+private struct LocalPlaylistRow: View {
+    @EnvironmentObject private var session: LaneSession
+    let playlist: LocalPlaylist
+
+    private var tracks: [TrackCandidate] {
+        session.tracks(in: playlist)
+    }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            if let first = tracks.first {
+                ArtworkView(url: first.coverURL, size: 64, radius: 5)
+            } else {
+                ZStack {
+                    Color.white.opacity(0.08)
+                    Image(systemName: "iphone")
+                        .foregroundStyle(lanePink)
+                }
+                .frame(width: 64, height: 64)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(playlist.name)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+
+                Text("\(tracks.count) tracks · On this iPhone")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.58))
                     .lineLimit(1)
@@ -2409,6 +2474,89 @@ private struct CommentsScreen: View {
 
 // MARK: - Library auxiliary screens
 
+private struct LocalPlaylistDetailScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    let playlist: LocalPlaylist
+    @Binding var showPlayer: Bool
+
+    private var tracks: [TrackCandidate] {
+        session.tracks(in: playlist)
+    }
+
+    var body: some View {
+        List {
+            Section {
+                HStack(spacing: 14) {
+                    if let first = tracks.first {
+                        ArtworkView(url: first.coverURL, size: 72, radius: 10)
+                    } else {
+                        Image(systemName: "music.note.list")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(lanePink)
+                            .frame(width: 72, height: 72)
+                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                    }
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(playlist.name)
+                            .font(.headline)
+                            .lineLimit(2)
+                        Text("\(tracks.count) tracks · On this iPhone")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        guard let first = tracks.first else { return }
+                        session.queue = tracks
+                        session.currentIndex = 0
+                        session.requestStream(for: first)
+                        showPlayer = true
+                    } label: {
+                        Image(systemName: "play.fill")
+                            .foregroundStyle(.black)
+                            .frame(width: 48, height: 48)
+                            .background(Color.white, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(tracks.isEmpty)
+                }
+                .padding(.vertical, 6)
+            }
+
+            if tracks.isEmpty {
+                EmptyLaneView(
+                    icon: "music.note.list",
+                    title: "Empty playlist",
+                    subtitle: "Import tracks to fill this playlist."
+                )
+                .listRowBackground(Color.clear)
+            } else {
+                ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
+                    TrackRow(track: track, showPlayer: $showPlayer)
+                        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                            Button {
+                                session.queue = tracks
+                                session.currentIndex = index
+                                session.requestStream(for: track)
+                                showPlayer = true
+                            } label: {
+                                Label("Play", systemImage: "play.fill")
+                            }
+                            .tint(lanePink)
+                        }
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(laneBackground)
+        .navigationTitle(playlist.name)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
 private struct FavoriteTracksScreen: View {
     @EnvironmentObject private var session: LaneSession
     @Binding var showPlayer: Bool
@@ -2579,7 +2727,7 @@ private struct ImportTracksScreen: View {
     @State private var targetPlaylistID = ""
     @State private var message = ""
     @State private var loading = false
-    @State private var showImportLimitAlert = false
+    @State private var localSaving = false
 
     var body: some View {
         ZStack {
@@ -2622,14 +2770,6 @@ private struct ImportTracksScreen: View {
             }
         }
         .toolbar(.hidden, for: .navigationBar)
-        .alert("Import limit", isPresented: $showImportLimitAlert) {
-            Button("Import first 15 tracks") {
-                performImport(Array(importTrackIDs.prefix(15)))
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Lane currently accepts up to 15 tracks in one import for this account. You can import the first 15 tracks now.")
-        }
     }
 
     private var importTopBar: some View {
@@ -2963,10 +3103,39 @@ private struct ImportTracksScreen: View {
                 )
             }
 
+            Button(action: saveAllOnDevice) {
+                HStack(spacing: 10) {
+                    if localSaving {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white)
+                    } else {
+                        Image(systemName: "iphone.and.arrow.forward")
+                    }
+
+                    Text(localSaving ? "Saving all tracks…" : "Save all \(importTrackIDs.count) on this iPhone")
+                        .font(.system(size: 15, weight: .bold))
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 52)
+                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(localSaving || loading || importTrackIDs.isEmpty)
+
             if !message.isEmpty {
                 Text(message)
                     .font(.system(size: 13))
-                    .foregroundStyle(message.hasPrefix("Imported") ? Color.green : lanePink)
+                    .foregroundStyle(
+                        message.hasPrefix("Imported") || message.hasPrefix("Saved")
+                            ? Color.green
+                            : lanePink
+                    )
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(14)
                     .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14))
@@ -2984,10 +3153,7 @@ private struct ImportTracksScreen: View {
     }
 
     private var importButtonTitle: String {
-        if !session.hasPremiumAccess, importTrackIDs.count > 15 {
-            return "Import first 15 tracks"
-        }
-        return "Import to Lane"
+        "Import all \(importTrackIDs.count) to Lane"
     }
 
     private func resetPreview() {
@@ -3070,11 +3236,31 @@ private struct ImportTracksScreen: View {
     }
 
     private func importPreviewTracks() {
-        if !session.hasPremiumAccess, importTrackIDs.count > 15 {
-            showImportLimitAlert = true
-            return
-        }
         performImport(importTrackIDs)
+    }
+
+    private func saveAllOnDevice() {
+        guard let preview else { return }
+        localSaving = true
+        message = ""
+
+        Task {
+            defer { localSaving = false }
+            let tracks = await session.tracksForLocalImport(preview)
+            let saved = session.saveLocalImport(
+                name: preview.playlistName ?? "Imported playlist",
+                tracks: tracks
+            )
+            let expected = Set(importTrackIDs.filter { !$0.isEmpty }).count
+
+            if saved >= expected, expected > 0 {
+                message = "Saved all \(saved) tracks on this iPhone. The playlist is now in Library."
+            } else if saved > 0 {
+                message = "Saved \(saved) of \(expected) tracks. Tap again to retry the missing pages."
+            } else {
+                message = "Lane could not load the track details for local saving. Try again."
+            }
+        }
     }
 
     private func performImport(_ ids: [String]) {
@@ -3109,7 +3295,7 @@ private struct ImportTracksScreen: View {
             return "Lane could not resolve the tracks in this playlist. Please try again."
         }
         if detail.localizedCaseInsensitiveContains("PREMIUM_REQUIRED") {
-            return "Lane refused the full playlist import. Try the first 15 tracks."
+            return "Lane refused the server import. You can still save the complete playlist on this iPhone."
         }
         return "Import failed. Check the source link and try again."
     }
