@@ -1,5 +1,7 @@
 import Foundation
 
+// MARK: - Exact / recovered API models
+
 struct LaneTokenResponse: Decodable {
     let token: String
     let isFirstAuth: Bool?
@@ -11,6 +13,129 @@ struct TrackStreamingResult: Decodable {
     let playbackToken: String?
     let ttl: Int64?
 }
+
+struct TrackStatsDTO: Decodable {
+    let likesCount: Int64
+    let commentsCount: Int64
+}
+
+struct LaneCombinedSearchResponse: Decodable {
+    let results: [LaneSearchResultItem]
+    let searchToken: String?
+}
+
+struct LaneSearchResultItem: Decodable, Identifiable {
+    let type: String?
+    let track: TrackData?
+    let artist: LaneArtist?
+    let platform: String?
+    let album: LaneAlbum?
+    let playlist: LanePlaylist?
+
+    var id: String {
+        if let track { return "track|\(track.songId ?? track.title ?? UUID().uuidString)" }
+        if let artist { return "artist|\(artist.id ?? artist.name ?? UUID().uuidString)" }
+        if let album { return "album|\(album.id ?? album.name ?? UUID().uuidString)" }
+        if let playlist { return "playlist|\(playlist.playlistId ?? playlist.playlistName ?? UUID().uuidString)" }
+        return UUID().uuidString
+    }
+}
+
+struct TrackData: Decodable, Hashable {
+    let songId: String?
+    let platform: String?
+    let title: String?
+    let artistsDisplayedName: String?
+    let coverUrl: String?
+    let duration: String?
+    let genre: String?
+    let artistAvatars: [String]?
+}
+
+struct LaneArtist: Decodable, Hashable {
+    let name: String?
+    let id: String?
+    let platform: String?
+    let description: String?
+    let verified: Bool?
+    let avatarUrl: String?
+    let headerUrl: String?
+    let biography: String?
+    let topTracks: [String]?
+    let recentTracks: [String]?
+    let albums: [LaneAlbum]?
+}
+
+struct LaneAlbum: Decodable, Hashable {
+    let name: String?
+    let id: String?
+    let platform: String?
+    let type: String?
+    let coverUrl: String?
+    let year: String?
+    let artists: [String]?
+    let artistsDisplayedName: String?
+    let tracks: [String]?
+}
+
+struct LanePlaylist: Decodable, Hashable {
+    let playlistId: String?
+    let playlistImageUrl: String?
+    let playlistName: String?
+    let playlistDescription: String?
+    let playlistTracksIds: [String]?
+    let playlistTracks: [TrackData]?
+    let creatorLid: String?
+    let platform: String?
+    let tracksCount: Int?
+    let visibility: String?
+    let collaboratorIds: [String]?
+}
+
+struct UserInfoDTO: Decodable, Hashable {
+    let displayedName: String?
+    let premiumExpiresIn: Int64?
+    let userName: String?
+    let platform: String?
+    let avatarUrl: String?
+    let headerUrl: String?
+    let laneId: String?
+    let statusTrack: TrackData?
+    let statusTrackId: String?
+    let publicPlaylists: [LanePlaylist]?
+    let followersCount: Int64?
+    let followingCount: Int64?
+    let isFollowing: Bool?
+    let equippedBadgeId: String?
+    let statusText: String?
+}
+
+struct PaginatedResult<T: Decodable>: Decodable {
+    let items: [T]
+    let totalItems: Int64?
+    let page: Int?
+    let pageSize: Int?
+    let totalPages: Int?
+}
+
+struct LaneTrackCommentDTO: Decodable, Identifiable {
+    let id: String
+    let userName: String?
+    let userAvatar: String?
+    let userId: String?
+    let text: String?
+    let likesCount: Int64?
+    let repliesCount: Int64?
+    let isLiked: Bool?
+    let attachment: String?
+    let timestamp: Int64?
+    let parentId: String?
+    let userEquippedBadgeImageUrl: String?
+    let replyToUserId: String?
+    let replyToUserName: String?
+}
+
+// MARK: - iOS UI models
 
 struct TrackCandidate: Identifiable, Hashable, Codable {
     let id: String
@@ -34,7 +159,7 @@ struct TrackCandidate: Identifiable, Hashable, Codable {
         duration: String? = nil,
         genre: String? = nil
     ) {
-        self.id = id ?? trackID ?? refID ?? "(title)|(subtitle)"
+        self.id = id ?? trackID ?? refID ?? "\(title)|\(subtitle)"
         self.title = title
         self.subtitle = subtitle
         self.trackID = trackID
@@ -43,6 +168,18 @@ struct TrackCandidate: Identifiable, Hashable, Codable {
         self.coverURL = coverURL
         self.duration = duration
         self.genre = genre
+    }
+
+    init(_ track: TrackData) {
+        self.init(
+            title: track.title ?? "Unknown track",
+            subtitle: track.artistsDisplayedName ?? "Unknown artist",
+            trackID: track.songId,
+            platform: track.platform ?? "",
+            coverURL: track.coverUrl,
+            duration: track.duration,
+            genre: track.genre
+        )
     }
 }
 
@@ -53,25 +190,21 @@ struct LaneCardItem: Identifiable, Hashable {
     let imageURL: String?
     let kind: String
     let backendID: String?
+    let platform: String?
 }
 
-struct TrackStatsDTO: Decodable {
-    let likesCount: Int64
-    let commentsCount: Int64
+struct LocalPlaylist: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var name: String
+    var trackKeys: [String] = []
 }
 
-struct PlaylistDraft {
-    var name = ""
-    var description = ""
-    var imageURL = ""
-}
-
-enum LaneSection: String, CaseIterable, Identifiable {
+enum SearchFilter: String, CaseIterable, Identifiable {
+    case all = "All"
     case tracks = "Tracks"
-    case playlists = "Playlists"
-    case albums = "Albums"
     case artists = "Artists"
-    case users = "Users"
+    case albums = "Albums"
+    case playlists = "Playlists"
 
     var id: String { rawValue }
 }
@@ -83,7 +216,15 @@ enum AudioQualityChoice: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    var label: String {
+    var title: String {
+        switch self {
+        case .basic: return "Basic"
+        case .high: return "High"
+        case .ultra: return "Ultra"
+        }
+    }
+
+    var detail: String {
         switch self {
         case .basic: return "128 kbps"
         case .high: return "192 kbps"
@@ -91,6 +232,8 @@ enum AudioQualityChoice: String, CaseIterable, Identifiable {
         }
     }
 }
+
+// MARK: - Flexible JSON adapters
 
 enum JSONProbe {
     static func tracks(_ value: Any?) -> [TrackCandidate] {
@@ -121,11 +264,6 @@ enum JSONProbe {
             }
         }
         return nil
-    }
-
-    static func string(_ value: Any?, keys: [String]) -> String? {
-        guard let dict = value as? [String: Any] else { return nil }
-        return firstString(dict, keys)
     }
 
     static func pretty(_ value: Any?) -> String {
@@ -163,6 +301,7 @@ enum JSONProbe {
                     )
                 )
             }
+
             for child in dict.values {
                 walkTracks(child, &output)
             }
@@ -176,13 +315,16 @@ enum JSONProbe {
     private static func walkCards(_ value: Any?, preferredKind: String, _ output: inout [LaneCardItem]) {
         if let dict = value as? [String: Any] {
             let backendID = firstString(dict, ["playlistId", "albumId", "artistId", "laneId", "id", "userId"])
-            let title = firstString(dict, ["playlistName", "albumName", "artistName", "displayName", "name", "title", "username"])
-            let subtitle = firstString(dict, ["playlistDescription", "description", "artistsDisplayedName", "status", "username"]) ?? ""
+            let title = firstString(dict, ["playlistName", "albumName", "artistName", "displayedName", "displayName", "name", "title", "username", "userName"])
+            let subtitle = firstString(dict, ["playlistDescription", "description", "artistsDisplayedName", "statusText", "status", "username", "userName"]) ?? ""
             let image = http(firstString(dict, ["playlistImageUrl", "coverUrl", "cover_url", "imageUrl", "avatarUrl", "photoUrl", "image"]))
+            let platform = firstString(dict, ["platform", "source"])
+
             if let title, backendID != nil || image != nil {
-                let id = backendID ?? "(preferredKind)|(title)|(subtitle)"
-                output.append(.init(id: id, title: title, subtitle: subtitle, imageURL: image, kind: preferredKind, backendID: backendID))
+                let id = backendID ?? "\(preferredKind)|\(title)|\(subtitle)"
+                output.append(.init(id: id, title: title, subtitle: subtitle, imageURL: image, kind: preferredKind, backendID: backendID, platform: platform))
             }
+
             for child in dict.values {
                 walkCards(child, preferredKind: preferredKind, &output)
             }
