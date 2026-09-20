@@ -208,10 +208,12 @@ actor LaneAPI {
         token: String?,
         query: [URLQueryItem],
         headers: [String: String],
-        json: Any?
+        json: Any?,
+        baseURL: URL? = nil
     ) throws -> URLRequest {
         let clean = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard var components = URLComponents(url: base.appendingPathComponent(clean), resolvingAgainstBaseURL: false) else {
+        let targetBase = baseURL ?? base
+        guard var components = URLComponents(url: targetBase.appendingPathComponent(clean), resolvingAgainstBaseURL: false) else {
             throw LaneAPIError.invalidURL
         }
 
@@ -271,17 +273,82 @@ actor LaneAPI {
         headers: [String: String] = [:],
         json: Any? = nil
     ) async throws -> APIResult {
-        let unsigned = try build(path: path, method: method, token: token, query: query, headers: headers, json: json)
-        let signer = signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
-        let request = try signer.sign(unsigned, body: unsigned.httpBody)
-        let (rawData, response) = try await URLSession.shared.data(for: request)
+        let upperMethod = method.uppercased()
 
-        guard let http = response as? HTTPURLResponse else {
-            throw LaneAPIError.nonHTTP
+        var candidates: [URL] = [base]
+        if signingConfiguration.mode == .official, upperMethod == "GET" {
+            for candidate in [
+                URL(string: "https://laneapi.com")!,
+                URL(string: "https://ru.laneapi.com")!
+            ] {
+                if !candidates.contains(where: { $0.host == candidate.host }) {
+                    candidates.append(candidate)
+                }
+            }
         }
 
-        let data = try decodeOfficialTransport(rawData, response: http)
-        return APIResult(status: http.statusCode, headers: http.allHeaderFields, data: data)
+        var lastError: Error?
+        var lastResult: APIResult?
+
+        for (index, targetBase) in candidates.enumerated() {
+            do {
+                let unsigned = try build(
+                    path: path,
+                    method: method,
+                    token: token,
+                    query: query,
+                    headers: headers,
+                    json: json,
+                    baseURL: targetBase
+                )
+
+                let signer = signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
+                let signed = try signer.sign(unsigned, body: unsigned.httpBody)
+
+                var request = signed
+                request.timeoutInterval = upperMethod == "GET" ? 12 : 30
+
+                let (rawData, response) = try await URLSession.shared.data(for: request)
+
+                guard let http = response as? HTTPURLResponse else {
+                    throw LaneAPIError.nonHTTP
+                }
+
+                let data = try decodeOfficialTransport(rawData, response: http)
+                let result = APIResult(
+                    status: http.statusCode,
+                    headers: http.allHeaderFields,
+                    data: data
+                )
+                lastResult = result
+
+                let retryableStatuses: Set<Int> = [
+                    408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524
+                ]
+
+                if retryableStatuses.contains(http.statusCode),
+                   index + 1 < candidates.count {
+                    continue
+                }
+
+                if (200..<400).contains(http.statusCode) {
+                    base = targetBase
+                }
+
+                return result
+            } catch {
+                lastError = error
+                if index + 1 < candidates.count {
+                    continue
+                }
+            }
+        }
+
+        if let lastResult {
+            return lastResult
+        }
+
+        throw lastError ?? LaneAPIError.emptyResponse
     }
 
     private func decoded<T: Decodable>(
