@@ -266,7 +266,7 @@ private struct SearchScreen: View {
                         Image(systemName: "magnifyingglass")
                             .foregroundStyle(.secondary)
 
-                        TextField("Tracks, artists, albums…", text: $query)
+                        TextField("Search for people, tracks, and albums", text: $query)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .submitLabel(.search)
@@ -423,7 +423,7 @@ private struct LibraryScreen: View {
                             } label: {
                                 LibraryFeatureCard(
                                     icon: "heart.fill",
-                                    title: "Liked tracks",
+                                    title: "Favorite Tracks",
                                     subtitle: "\(session.favorites.count) saved",
                                     gradient: [lanePink, .red]
                                 )
@@ -1363,7 +1363,7 @@ private struct EditProfileSheet: View {
         NavigationStack {
             Form {
                 Section("Profile") {
-                    TextField("Name", text: $name)
+                    TextField("Playlist name", text: $name)
                     TextField("Username", text: $username)
                         .textInputAutocapitalization(.never)
                     TextField("About me", text: $statusText, axis: .vertical)
@@ -1586,7 +1586,7 @@ private struct FavoriteTracksScreen: View {
     var body: some View {
         List {
             if tracks.isEmpty {
-                EmptyLaneView(icon: "heart", title: "Liked tracks", subtitle: "Tap the heart on a track to save it.")
+                EmptyLaneView(icon: "heart", title: "Favorite Tracks", subtitle: "Tap the heart on a track to save it.")
                     .listRowBackground(Color.clear)
             } else {
                 ForEach(tracks) { track in
@@ -1650,11 +1650,11 @@ private struct CreatePlaylistSheet: View {
                 }
 
                 Section("Playlist") {
-                    TextField("Name", text: $name)
-                    TextField("Description", text: $description, axis: .vertical)
+                    TextField("Playlist name", text: $name)
+                    TextField("Playlist description", text: $description, axis: .vertical)
                 }
             }
-            .navigationTitle("Create playlist")
+            .navigationTitle("Create Playlist")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
@@ -1686,10 +1686,10 @@ private struct TelegramImportScreen: View {
                 .frame(height: 99)
                 .clipShape(RoundedRectangle(cornerRadius: 20))
 
-            Text("Import from Telegram")
+            Text("Import your tracks")
                 .font(.title.bold())
 
-            Text("Lane can prepare an import session using the same backend as the Android app.")
+            Text("Transfer your music from other platforms to Lane")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 28)
@@ -1707,7 +1707,7 @@ private struct TelegramImportScreen: View {
                     loading = false
                 }
             } label: {
-                Label(loading ? "Starting…" : "Start Telegram import", systemImage: "square.and.arrow.down")
+                Label(loading ? "Starting…" : "Transfer via Telegram", systemImage: "square.and.arrow.down")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
