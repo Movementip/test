@@ -1318,3 +1318,454 @@ private struct APKQueueSheet: View {
         .preferredColorScheme(.dark)
     }
 }
+
+
+// MARK: - Android Lane home feed parity
+
+struct APKHomeFeedView: View {
+    @EnvironmentObject private var session: LaneSession
+    let sections: [LaneHomeSection]
+    @Binding var showPlayer: Bool
+
+    var body: some View {
+        LazyVStack(alignment: .leading, spacing: 24) {
+            ForEach(sections) { section in
+                APKHomeSectionView(section: section, showPlayer: $showPlayer)
+            }
+        }
+    }
+}
+
+private struct APKHomeSectionView: View {
+    @EnvironmentObject private var session: LaneSession
+    let section: LaneHomeSection
+    @Binding var showPlayer: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if section.title != nil || section.subtitle != nil {
+                VStack(alignment: .leading, spacing: 3) {
+                    if let title = section.title, !title.isEmpty {
+                        Text(displayTitle(title))
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+
+                    if let subtitle = section.subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.white.opacity(0.56))
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+
+            switch section.renderType {
+            case .horizontalList:
+                horizontalContent
+
+            case .grid2x2:
+                gridContent
+
+            case .fullWidth:
+                fullWidthContent
+
+            case .verticalList:
+                verticalContent
+            }
+        }
+    }
+
+    private var horizontalContent: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 12) {
+                ForEach(section.content) { item in
+                    switch item.kind {
+                    case .playlist:
+                        if let playlist = item.playlist {
+                            NavigationLink {
+                                PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
+                            } label: {
+                                APKHomePlaylistCard(playlist: playlist)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                    case .chart:
+                        if let playlist = item.playlist {
+                            APKHomeChartCard(playlist: playlist, showPlayer: $showPlayer)
+                                .frame(width: 330)
+                        }
+
+                    case .banner:
+                        if let banner = item.banner {
+                            APKHomeBannerCard(banner: banner)
+                                .frame(width: 320)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+        }
+    }
+
+    private var gridContent: some View {
+        LazyVGrid(
+            columns: [
+                GridItem(.flexible(), spacing: 10),
+                GridItem(.flexible(), spacing: 10)
+            ],
+            spacing: 10
+        ) {
+            ForEach(section.content) { item in
+                switch item.kind {
+                case .playlist:
+                    if let playlist = item.playlist {
+                        NavigationLink {
+                            PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
+                        } label: {
+                            APKHomePlaylistCard(playlist: playlist, compact: true)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                case .chart:
+                    if let playlist = item.playlist {
+                        APKHomeChartCard(playlist: playlist, showPlayer: $showPlayer, compact: true)
+                    }
+
+                case .banner:
+                    if let banner = item.banner {
+                        APKHomeBannerCard(banner: banner, compact: true)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var fullWidthContent: some View {
+        VStack(spacing: 12) {
+            ForEach(section.content) { item in
+                switch item.kind {
+                case .playlist:
+                    if let playlist = item.playlist {
+                        NavigationLink {
+                            PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
+                        } label: {
+                            APKHomeFullWidthPlaylistCard(playlist: playlist)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                case .chart:
+                    if let playlist = item.playlist {
+                        APKHomeChartCard(playlist: playlist, showPlayer: $showPlayer)
+                    }
+
+                case .banner:
+                    if let banner = item.banner {
+                        APKHomeBannerCard(banner: banner)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var verticalContent: some View {
+        VStack(spacing: 8) {
+            ForEach(section.content) { item in
+                switch item.kind {
+                case .playlist:
+                    if let playlist = item.playlist {
+                        NavigationLink {
+                            PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
+                        } label: {
+                            APKHomePlaylistRow(playlist: playlist)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                case .chart:
+                    if let playlist = item.playlist {
+                        APKHomeChartCard(playlist: playlist, showPlayer: $showPlayer)
+                    }
+
+                case .banner:
+                    if let banner = item.banner {
+                        APKHomeBannerCard(banner: banner)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private func displayTitle(_ raw: String) -> String {
+        guard section.type == .chart else { return raw }
+
+        let pieces = raw.split(separator: " ")
+        guard let last = pieces.last,
+              last.count == 2,
+              last.allSatisfy({ $0.isLetter }) else {
+            return raw
+        }
+
+        let code = String(last).uppercased()
+        let base = pieces.dropLast().joined(separator: " ")
+        let flag = code.unicodeScalars.compactMap { scalar -> UnicodeScalar? in
+            UnicodeScalar(127397 + Int(scalar.value))
+        }.map(String.init).joined()
+
+        return base.isEmpty ? flag : "\(base) \(flag)"
+    }
+}
+
+private struct APKHomePlaylistCard: View {
+    let playlist: LanePlaylist
+    var compact = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            APKRemoteImage(url: playlist.playlistImageUrl, cornerRadius: 10)
+                .aspectRatio(1, contentMode: .fill)
+                .frame(width: compact ? 150 : 158, height: compact ? 150 : 158)
+                .clipped()
+
+            Text(playlist.playlistName ?? "Playlist")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+
+            let count = playlist.tracksCount ?? playlist.playlistTracks?.count ?? 0
+            Text(count == 1 ? "1 track" : "\(count) tracks")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.white.opacity(0.55))
+                .lineLimit(1)
+        }
+        .frame(width: compact ? 150 : 158, alignment: .leading)
+    }
+}
+
+private struct APKHomePlaylistRow: View {
+    let playlist: LanePlaylist
+
+    var body: some View {
+        HStack(spacing: 12) {
+            APKRemoteImage(url: playlist.playlistImageUrl, cornerRadius: 8)
+                .frame(width: 58, height: 58)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(playlist.playlistName ?? "Playlist")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+
+                let count = playlist.tracksCount ?? playlist.playlistTracks?.count ?? 0
+                Text(count == 1 ? "1 track" : "\(count) tracks")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.white.opacity(0.55))
+            }
+
+            Spacer()
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.35))
+        }
+        .padding(8)
+        .background(apkSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct APKHomeFullWidthPlaylistCard: View {
+    let playlist: LanePlaylist
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            APKRemoteImage(url: playlist.playlistImageUrl, cornerRadius: 12)
+                .frame(maxWidth: .infinity)
+                .frame(height: 180)
+                .clipped()
+
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.84)],
+                startPoint: .center,
+                endPoint: .bottom
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(playlist.playlistName ?? "Playlist")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(.white)
+
+                if let description = playlist.playlistDescription, !description.isEmpty {
+                    Text(description)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.white.opacity(0.72))
+                        .lineLimit(2)
+                }
+            }
+            .padding(14)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 180)
+    }
+}
+
+private struct APKHomeChartCard: View {
+    @EnvironmentObject private var session: LaneSession
+    let playlist: LanePlaylist
+    @Binding var showPlayer: Bool
+    var compact = false
+
+    private var tracks: [TrackCandidate] {
+        let context = playlist.playlistId
+        return (playlist.playlistTracks ?? []).map { TrackCandidate($0, refID: context) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                APKRemoteImage(url: playlist.playlistImageUrl, cornerRadius: 8)
+                    .frame(width: compact ? 48 : 58, height: compact ? 48 : 58)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(playlist.playlistName ?? "Chart")
+                        .font(.system(size: compact ? 14 : 16, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+
+                    let count = playlist.tracksCount ?? playlist.playlistTracks?.count ?? 0
+                    Text("\(count) tracks")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.white.opacity(0.55))
+                }
+
+                Spacer()
+            }
+
+            if tracks.isEmpty {
+                Text("Open chart")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(apkPink)
+            } else {
+                ForEach(Array(tracks.prefix(compact ? 2 : 4).enumerated()), id: \.element.id) { index, track in
+                    Button {
+                        session.queue = tracks
+                        session.currentIndex = index
+                        session.requestStream(for: track)
+                        showPlayer = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            Text("\(index + 1)")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(Color.white.opacity(0.45))
+                                .frame(width: 18)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(track.title)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+
+                                Text(track.subtitle)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Color.white.opacity(0.50))
+                                    .lineLimit(1)
+                            }
+
+                            Spacer()
+
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.white.opacity(0.70))
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(12)
+        .background(apkSurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        }
+    }
+}
+
+private struct APKHomeBannerCard: View {
+    @Environment(\.openURL) private var openURL
+    let banner: LaneHomeBanner
+    var compact = false
+
+    var body: some View {
+        Button {
+            if let url = URL(string: banner.actionURL) {
+                openURL(url)
+            }
+        } label: {
+            ZStack(alignment: .bottomLeading) {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(color(from: banner.backgroundColor))
+
+                APKRemoteImage(url: banner.imageURL, cornerRadius: 14)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: compact ? 145 : 180)
+                    .clipped()
+                    .opacity(0.86)
+
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.82)],
+                    startPoint: .center,
+                    endPoint: .bottom
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(banner.title)
+                        .font(.system(size: compact ? 16 : 20, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+
+                    Text(banner.description)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.white.opacity(0.72))
+                        .lineLimit(2)
+
+                    if let button = banner.buttonText, !button.isEmpty {
+                        Text(button)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 12)
+                            .frame(height: 30)
+                            .background(Color.white, in: Capsule())
+                            .padding(.top, 4)
+                    }
+                }
+                .padding(14)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: compact ? 145 : 180)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func color(from value: String) -> Color {
+        let clean = value
+            .trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        guard clean.count == 6, let rgb = UInt64(clean, radix: 16) else {
+            return apkSurface
+        }
+
+        return Color(
+            red: Double((rgb >> 16) & 0xFF) / 255.0,
+            green: Double((rgb >> 8) & 0xFF) / 255.0,
+            blue: Double(rgb & 0xFF) / 255.0
+        )
+    }
+}
