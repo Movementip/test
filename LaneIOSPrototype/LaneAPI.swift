@@ -65,6 +65,14 @@ actor LaneAPI {
         signingConfiguration = value
     }
 
+    func backendConfig() async throws -> LaneBackendConfig {
+        let result = try await request(path: "/config")
+        guard (200..<300).contains(result.status) else {
+            throw LaneAPIError.http(result.status, result.pretty)
+        }
+        return try JSONDecoder().decode(LaneBackendConfig.self, from: result.data)
+    }
+
     private func build(
         path: String,
         method: String,
@@ -182,13 +190,18 @@ actor LaneAPI {
         }
 
         var candidates: [URL] = []
-        for candidate in [
-            base,
-            URL(string: "https://laneapi.com")!,
-            URL(string: "https://ru.laneapi.com")!
-        ] {
-            if !candidates.contains(where: { $0.host == candidate.host }) {
-                candidates.append(candidate)
+
+        if signingConfiguration.mode == .custom {
+            candidates = [base]
+        } else {
+            for candidate in [
+                base,
+                URL(string: "https://laneapi.com")!,
+                URL(string: "https://ru.laneapi.com")!
+            ] {
+                if !candidates.contains(where: { $0.host == candidate.host }) {
+                    candidates.append(candidate)
+                }
             }
         }
 
@@ -274,6 +287,11 @@ actor LaneAPI {
                             }
                         }
                     }
+                } catch let error as LaneAPIError {
+                    if case .protectedClientSignatureRequired = error {
+                        throw error
+                    }
+                    lastBody = error.localizedDescription
                 } catch {
                     lastBody = error.localizedDescription
                 }
