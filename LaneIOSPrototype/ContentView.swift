@@ -627,7 +627,7 @@ private struct LibraryScreen: View {
                         .padding(.bottom, 14)
 
                         NavigationLink {
-                            TelegramImportScreen()
+                            ImportTracksScreen()
                         } label: {
                             APKImportTracksCard()
                                 .padding(.horizontal, 10)
@@ -1800,7 +1800,7 @@ private struct ProfileScreen: View {
                             Divider().padding(.leading, 58)
 
                             NavigationLink {
-                                TelegramImportScreen()
+                                ImportTracksScreen()
                             } label: {
                                 profileMenuRow(
                                     icon: "square.and.arrow.down",
@@ -2494,65 +2494,359 @@ private struct CreatePlaylistSheet: View {
     }
 }
 
-private struct TelegramImportScreen: View {
+private enum MusicImportPlatform: String, CaseIterable, Identifiable {
+    case spotify = "Spotify"
+    case soundCloud = "SoundCloud"
+    case telegram = "Telegram"
+    case yandex = "Yandex"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .spotify: return "music.note"
+        case .soundCloud: return "cloud.fill"
+        case .telegram: return "paperplane.fill"
+        case .yandex: return "waveform"
+        }
+    }
+}
+
+private enum MusicImportKind: String, CaseIterable, Identifiable {
+    case playlist = "Playlist"
+    case liked = "Liked tracks"
+
+    var id: String { rawValue }
+}
+
+private struct ImportTracksScreen: View {
     @EnvironmentObject private var session: LaneSession
     @Environment(\.openURL) private var openURL
-    @State private var response = ""
+    @State private var platform: MusicImportPlatform = .spotify
+    @State private var importKind: MusicImportKind = .playlist
+    @State private var sourceValue = ""
+    @State private var spotifyBearerToken = ""
+    @State private var spotifyClientToken = ""
+    @State private var telegramCode = ""
+    @State private var preview: LanePlaylist?
+    @State private var previewTracks: [TrackCandidate] = []
+    @State private var targetPlaylistID = ""
+    @State private var message = ""
     @State private var loading = false
 
     var body: some View {
-        VStack(spacing: 20) {
-            Spacer()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                BundlePNG(name: "import_tracks_background_card", contentMode: .fill)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 112)
+                    .clipShape(RoundedRectangle(cornerRadius: 20))
 
-            BundlePNG(name: "import_tracks_background_card", contentMode: .fill)
-                .frame(maxWidth: 330)
-                .frame(height: 99)
-                .clipShape(RoundedRectangle(cornerRadius: 20))
-
-            Text("Import your tracks")
-                .font(.title.bold())
-
-            Text("Transfer your music from other platforms to Lane")
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
-
-            Button {
-                loading = true
-                Task {
-                    await LaneAPI.shared.setBase(session.baseURL)
-                    do {
-                        let result = try await LaneAPI.shared.telegramImportStart(token: session.token)
-                        response = result.pretty
-                    } catch {
-                        response = error.localizedDescription
-                    }
-                    loading = false
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Import your tracks")
+                        .font(.title.bold())
+                    Text("Transfer music from Spotify, SoundCloud, Telegram or Yandex to a Lane playlist.")
+                        .foregroundStyle(.secondary)
                 }
+
+                sourceCard
+
+                if let preview {
+                    importPreview(preview)
+                }
+
+                if !message.isEmpty {
+                    Text(message)
+                        .font(.subheadline)
+                        .foregroundStyle(message.hasPrefix("Imported") ? Color.green : lanePink)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14))
+                        .textSelection(.enabled)
+                }
+            }
+            .padding(16)
+            .padding(.bottom, 28)
+        }
+        .onAppear {
+            if targetPlaylistID.isEmpty {
+                targetPlaylistID = session.serverPlaylists.first?.playlistId ?? ""
+            }
+        }
+        .onChange(of: platform) { _ in
+            resetPreview()
+            importKind = .playlist
+        }
+        .onChange(of: importKind) { _ in resetPreview() }
+        .background(laneBackground)
+        .navigationTitle("Import")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var sourceCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Source")
+                .font(.headline)
+
+            Picker("Platform", selection: $platform) {
+                ForEach(MusicImportPlatform.allCases) { item in
+                    Label(item.rawValue, systemImage: item.icon).tag(item)
+                }
+            }
+            .pickerStyle(.menu)
+            .tint(lanePink)
+
+            if platform == .telegram {
+                telegramImportControls
+            } else {
+                Picker("Import", selection: $importKind) {
+                    ForEach(MusicImportKind.allCases) { item in
+                        Text(item.rawValue).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if platform == .spotify, importKind == .liked {
+                    SecureField("Spotify bearer token", text: $spotifyBearerToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Spotify client token", text: $spotifyClientToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Text("These are the same two session tokens used by the Android importer.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    TextField(sourcePlaceholder, text: $sourceValue)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+
+                Button {
+                    requestPreview()
+                } label: {
+                    Label(loading ? "Loading preview…" : "Preview import", systemImage: "magnifyingglass")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(lanePink)
+                .disabled(!canRequestPreview || loading)
+            }
+        }
+        .padding(16)
+        .background(laneCard, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var sourcePlaceholder: String {
+        switch (platform, importKind) {
+        case (.spotify, _): return "Spotify playlist link or ID"
+        case (.soundCloud, .playlist): return "SoundCloud playlist link or ID"
+        case (.soundCloud, .liked): return "SoundCloud profile link"
+        case (.yandex, .playlist): return "Yandex playlist link or ID"
+        case (.yandex, .liked): return "Yandex liked playlist link or ID"
+        case (.telegram, _): return ""
+        }
+    }
+
+    private var canRequestPreview: Bool {
+        guard !session.isGuest else { return false }
+        if platform == .spotify, importKind == .liked {
+            return !spotifyBearerToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                !spotifyClientToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return !sourceValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    @ViewBuilder
+    private var telegramImportControls: some View {
+        if telegramCode.isEmpty {
+            Button {
+                startTelegramImport()
             } label: {
-                Label(loading ? "Starting…" : "Transfer via Telegram", systemImage: "square.and.arrow.down")
+                Label(loading ? "Requesting code…" : "Get Telegram import code", systemImage: "paperplane.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .tint(lanePink)
             .disabled(session.isGuest || loading)
-            .padding(.horizontal, 24)
+        } else {
+            let command = "/import \(telegramCode)"
 
-            if !response.isEmpty {
-                ScrollView {
-                    Text(response)
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            Text("Send this command to the Lane bot:")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Text(command)
+                    .font(.body.monospaced())
+                    .textSelection(.enabled)
+                Spacer()
+                Button {
+                    UIPasteboard.general.string = command
+                    message = "Command copied."
+                } label: {
+                    Image(systemName: "doc.on.doc")
                 }
-                .frame(maxHeight: 180)
-                .padding()
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+
+            HStack {
+                Button("Open bot") {
+                    if let url = URL(string: "https://t.me/lane_music_bot") {
+                        openURL(url)
+                    }
+                }
+                .buttonStyle(.bordered)
+
+                Button(loading ? "Checking…" : "I sent the command") {
+                    finishTelegramImport()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(lanePink)
+                .disabled(loading)
+            }
+        }
+    }
+
+    private func importPreview(_ playlist: LanePlaylist) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                ArtworkView(url: playlist.playlistImageUrl, size: 64, radius: 12)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(playlist.playlistName ?? "Import preview")
+                        .font(.headline)
+                    Text("\(importTrackIDs.count) tracks")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
             }
 
-            Spacer()
+            ForEach(Array(previewTracks.prefix(8))) { track in
+                HStack(spacing: 10) {
+                    ArtworkView(url: track.coverURL, size: 42, radius: 8)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(track.title).lineLimit(1)
+                        Text(track.subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            if session.serverPlaylists.isEmpty {
+                Text("Create a Lane playlist first, then return here to import the tracks.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                Picker("Add to", selection: $targetPlaylistID) {
+                    ForEach(session.serverPlaylists, id: \.playlistId) { target in
+                        Text(target.playlistName ?? "Playlist")
+                            .tag(target.playlistId ?? "")
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Button {
+                    importPreviewTracks()
+                } label: {
+                    Label(loading ? "Importing…" : "Import to Lane", systemImage: "square.and.arrow.down")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(lanePink)
+                .disabled(targetPlaylistID.isEmpty || importTrackIDs.isEmpty || loading)
+            }
         }
-        .background(laneBackground)
-        .navigationTitle("Import")
+        .padding(16)
+        .background(laneCard, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var importTrackIDs: [String] {
+        if let ids = preview?.playlistTracksIds, !ids.isEmpty { return ids }
+        if let tracks = preview?.playlistTracks { return tracks.compactMap(\.songId) }
+        return previewTracks.compactMap(\.trackID)
+    }
+
+    private func resetPreview() {
+        preview = nil
+        previewTracks = []
+        message = ""
+    }
+
+    private func acceptPreview(_ value: LanePlaylist) async {
+        preview = value
+        previewTracks = await session.tracksForImportPreview(value)
+        if targetPlaylistID.isEmpty {
+            targetPlaylistID = session.serverPlaylists.first?.playlistId ?? ""
+        }
+    }
+
+    private func requestPreview() {
+        loading = true
+        message = ""
+        let input = sourceValue.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        Task {
+            defer { loading = false }
+            do {
+                let result = try await session.previewMusicImport(
+                    platform: platform.rawValue,
+                    spotifyBearerToken: platform == .spotify && importKind == .liked ? spotifyBearerToken : nil,
+                    spotifyClientToken: platform == .spotify && importKind == .liked ? spotifyClientToken : nil,
+                    spotifyPlaylistID: platform == .spotify && importKind == .playlist ? input : nil,
+                    soundCloudPlaylistID: platform == .soundCloud && importKind == .playlist ? input : nil,
+                    yandexPlaylistID: platform == .yandex ? input : nil,
+                    soundCloudProfileURL: platform == .soundCloud && importKind == .liked ? input : nil
+                )
+                await acceptPreview(result)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    private func startTelegramImport() {
+        loading = true
+        message = ""
+        Task {
+            defer { loading = false }
+            do {
+                telegramCode = try await session.beginTelegramMusicImport()
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    private func finishTelegramImport() {
+        loading = true
+        message = ""
+        Task {
+            defer { loading = false }
+            do {
+                let result = try await session.finishTelegramMusicImport()
+                await acceptPreview(result)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    private func importPreviewTracks() {
+        let ids = importTrackIDs
+        loading = true
+        message = ""
+        Task {
+            defer { loading = false }
+            do {
+                try await session.importTracks(ids, into: targetPlaylistID)
+                message = "Imported \(ids.count) tracks to Lane."
+            } catch {
+                message = error.localizedDescription
+            }
+        }
     }
 }
 

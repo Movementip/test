@@ -15,6 +15,10 @@ struct LaneBackendConfig: Decodable {
     let musicProvider: String?
 }
 
+struct TelegramImportCode: Decodable {
+    let code: String
+}
+
 struct TrackStreamingResult: Decodable {
     let url: String
     let trackId: String?

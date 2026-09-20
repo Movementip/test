@@ -188,6 +188,8 @@ final class LaneSession: ObservableObject {
     private var playbackRequestID = UUID()
     private var streamResolveTask: Task<Void, Never>?
     private var didConfigureAPIBase = false
+    private var didPrepareRegionalHost = false
+    private var configuredBackendMode: LaneBackendMode?
 
     var isGuest: Bool {
         token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -211,7 +213,13 @@ final class LaneSession: ObservableObject {
         } else {
             KeychainStore.save(token, account: "bearer")
         }
-        UserDefaults.standard.set(baseURL, forKey: "lane.base")
+        // In official mode LaneAPI owns this value after probing/failover.
+        // Do not replace a known-working regional host with stale UI state.
+        if backendMode == .custom || !didPrepareRegionalHost {
+            UserDefaults.standard.set(baseURL, forKey: "lane.base")
+        } else if let resolved = UserDefaults.standard.string(forKey: "lane.base") {
+            baseURL = resolved
+        }
         UserDefaults.standard.set(streamQuality, forKey: "lane.quality")
         UserDefaults.standard.set(backendMode.rawValue, forKey: "lane.backendMode")
         UserDefaults.standard.set(apiKeyHeader, forKey: "lane.apiKeyHeader")
@@ -299,19 +307,30 @@ final class LaneSession: ObservableObject {
 
     func refreshAfterLogin() async {
         await configureAPI()
-        await loadAccount()
-        await loadHome()
-        await loadLibrary()
-        await loadFriends()
+        async let accountLoad: Void = loadAccount()
+        async let homeLoad: Void = loadHome()
+        async let libraryLoad: Void = loadLibrary()
+        async let friendsLoad: Void = loadFriends()
+        _ = await (accountLoad, homeLoad, libraryLoad, friendsLoad)
+
+        if backendMode == .official {
+            baseURL = await LaneAPI.shared.currentBaseURL()
+        }
     }
 
     private func configureAPI() async {
         // Set the configured base once. After that LaneAPI is allowed to keep
         // whichever regional host actually works; resetting it before every
         // request caused repeated timeouts on networks where one host is poor.
-        if !didConfigureAPIBase || backendMode == .custom {
+        let modeChanged = configuredBackendMode != backendMode
+        if !didConfigureAPIBase || modeChanged || backendMode == .custom {
             await LaneAPI.shared.setBase(baseURL)
             didConfigureAPIBase = true
+        }
+
+        if modeChanged {
+            didPrepareRegionalHost = false
+            configuredBackendMode = backendMode
         }
 
         await LaneAPI.shared.setServiceLDI(persistentTelegramAuthID())
@@ -322,6 +341,11 @@ final class LaneSession: ObservableObject {
                 apiKey: apiKey
             )
         )
+
+        if backendMode == .official, !didPrepareRegionalHost {
+            didPrepareRegionalHost = true
+            baseURL = await LaneAPI.shared.prepareRegionalHost()
+        }
     }
 
     func prepareAPI() async {
@@ -539,22 +563,24 @@ final class LaneSession: ObservableObject {
     private func loadLibrary() async {
         guard !isGuest else { return }
 
-        do {
-            await configureAPI()
-            serverPlaylists = try await LaneAPI.shared.userPlaylists(token: token)
-        } catch {
-            output = error.localizedDescription
-        }
+        await configureAPI()
+        async let playlistsRequest = try? LaneAPI.shared.userPlaylists(token: token)
+        async let albumsRequest = try? LaneAPI.shared.userAlbums(token: token)
+        async let artistsRequest = try? LaneAPI.shared.userArtists(token: token)
+        async let recentRequest = try? LaneAPI.shared.recentRaw(token: token)
 
-        if let albums = try? await LaneAPI.shared.userAlbums(token: token) {
-            serverAlbums = albums
-        }
+        let (playlists, albums, artists, recent) = await (
+            playlistsRequest,
+            albumsRequest,
+            artistsRequest,
+            recentRequest
+        )
 
-        if let artists = try? await LaneAPI.shared.userArtists(token: token) {
-            serverArtists = artists
-        }
+        if let playlists { serverPlaylists = playlists }
+        if let albums { serverAlbums = albums }
+        if let artists { serverArtists = artists }
 
-        if let recent = try? await LaneAPI.shared.recentRaw(token: token) {
+        if let recent {
             let context = "history:\(UUID().uuidString)"
             recentTracks = JSONProbe.tracks(recent.json).map { track in
                 TrackCandidate(
@@ -663,6 +689,66 @@ final class LaneSession: ObservableObject {
                 output = error.localizedDescription
             }
         }
+    }
+
+    // MARK: Music import
+
+    func previewMusicImport(
+        platform: String,
+        spotifyBearerToken: String? = nil,
+        spotifyClientToken: String? = nil,
+        spotifyPlaylistID: String? = nil,
+        soundCloudPlaylistID: String? = nil,
+        yandexPlaylistID: String? = nil,
+        soundCloudProfileURL: String? = nil
+    ) async throws -> LanePlaylist {
+        await configureAPI()
+        return try await LaneAPI.shared.importPreview(
+            token: token,
+            platform: platform,
+            spotifyBearerToken: spotifyBearerToken,
+            spotifyClientToken: spotifyClientToken,
+            spotifyPlaylistId: spotifyPlaylistID,
+            soundcloudPlaylistId: soundCloudPlaylistID,
+            yandexPlaylistId: yandexPlaylistID,
+            soundcloudProfileUrl: soundCloudProfileURL
+        )
+    }
+
+    func beginTelegramMusicImport() async throws -> String {
+        await configureAPI()
+        return try await LaneAPI.shared.telegramImportStart(token: token).code
+    }
+
+    func finishTelegramMusicImport() async throws -> LanePlaylist {
+        await configureAPI()
+        return try await LaneAPI.shared.telegramImportFinish(token: token)
+    }
+
+    func tracksForImportPreview(_ playlist: LanePlaylist) async -> [TrackCandidate] {
+        if let tracks = playlist.playlistTracks, !tracks.isEmpty {
+            return tracks.map { TrackCandidate($0, refID: playlist.playlistId) }
+        }
+
+        let ids = playlist.playlistTracksIds ?? []
+        return await resolveTracksByIDs(ids, prefetch: false, refID: playlist.playlistId)
+    }
+
+    func importTracks(_ trackIDs: [String], into playlistID: String) async throws {
+        var seen = Set<String>()
+        let clean = trackIDs.filter { !$0.isEmpty && seen.insert($0).inserted }
+        guard !clean.isEmpty else { throw LaneAPIError.emptyResponse }
+
+        await configureAPI()
+        let result = try await LaneAPI.shared.addTracks(
+            token: token,
+            playlistId: playlistID,
+            trackIds: clean
+        )
+        guard (200..<300).contains(result.status) else {
+            throw LaneAPIError.http(result.status, result.pretty)
+        }
+        await loadLibrary()
     }
 
     // MARK: Social

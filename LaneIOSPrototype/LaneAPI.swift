@@ -76,6 +76,67 @@ actor LaneAPI {
         signingConfiguration = value
     }
 
+    private func officialRegionalBases() -> [URL] {
+        let primary = URL(string: "https://laneapi.com")!
+        let russian = URL(string: "https://ru.laneapi.com")!
+        let officialHosts = Set([primary.host, russian.host].compactMap { $0 })
+        let timezonePreferred = isRussianLaneTimezone(TimeZone.current.identifier) ? russian : primary
+        var candidates: [URL] = []
+
+        // Keep a regional host which has already worked. This is particularly
+        // important on mobile networks where the other hostname may be filtered.
+        if let host = base.host, officialHosts.contains(host) {
+            candidates.append(base)
+        }
+
+        for candidate in [timezonePreferred, primary, russian] where
+            !candidates.contains(where: { $0.host == candidate.host }) {
+            candidates.append(candidate)
+        }
+
+        return candidates
+    }
+
+    private func probeOfficialServer(_ candidate: URL) async throws -> LaneServerTimeResponse {
+        let url = candidate.appendingPathComponent("time")
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 3
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("close", forHTTPHeaderField: "Connection")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw LaneAPIError.nonHTTP
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw LaneAPIError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
+        }
+        return try JSONDecoder().decode(LaneServerTimeResponse.self, from: data)
+    }
+
+    /// Chooses a reachable official region before the signed API requests begin.
+    /// Request-level failover remains in place, but this avoids paying the same
+    /// timeout repeatedly when one Lane hostname is unavailable without a VPN.
+    @discardableResult
+    func prepareRegionalHost() async -> String {
+        guard signingConfiguration.mode == .official else {
+            return currentBaseURL()
+        }
+
+        for candidate in officialRegionalBases() {
+            if let server = try? await probeOfficialServer(candidate) {
+                timeOffsetMilliseconds = server.timestamp - Int64(Date().timeIntervalSince1970 * 1000.0)
+                base = candidate
+                let resolved = currentBaseURL()
+                UserDefaults.standard.set(resolved, forKey: "lane.base")
+                return resolved
+            }
+        }
+
+        return currentBaseURL()
+    }
+
 
     private func decodeOfficialTransport(_ data: Data, response: HTTPURLResponse) throws -> Data {
         guard signingConfiguration.mode == .official,
@@ -95,27 +156,19 @@ actor LaneAPI {
     }
 
     private func syncOfficialServerTime() async throws {
-        guard let url = URL(string: "https://laneapi.com/time") else {
-            throw LaneAPIError.invalidURL
+        var lastError: Error = LaneAPIError.emptyResponse
+        for candidate in officialRegionalBases() {
+            do {
+                let server = try await probeOfficialServer(candidate)
+                timeOffsetMilliseconds = server.timestamp - Int64(Date().timeIntervalSince1970 * 1000.0)
+                base = candidate
+                UserDefaults.standard.set(currentBaseURL(), forKey: "lane.base")
+                return
+            } catch {
+                lastError = error
+            }
         }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 8
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("close", forHTTPHeaderField: "Connection")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw LaneAPIError.nonHTTP
-        }
-
-        guard (200..<300).contains(http.statusCode) else {
-            throw LaneAPIError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
-        }
-
-        let server = try JSONDecoder().decode(LaneServerTimeResponse.self, from: data)
-        timeOffsetMilliseconds = server.timestamp - Int64(Date().timeIntervalSince1970 * 1000.0)
+        throw lastError
     }
 
     private func isRussianLaneTimezone(_ value: String) -> Bool {
@@ -316,7 +369,7 @@ actor LaneAPI {
                 let signed = try signer.sign(unsigned, body: unsigned.httpBody)
 
                 var request = signed
-                request.timeoutInterval = canFailOverRegionalHost ? 4 : 30
+                request.timeoutInterval = canFailOverRegionalHost ? 5 : 30
 
                 let (rawData, response) = try await URLSession.shared.data(for: request)
 
@@ -961,11 +1014,37 @@ actor LaneAPI {
         try await request(path: "/user/search/history", token: token)
     }
 
-    func telegramImportStart(token: String) async throws -> APIResult {
-        try await request(path: "/import/telegram/start", token: token)
+    func importPreview(
+        token: String,
+        platform: String,
+        spotifyBearerToken: String? = nil,
+        spotifyClientToken: String? = nil,
+        spotifyPlaylistId: String? = nil,
+        soundcloudPlaylistId: String? = nil,
+        yandexPlaylistId: String? = nil,
+        soundcloudProfileUrl: String? = nil
+    ) async throws -> LanePlaylist {
+        try await decoded(
+            LanePlaylist.self,
+            path: "/user/import/preview",
+            token: token,
+            query: [
+                .init(name: "platform", value: platform),
+                .init(name: "spotifyBearerToken", value: spotifyBearerToken),
+                .init(name: "spotifyClientToken", value: spotifyClientToken),
+                .init(name: "spotifyPlaylistId", value: spotifyPlaylistId),
+                .init(name: "soundcloudPlaylistId", value: soundcloudPlaylistId),
+                .init(name: "yandexPlaylistId", value: yandexPlaylistId),
+                .init(name: "soundcloudProfileUrl", value: soundcloudProfileUrl)
+            ]
+        )
     }
 
-    func telegramImportFinish(token: String) async throws -> APIResult {
-        try await request(path: "/import/telegram/finish", token: token)
+    func telegramImportStart(token: String) async throws -> TelegramImportCode {
+        try await decoded(TelegramImportCode.self, path: "/import/telegram/start", token: token)
+    }
+
+    func telegramImportFinish(token: String) async throws -> LanePlaylist {
+        try await decoded(LanePlaylist.self, path: "/import/telegram/finish", token: token)
     }
 }
