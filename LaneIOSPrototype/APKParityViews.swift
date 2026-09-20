@@ -279,7 +279,7 @@ struct APKArtistCardRow: View {
                 APKRemoteImage(url: artist.avatarUrl, circle: true)
                     .frame(width: 64, height: 64)
 
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 5) {
                         Text(artist.name ?? "Artist")
                             .font(.system(size: 16, weight: .bold))
@@ -293,25 +293,24 @@ struct APKArtistCardRow: View {
                         }
                     }
 
-                    Text((artist.description?.isEmpty == false ? artist.description : artist.platform) ?? "Artist")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
+                    Text("Artist")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.58))
                         .lineLimit(1)
                 }
 
-                Spacer(minLength: 6)
-
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary.opacity(0.65))
+                Spacer(minLength: 0)
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(apkSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                    .stroke(Color.white.opacity(0.10), lineWidth: 1)
             }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
         }
         .buttonStyle(.plain)
     }
@@ -325,32 +324,33 @@ struct APKAlbumCardRow: View {
             APKRemoteImage(url: album.coverUrl, cornerRadius: 5)
                 .frame(width: 64, height: 64)
 
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(album.name ?? "Album")
                     .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
 
-                Text([album.artistsDisplayedName, album.year].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " • "))
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
+                Text("Album • " + ((album.year?.isEmpty == false ? album.year : album.artistsDisplayedName) ?? ""))
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.58))
                     .lineLimit(1)
             }
 
-            Spacer()
-            Image(systemName: "chevron.right")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.secondary.opacity(0.65))
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(apkSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
     }
 }
+
 
 struct APKArtistDetailScreen: View {
     @EnvironmentObject private var session: LaneSession
