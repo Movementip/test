@@ -29,9 +29,15 @@ jobs:
           for i in {1..20}; do
             if curl -fsS http://127.0.0.1:3000/health >/tmp/health.json; then
               cat /tmp/health.json
-              exit 0
+              break
             fi
             sleep 1
           done
-          cat /tmp/lane-backend.log
-          exit 1
+
+          curl -fsS -X POST             -H 'Content-Type: application/json'             -d '{"message":{"chat":{"id":123},"from":{"id":123,"first_name":"Test","username":"lane_test"},"text":"/start auth0123456789abcdef"}}'             http://127.0.0.1:3000/telegram/webhook/lane-webhook >/dev/null
+
+          sleep 1
+          curl -fsS http://127.0.0.1:3000/auth/0123456789abcdef >/tmp/auth.json
+          TOKEN=$(node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync("/tmp/auth.json","utf8")); if(!x.token) process.exit(2); process.stdout.write(x.token)')
+          curl -fsS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/account >/tmp/account.json
+          node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync("/tmp/account.json","utf8")); if(x.userName!=="lane_test") process.exit(3); console.log("auth smoke test ok:", x.laneId)'
