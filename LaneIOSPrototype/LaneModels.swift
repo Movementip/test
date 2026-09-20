@@ -238,6 +238,7 @@ struct TrackCandidate: Identifiable, Hashable, Codable {
     let coverURL: String?
     let duration: String?
     let genre: String?
+    let artistAvatars: [String]?
 
     init(
         id: String? = nil,
