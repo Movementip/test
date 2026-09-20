@@ -130,6 +130,7 @@ final class LaneSession: ObservableObject {
     private func configureAPI() async {
         persist()
         await LaneAPI.shared.setBase(baseURL)
+        await LaneAPI.shared.setServiceLDI(persistentTelegramAuthID())
     }
 
     // MARK: Generic request / diagnostics
@@ -248,8 +249,8 @@ final class LaneSession: ObservableObject {
             defer { busy = false }
             await configureAPI()
 
-            // First try the typed response. The APK confirms platform=android,
-            // while the runtime value of `ver` was not recoverable statically.
+            // Exact Android Lane 1.4.7 contract recovered from TrackRepositoryImpl:
+            // platform=all and ver=1.0.
             if let response = try? await LaneAPI.shared.search(token: token, query: query) {
                 searchToken = response.searchToken
                 searchTracks = response.results.compactMap { $0.track }.map(TrackCandidate.init)
