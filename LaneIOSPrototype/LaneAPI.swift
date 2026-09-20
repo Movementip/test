@@ -683,10 +683,9 @@ actor LaneAPI {
         try await decoded([LaneArtist].self, path: "/user/artists", token: token)
     }
 
-    // /user/tracks is a read-only POST. Lane backend revisions have accepted
-    // two TrackIds wire shapes. The current edge returns INVALID_TRACK_IDS_BODY
-    // for the object wrapper, so try the raw JSON array first and transparently
-    // fall back to the legacy {"trackIds":[...]} form.
+    // Exact Lane Android 1.4.7 contract recovered from the APK:
+    // @POST("/user/tracks") with @Body TrackIds. Its kotlinx serializer emits
+    // {"trackIds":[...]}; a raw JSON array is not a valid TrackIds body.
     func tracksByIds(token: String, ids: [String], prefetch: Bool = false) async throws -> [TrackData] {
         var seen = Set<String>()
         let clean = ids
@@ -695,50 +694,14 @@ actor LaneAPI {
 
         guard !clean.isEmpty else { return [] }
 
-        let payloads: [Any] = [
-            clean,
-            ["trackIds": clean]
-        ]
-
-        var lastResult: APIResult?
-
-        for payload in payloads {
-            let result = try await request(
-                path: "/user/tracks",
-                method: "POST",
-                token: token,
-                query: [.init(name: "prefetch", value: prefetch ? "true" : "false")],
-                json: payload
-            )
-            lastResult = result
-
-            if (200..<300).contains(result.status) {
-                if let tracks = try? JSONDecoder().decode([TrackData].self, from: result.data) {
-                    return tracks
-                }
-
-                if let page = try? JSONDecoder().decode(PaginatedResult<TrackData>.self, from: result.data) {
-                    return page.items
-                }
-
-                throw LaneAPIError.decoding(
-                    "Unexpected /user/tracks response\n\(result.pretty)"
-                )
-            }
-
-            if result.status == 400,
-               result.pretty.localizedCaseInsensitiveContains("INVALID_TRACK_IDS_BODY") {
-                continue
-            }
-
-            throw LaneAPIError.http(result.status, result.pretty)
-        }
-
-        if let lastResult {
-            throw LaneAPIError.http(lastResult.status, lastResult.pretty)
-        }
-
-        throw LaneAPIError.emptyResponse
+        return try await decoded(
+            [TrackData].self,
+            path: "/user/tracks",
+            method: "POST",
+            token: token,
+            query: [.init(name: "prefetch", value: prefetch ? "true" : "false")],
+            json: ["trackIds": clean]
+        )
     }
 
     func recentRaw(token: String) async throws -> APIResult {
