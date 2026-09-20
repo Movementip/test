@@ -8,6 +8,9 @@ final class LaneSession: ObservableObject {
     @Published var token = KeychainStore.load(account: "bearer") ?? ""
     @Published var baseURL = UserDefaults.standard.string(forKey: "lane.base") ?? "https://laneapi.com"
     @Published var streamQuality = UserDefaults.standard.string(forKey: "lane.quality") ?? AudioQualityChoice.high.rawValue
+    @Published var backendMode = LaneBackendMode(rawValue: UserDefaults.standard.string(forKey: "lane.backendMode") ?? "official") ?? .official
+    @Published var apiKeyHeader = UserDefaults.standard.string(forKey: "lane.apiKeyHeader") ?? "X-API-Key"
+    @Published var apiKey = KeychainStore.load(account: "lane.customApiKey") ?? ""
     @Published var account: UserAccountDTO?
     @Published var publicProfile: UserInfoDTO?
     @Published var output = "Ready"
@@ -71,6 +74,14 @@ final class LaneSession: ObservableObject {
         }
         UserDefaults.standard.set(baseURL, forKey: "lane.base")
         UserDefaults.standard.set(streamQuality, forKey: "lane.quality")
+        UserDefaults.standard.set(backendMode.rawValue, forKey: "lane.backendMode")
+        UserDefaults.standard.set(apiKeyHeader, forKey: "lane.apiKeyHeader")
+
+        if apiKey.isEmpty {
+            KeychainStore.delete(account: "lane.customApiKey")
+        } else {
+            KeychainStore.save(apiKey, account: "lane.customApiKey")
+        }
     }
 
     func acceptLaneToken(_ value: String, serverBaseURL: String? = nil) {
@@ -131,6 +142,13 @@ final class LaneSession: ObservableObject {
         persist()
         await LaneAPI.shared.setBase(baseURL)
         await LaneAPI.shared.setServiceLDI(persistentTelegramAuthID())
+        await LaneAPI.shared.setSigningConfiguration(
+            LaneSigningConfiguration(
+                mode: backendMode,
+                apiKeyHeader: apiKeyHeader,
+                apiKey: apiKey
+            )
+        )
     }
 
     // MARK: Generic request / diagnostics
