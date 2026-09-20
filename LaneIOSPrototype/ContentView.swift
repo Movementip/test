@@ -1161,7 +1161,7 @@ private struct PlaylistRow: View {
     }
 }
 
-private struct PlaylistDetailScreen: View {
+struct PlaylistDetailScreen: View {
     @EnvironmentObject private var session: LaneSession
     let playlist: LanePlaylist
     @Binding var showPlayer: Bool
