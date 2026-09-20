@@ -101,13 +101,24 @@ struct APKFavoritePlaylistCard: View {
 struct APKImportTracksCard: View {
     var body: some View {
         ZStack(alignment: .leading) {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.12, green: 0.10, blue: 0.13),
+                    Color(red: 0.07, green: 0.07, blue: 0.08)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
             APKBundleImage(name: "import_tracks_background_card", contentMode: .fill)
                 .scaleEffect(1.2)
+                .opacity(0.92)
 
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Import tracks")
                         .font(.system(size: 14, weight: .bold))
+
                     Text("Transfer your music to Lane")
                         .font(.system(size: 10))
                         .foregroundStyle(.white.opacity(0.70))
@@ -125,10 +136,16 @@ struct APKImportTracksCard: View {
 
                 Spacer()
 
-                APKBundleImage(name: "lane_logo_3d_wave")
-                    .frame(width: 92, height: 105)
-                    .scaleEffect(1.2)
-                    .offset(x: 2, y: 8)
+                ZStack {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 48, weight: .bold))
+                        .foregroundStyle(apkPink.opacity(0.55))
+
+                    APKBundleImage(name: "lane_logo_3d_wave")
+                        .scaleEffect(1.2)
+                }
+                .frame(width: 92, height: 105)
+                .offset(x: 2, y: 8)
             }
         }
         .frame(maxWidth: .infinity)
