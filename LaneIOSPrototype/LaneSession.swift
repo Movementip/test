@@ -151,6 +151,10 @@ final class LaneSession: ObservableObject {
         )
     }
 
+    func prepareAPI() async {
+        await configureAPI()
+    }
+
     func fetchBackendConfig() async throws -> LaneBackendConfig {
         await configureAPI()
         return try await LaneAPI.shared.backendConfig()
