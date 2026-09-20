@@ -264,7 +264,9 @@ private struct HomeHeader: View {
             Spacer()
                 .frame(width: 20)
 
-            APKLaneWordmark()
+            APKLaneHeaderTitle(
+                subtitle: session.account?.displayedName ?? session.account?.userName ?? ""
+            )
 
             Spacer()
 
@@ -336,9 +338,21 @@ private struct SearchScreen: View {
         NavigationStack {
             VStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("Search")
-                        .font(.system(size: 31, weight: .bold))
-                        .padding(.horizontal, 18)
+                    HStack(spacing: 0) {
+                        NavigationLink {
+                            ProfileScreen()
+                        } label: {
+                            AvatarView(url: session.account?.avatarUrl, size: 36)
+                        }
+                        .buttonStyle(.plain)
+
+                        Spacer().frame(width: 20)
+
+                        APKLaneHeaderTitle(subtitle: "Search")
+
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
 
                     HStack(spacing: 10) {
                         Image(systemName: "magnifyingglass")
@@ -647,39 +661,33 @@ private struct LibraryHeader: View {
     @Binding var showCreatePlaylist: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 0) {
             NavigationLink {
                 ProfileScreen()
             } label: {
                 AvatarView(url: session.account?.avatarUrl, size: 36)
             }
+            .buttonStyle(.plain)
 
-            Text("Library")
-                .font(.system(size: 20, weight: .bold, design: .rounded))
-                .tracking(-0.5)
+            Spacer().frame(width: 20)
+
+            APKLaneHeaderTitle(subtitle: "Library")
 
             Spacer()
-
-            NavigationLink {
-                SearchProxyScreen()
-            } label: {
-                Image(systemName: "magnifyingglass")
-                    .frame(width: 40, height: 40)
-                    .background(laneCard, in: Circle())
-            }
-            .buttonStyle(.plain)
 
             Button {
                 showCreatePlaylist = true
             } label: {
                 Image(systemName: "plus")
-                    .font(.system(size: 17, weight: .bold))
-                    .frame(width: 40, height: 40)
-                    .background(laneCard, in: Circle())
+                    .font(.system(size: 25, weight: .medium))
+                    .foregroundStyle(.white)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 10)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
     }
 }
 
