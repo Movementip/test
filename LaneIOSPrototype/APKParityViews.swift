@@ -5,6 +5,67 @@ private let apkPink = Color(red: 1.0, green: 130.0 / 255.0, blue: 132.0 / 255.0)
 private let apkBackground = Color(red: 10.0 / 255.0, green: 10.0 / 255.0, blue: 10.0 / 255.0)
 private let apkSurface = Color(red: 29.0 / 255.0, green: 29.0 / 255.0, blue: 29.0 / 255.0)
 
+
+struct APKTemplateIcon: View {
+    let name: String
+    var size: CGFloat = 24
+    var color: Color = .white
+
+    var body: some View {
+        Group {
+            if let url = Bundle.main.url(forResource: name, withExtension: "png"),
+               let image = UIImage(contentsOfFile: url.path) {
+                Image(uiImage: image.withRenderingMode(.alwaysTemplate))
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .foregroundStyle(color)
+            } else {
+                fallback
+                    .foregroundStyle(color)
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var fallback: some View {
+        switch name {
+        case "heart", "like":
+            Image(systemName: name == "like" ? "heart.fill" : "heart")
+        case "comment":
+            Image(systemName: "bubble.left")
+        case "ic_download":
+            Image(systemName: "arrow.down.circle")
+        case "queue":
+            Image(systemName: "text.badge.plus")
+        case "repeat":
+            Image(systemName: "repeat")
+        case "repeat_1":
+            Image(systemName: "repeat.1")
+        case "shuffle":
+            Image(systemName: "shuffle")
+        case "text":
+            Image(systemName: "text.quote")
+        case "ic_track_effect":
+            Image(systemName: "slider.horizontal.3")
+        case "baseline_pause_24":
+            Image(systemName: "pause.fill")
+        case "baseline_play_arrow_24":
+            Image(systemName: "play.fill")
+        case "bottom_search":
+            Image(systemName: "magnifyingglass")
+        case "bottom_library":
+            Image(systemName: "square.stack.fill")
+        case "bottom_main_unselected":
+            Image(systemName: "house.fill")
+        default:
+            Image(systemName: "circle")
+        }
+    }
+}
+
 struct APKLaneWordmark: View {
     var body: some View {
         Group {
