@@ -339,7 +339,7 @@ final class LaneSession: ObservableObject {
             // platform=all and ver=1.0.
             if let response = try? await LaneAPI.shared.search(token: token, query: query) {
                 searchToken = response.searchToken
-                searchTracks = response.results.compactMap { $0.track }.map(TrackCandidate.init)
+                searchTracks = response.results.compactMap { $0.track }.map { TrackCandidate($0, refID: response.searchToken) }
                 searchArtists = response.results.compactMap { $0.artist }
                 searchAlbums = response.results.compactMap { $0.album }
                 searchPlaylists = response.results.compactMap { $0.playlist }
@@ -418,7 +418,7 @@ final class LaneSession: ObservableObject {
 
     func loadPlaylistTracks(_ playlist: LanePlaylist, completion: @escaping ([TrackCandidate]) -> Void) {
         guard let id = playlist.playlistId else {
-            completion(playlist.playlistTracks?.map(TrackCandidate.init) ?? [])
+            completion(playlist.playlistTracks?.map { TrackCandidate($0, refID: playlist.playlistId) } ?? [])
             return
         }
 
@@ -426,7 +426,7 @@ final class LaneSession: ObservableObject {
             do {
                 await configureAPI()
                 let result = try await LaneAPI.shared.playlistTracks(token: token, playlistId: id)
-                completion(result.items.map(TrackCandidate.init))
+                completion(result.items.map { TrackCandidate($0, refID: id) })
             } catch {
                 output = error.localizedDescription
                 completion(playlist.playlistTracks?.map(TrackCandidate.init) ?? [])
