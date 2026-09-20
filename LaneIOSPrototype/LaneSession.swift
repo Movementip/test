@@ -173,6 +173,8 @@ final class LaneSession: ObservableObject {
     @Published var playbackDuration: Double = 0
     @Published var playerError = ""
     @Published var trackStats: TrackStatsDTO?
+    @Published var currentLyrics: LaneTrackLyrics?
+    @Published var lyricsError = ""
     @Published var shuffleEnabled = false
     @Published var repeatMode = 0 // 0 = off, 1 = all, 2 = one
 
@@ -858,13 +860,22 @@ final class LaneSession: ObservableObject {
 
     func loadLyrics(_ track: TrackCandidate) {
         guard let id = track.trackID else { return }
+
+        currentLyrics = nil
+        lyricsError = ""
+
         Task {
             do {
                 await configureAPI()
-                let result = try await LaneAPI.shared.trackLyrics(token: token, trackId: id)
-                output = result.pretty
+                currentLyrics = try await LaneAPI.shared.trackLyricsTyped(
+                    token: token,
+                    trackId: id
+                )
+                output = "Lyrics loaded"
             } catch {
-                output = error.localizedDescription
+                currentLyrics = nil
+                lyricsError = error.localizedDescription
+                output = "Lyrics error: \(error.localizedDescription)"
             }
         }
     }
@@ -899,6 +910,8 @@ final class LaneSession: ObservableObject {
         playbackPosition = 0
         playbackDuration = parseDuration(track.duration) ?? 0
         trackStats = nil
+        currentLyrics = nil
+        lyricsError = ""
         loadTrackStats(track)
 
         if let index = queue.firstIndex(of: track) {
