@@ -461,56 +461,18 @@ private struct LibraryScreen: View {
                     if session.isGuest {
                         TelegramLoginCard()
                     } else {
-                        HStack(spacing: 12) {
-                            NavigationLink {
-                                FavoriteTracksScreen(showPlayer: $showPlayer)
-                            } label: {
-                                LibraryFeatureCard(
-                                    icon: "heart.fill",
-                                    title: "Favorite Tracks",
-                                    subtitle: "\(session.favorites.count) saved",
-                                    gradient: [lanePink, .red]
-                                )
-                            }
-
-                            NavigationLink {
-                                DownloadsScreen(showPlayer: $showPlayer)
-                            } label: {
-                                LibraryFeatureCard(
-                                    icon: "arrow.down.circle.fill",
-                                    title: "Downloads",
-                                    subtitle: "\(session.downloadedTrackIDs.count) offline",
-                                    gradient: [.blue, .indigo]
-                                )
-                            }
+                        NavigationLink {
+                            FavoriteTracksScreen(showPlayer: $showPlayer)
+                        } label: {
+                            APKFavoritePlaylistCard(trackCount: session.favorites.count)
                         }
-                        .padding(.horizontal, 16)
+                        .buttonStyle(.plain)
 
                         NavigationLink {
                             TelegramImportScreen()
                         } label: {
-                            HStack(spacing: 14) {
-                                Image(systemName: "square.and.arrow.down.fill")
-                                    .font(.title2)
-                                    .foregroundStyle(lanePink)
-                                    .frame(width: 46, height: 46)
-                                    .background(lanePink.opacity(0.14), in: RoundedRectangle(cornerRadius: 14))
-
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("Import tracks")
-                                        .font(.headline)
-                                    Text("Spotify, SoundCloud, Yandex or Telegram")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(14)
-                            .background(laneCard, in: RoundedRectangle(cornerRadius: 18))
-                            .padding(.horizontal, 16)
+                            APKImportTracksCard()
+                                .padding(.horizontal, 10)
                         }
                         .buttonStyle(.plain)
 
