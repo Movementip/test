@@ -2720,6 +2720,8 @@ private struct ImportTracksScreen: View {
     @State private var message = ""
     @State private var loading = false
     @State private var localSaving = false
+    @State private var importCompleted = 0
+    @State private var importTotal = 0
 
     var body: some View {
         ZStack {
@@ -3088,7 +3090,9 @@ private struct ImportTracksScreen: View {
                 .pickerStyle(.menu)
 
                 APKPrimaryButton(
-                    title: loading ? "Importing…" : importButtonTitle,
+                    title: loading && importTotal > 0
+                        ? "Importing \(importCompleted)/\(importTotal)…"
+                        : importButtonTitle,
                     loading: loading,
                     enabled: !targetPlaylistID.isEmpty && !importTrackIDs.isEmpty,
                     action: importPreviewTracks
@@ -3258,18 +3262,27 @@ private struct ImportTracksScreen: View {
     private func performImport(_ ids: [String]) {
         loading = true
         message = ""
+        importCompleted = 0
+        importTotal = Set(ids.filter { !$0.isEmpty }).count
         Task {
             defer { loading = false }
             do {
-                try await session.importTracks(ids, into: targetPlaylistID)
-                if ids.count < importTrackIDs.count {
-                    message = "Imported the first \(ids.count) of \(importTrackIDs.count) tracks to Lane."
-                } else {
-                    message = "Imported \(ids.count) tracks to Lane."
+                let imported = try await session.importTracks(
+                    ids,
+                    into: targetPlaylistID
+                ) { completed, total in
+                    importCompleted = completed
+                    importTotal = total
                 }
+                message = "All \(imported) tracks are now in the Lane playlist."
             } catch {
                 session.output = "Import error: \(error.localizedDescription)"
-                message = friendlyImportError(error)
+                let detail = friendlyImportError(error)
+                if importCompleted > 0 {
+                    message = "Imported \(importCompleted) of \(importTotal) tracks. Tap again to continue. \(detail)"
+                } else {
+                    message = detail
+                }
             }
         }
     }

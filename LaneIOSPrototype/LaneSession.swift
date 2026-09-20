@@ -883,23 +883,66 @@ final class LaneSession: ObservableObject {
         return ordered.map { TrackCandidate($0, refID: playlist.playlistId) }
     }
 
-    func importTracks(_ trackIDs: [String], into playlistID: String) async throws {
+    private func serverTrackIDs(in playlistID: String) async throws -> Set<String> {
+        let playlist = try await LaneAPI.shared.playlist(
+            token: token,
+            playlistId: playlistID
+        )
+
+        let ids = playlist.playlistTracksIds ?? playlist.playlistTracks?.compactMap(\.songId) ?? []
+        return Set(ids.filter { !$0.isEmpty })
+    }
+
+    @discardableResult
+    func importTracks(
+        _ trackIDs: [String],
+        into playlistID: String,
+        progress: @escaping (_ completed: Int, _ total: Int) -> Void = { _, _ in }
+    ) async throws -> Int {
         var seen = Set<String>()
         let clean = trackIDs.filter { !$0.isEmpty && seen.insert($0).inserted }
         guard !clean.isEmpty else { throw LaneAPIError.emptyResponse }
 
         await configureAPI()
-        let result = try await LaneAPI.shared.addTracks(
-            token: token,
-            playlistId: playlistID,
-            trackIds: clean
-        )
-        status = result.status
-        output = result.pretty
-        guard (200..<300).contains(result.status) else {
-            throw LaneAPIError.http(result.status, result.pretty)
+
+        // A previously interrupted import is resumed instead of starting from
+        // zero. This also makes a second tap safe and avoids duplicate tracks.
+        let existing = try await serverTrackIDs(in: playlistID)
+        let pending = clean.filter { !existing.contains($0) }
+        var completed = clean.count - pending.count
+        progress(completed, clean.count)
+
+        // Android's free/import UI works with 15 tracks at a time. Keep the
+        // exact add-tracks request body, but serialize large imports into small
+        // mutations so proxies and the server never receive a 1,000-item body.
+        for start in stride(from: 0, to: pending.count, by: 15) {
+            try Task.checkCancellation()
+            let end = min(start + 15, pending.count)
+            let batch = Array(pending[start..<end])
+
+            let result = try await LaneAPI.shared.addTracks(
+                token: token,
+                playlistId: playlistID,
+                trackIds: batch
+            )
+            status = result.status
+            output = "Importing \(completed)/\(clean.count) · \(result.pretty)"
+            guard (200..<300).contains(result.status) else {
+                throw LaneAPIError.http(result.status, result.pretty)
+            }
+
+            completed += batch.count
+            progress(completed, clean.count)
+
+            if end < pending.count {
+                // Keep mutations ordered and stay below burst-rate limits.
+                try await Task.sleep(nanoseconds: 250_000_000)
+            }
         }
+
+        output = "Imported \(completed) of \(clean.count) tracks to Lane"
         await loadLibrary()
+        return completed
     }
 
     // MARK: Social
