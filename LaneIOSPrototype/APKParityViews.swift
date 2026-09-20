@@ -87,6 +87,21 @@ struct APKLaneWordmark: View {
     }
 }
 
+struct APKLaneHeaderTitle: View {
+    let subtitle: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            APKLaneWordmark()
+            Text(subtitle)
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(Color.white.opacity(0.56))
+                .lineLimit(1)
+        }
+    }
+}
+
+
 private struct APKBundleImage: View {
     let name: String
     var contentMode: ContentMode = .fit
