@@ -1869,46 +1869,238 @@ private struct APKQueueSheet: View {
     @EnvironmentObject private var session: LaneSession
     @Environment(\.dismiss) private var dismiss
 
+    private var current: TrackCandidate? {
+        if let index = session.currentIndex, session.queue.indices.contains(index) {
+            return session.queue[index]
+        }
+        return session.currentTrack
+    }
+
+    private var upNext: [(offset: Int, element: TrackCandidate)] {
+        let start = min((session.currentIndex ?? -1) + 1, session.queue.count)
+        return Array(session.queue.enumerated().dropFirst(start))
+    }
+
     var body: some View {
         NavigationStack {
-            List {
-                ForEach(Array(session.queue.enumerated()), id: \.element.id) { index, track in
-                    Button {
-                        session.currentIndex = index
-                        session.requestStream(for: track)
-                        dismiss()
-                    } label: {
-                        HStack(spacing: 12) {
-                            APKRemoteImage(url: track.coverURL, cornerRadius: 6)
-                                .frame(width: 50, height: 50)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(track.title)
-                                    .foregroundStyle(.white)
-                                    .lineLimit(1)
-                                Text(track.subtitle)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            if index == session.currentIndex {
-                                Image(systemName: "waveform")
-                                    .foregroundStyle(apkPink)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.32))
+                        .frame(width: 42, height: 5)
+                        .padding(.top, 8)
+                        .padding(.bottom, 18)
+
+                    HStack {
+                        Text("Queue")
+                            .font(.system(size: 22, weight: .bold))
+                        Spacer()
+                        Button {
+                            dismiss()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 14, weight: .bold))
+                                .frame(width: 34, height: 34)
+                                .background(Color.white.opacity(0.075), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+
+                    queueContextHeader
+
+                    if let current {
+                        sectionHeader("Now playing")
+
+                        queueRow(
+                            track: current,
+                            active: true,
+                            dragHandle: false,
+                            onTap: {}
+                        )
+                    }
+
+                    if !upNext.isEmpty {
+                        sectionHeader("Next in queue")
+
+                        ForEach(upNext, id: \.element.id) { entry in
+                            queueRow(
+                                track: entry.element,
+                                active: false,
+                                dragHandle: true,
+                                onTap: {
+                                    session.currentIndex = entry.offset
+                                    session.requestStream(for: entry.element)
+                                    dismiss()
+                                }
+                            )
+                            .draggable(entry.element.id)
+                            .dropDestination(for: String.self) { identifiers, _ in
+                                guard let sourceID = identifiers.first else { return false }
+                                return moveQueueItem(sourceID: sourceID, before: entry.element.id)
                             }
                         }
+                    } else if current != nil {
+                        Text("Nothing else in the queue")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 28)
                     }
                 }
+                .padding(.bottom, 24)
             }
-            .scrollContentBackground(.hidden)
-            .background(apkBackground)
-            .navigationTitle("Queue")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
-            }
+            .background(apkBackground.ignoresSafeArea())
+            .toolbar(.hidden, for: .navigationBar)
         }
         .preferredColorScheme(.dark)
+    }
+
+    @ViewBuilder
+    private var queueContextHeader: some View {
+        if let refID = session.currentTrack?.refID,
+           !refID.isEmpty {
+            let info = contextInfo(refID)
+
+            VStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.white.opacity(0.065))
+
+                        APKTemplateIcon(
+                            name: info.icon,
+                            size: 18,
+                            color: apkPink
+                        )
+                    }
+                    .frame(width: 32, height: 32)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Playing from")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color.white.opacity(0.55))
+
+                        Text(info.title)
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .frame(maxWidth: 140, alignment: .leading)
+                    }
+
+                    Spacer()
+                }
+                .padding(10)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                }
+
+                Rectangle()
+                    .fill(Color.white.opacity(0.10))
+                    .frame(height: 1)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+        }
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 17, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 15)
+    }
+
+    private func queueRow(
+        track: TrackCandidate,
+        active: Bool,
+        dragHandle: Bool,
+        onTap: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 10) {
+            Button(action: onTap) {
+                HStack(spacing: 12) {
+                    APKRemoteImage(url: track.coverURL, cornerRadius: 5)
+                        .frame(width: 50, height: 50)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(track.title)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(active ? apkPink : .white)
+                            .lineLimit(1)
+
+                        HStack(spacing: 5) {
+                            APKPlatformIcon(platform: track.platform, size: 9)
+                            Text(track.subtitle)
+                                .font(.system(size: 11))
+                                .foregroundStyle(Color.white.opacity(0.55))
+                                .lineLimit(1)
+                        }
+                    }
+
+                    Spacer()
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(active)
+
+            if active {
+                Image(systemName: session.isPlaying ? "waveform" : "pause.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(apkPink)
+                    .frame(width: 30)
+            } else if dragHandle {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.42))
+                    .frame(width: 30, height: 50)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            active ? Color.white.opacity(0.045) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+        )
+        .padding(.horizontal, 6)
+    }
+
+    private func contextInfo(_ refID: String) -> (title: String, icon: String) {
+        if refID.hasPrefix("album:") {
+            return ("Album", "album")
+        }
+        if refID.hasPrefix("artist:") {
+            return ("Artist", "artist")
+        }
+        if refID.hasPrefix("history:") {
+            return ("Listening history", "history")
+        }
+        if refID.hasPrefix("playlist:") {
+            return ("Playlist", "playlist")
+        }
+        return ("Lane", "lane")
+    }
+
+    private func moveQueueItem(sourceID: String, before destinationID: String) -> Bool {
+        guard sourceID != destinationID,
+              let from = session.queue.firstIndex(where: { $0.id == sourceID }),
+              let to = session.queue.firstIndex(where: { $0.id == destinationID }) else {
+            return false
+        }
+
+        let item = session.queue.remove(at: from)
+        let target = from < to ? max(0, to - 1) : to
+        session.queue.insert(item, at: target)
+
+        if let current = session.currentTrack {
+            session.currentIndex = session.queue.firstIndex(of: current)
+        }
+
+        return true
     }
 }
 
