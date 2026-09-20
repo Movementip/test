@@ -68,7 +68,7 @@ def req(url,signed=False,ldi='7e595d40b9b542d1',tz='Asia/Yekaterinburg',offset=0
             body=resp.read()
             print('\nURL',url,'signed',signed,'STATUS',resp.status)
             print('HEADERS',dict(resp.headers))
-            print('BODY',body[:2000].decode('utf-8','replace'))
+            print('BODY_HEX',body.hex())\n            print('BODY_HEX',body.hex())\n        print('BODY',body[:2000].decode('utf-8','replace'))
             return resp.status,body,dict(resp.headers)
     except urllib.error.HTTPError as e:
         body=e.read()
