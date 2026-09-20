@@ -390,6 +390,65 @@ struct LaneCardItem: Identifiable, Hashable {
     let platform: String?
 }
 
+
+enum LaneHomeSectionType: String, Hashable {
+    case personalMix = "PERSONAL_MIX"
+    case chart = "CHART"
+    case discovery = "DISCOVERY"
+    case history = "HISTORY"
+    case promotion = "PROMOTION"
+    case utility = "UTILITY"
+    case rediscover = "REDISCOVER"
+    case unknown = "UNKNOWN"
+
+    init(raw: String?) {
+        self = LaneHomeSectionType(rawValue: raw?.uppercased() ?? "") ?? .unknown
+    }
+}
+
+enum LaneHomeRenderType: String, Hashable {
+    case horizontalList = "HORIZONTAL_LIST"
+    case grid2x2 = "GRID_2X2"
+    case fullWidth = "FULL_WIDTH"
+    case verticalList = "VERTICAL_LIST"
+
+    init(raw: String?) {
+        self = LaneHomeRenderType(rawValue: raw?.uppercased() ?? "") ?? .horizontalList
+    }
+}
+
+struct LaneHomeBanner: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let description: String
+    let imageURL: String
+    let backgroundColor: String
+    let actionURL: String
+    let buttonText: String?
+}
+
+struct LaneHomeItem: Identifiable, Hashable {
+    enum Kind: Hashable {
+        case playlist
+        case chart
+        case banner
+    }
+
+    let id: String
+    let kind: Kind
+    let playlist: LanePlaylist?
+    let banner: LaneHomeBanner?
+}
+
+struct LaneHomeSection: Identifiable, Hashable {
+    let id: String
+    let title: String?
+    let subtitle: String?
+    let type: LaneHomeSectionType
+    let renderType: LaneHomeRenderType
+    let content: [LaneHomeItem]
+}
+
 struct LocalPlaylist: Identifiable, Codable, Hashable {
     var id: UUID = UUID()
     var name: String
@@ -448,6 +507,123 @@ enum JSONProbe {
         walkCards(value, preferredKind: preferredKind, &output)
         var seen = Set<String>()
         return output.filter { seen.insert($0.id).inserted }
+    }
+
+
+    static func homeSections(_ value: Any?) -> [LaneHomeSection] {
+        guard let sectionValues = locateHomeSections(value) else { return [] }
+
+        return sectionValues.compactMap { raw in
+            guard let dict = raw as? [String: Any] else { return nil }
+
+            let id = firstString(dict, ["id", "sectionId"]) ?? UUID().uuidString
+            let title = firstString(dict, ["title"])
+            let subtitle = firstString(dict, ["subtitle"])
+            let type = LaneHomeSectionType(raw: firstString(dict, ["type", "sectionType"]))
+            let renderType = LaneHomeRenderType(raw: firstString(dict, ["renderType", "render_type"]))
+            let rawContent = (dict["content"] as? [Any]) ?? (dict["items"] as? [Any]) ?? []
+
+            let items: [LaneHomeItem] = rawContent.compactMap { rawItem in
+                guard let item = rawItem as? [String: Any] else { return nil }
+
+                let discriminator = (
+                    firstString(item, ["type", "itemType", "kind", "_type", "@type"]) ?? ""
+                ).lowercased()
+
+                if let playlistObject = item["playlist"] as? [String: Any],
+                   let playlist = decodeObject(LanePlaylist.self, from: playlistObject) {
+                    let itemID = firstString(item, ["id"]) ?? playlist.playlistId ?? UUID().uuidString
+                    let kind: LaneHomeItem.Kind =
+                        type == .chart || discriminator.contains("chart") ? .chart : .playlist
+                    return LaneHomeItem(id: itemID, kind: kind, playlist: playlist, banner: nil)
+                }
+
+                if looksLikePlaylist(item),
+                   let playlist = decodeObject(LanePlaylist.self, from: item) {
+                    let itemID = firstString(item, ["id"]) ?? playlist.playlistId ?? UUID().uuidString
+                    let kind: LaneHomeItem.Kind =
+                        type == .chart || discriminator.contains("chart") ? .chart : .playlist
+                    return LaneHomeItem(id: itemID, kind: kind, playlist: playlist, banner: nil)
+                }
+
+                if discriminator.contains("banner") ||
+                   item["imageUrl"] != nil ||
+                   item["actionUrl"] != nil {
+                    guard let bannerID = firstString(item, ["id"]),
+                          let bannerTitle = firstString(item, ["title"]),
+                          let description = firstString(item, ["description"]),
+                          let imageURL = firstString(item, ["imageUrl", "image_url"]),
+                          let actionURL = firstString(item, ["actionUrl", "action_url"]) else {
+                        return nil
+                    }
+
+                    let banner = LaneHomeBanner(
+                        id: bannerID,
+                        title: bannerTitle,
+                        description: description,
+                        imageURL: imageURL,
+                        backgroundColor: firstString(item, ["backgroundColor", "background_color"]) ?? "#121212",
+                        actionURL: actionURL,
+                        buttonText: firstString(item, ["buttonText", "button_text"])
+                    )
+                    return LaneHomeItem(id: bannerID, kind: .banner, playlist: nil, banner: banner)
+                }
+
+                return nil
+            }
+
+            return LaneHomeSection(
+                id: id,
+                title: title,
+                subtitle: subtitle,
+                type: type,
+                renderType: renderType,
+                content: items
+            )
+        }
+        .filter { !$0.content.isEmpty }
+    }
+
+    private static func locateHomeSections(_ value: Any?) -> [Any]? {
+        if let dict = value as? [String: Any] {
+            if let sections = dict["sections"] as? [Any] {
+                return sections
+            }
+
+            for key in ["data", "feed", "result", "home", "payload"] {
+                if let sections = locateHomeSections(dict[key]) {
+                    return sections
+                }
+            }
+
+            for child in dict.values {
+                if let sections = locateHomeSections(child) {
+                    return sections
+                }
+            }
+        } else if let array = value as? [Any] {
+            for child in array {
+                if let sections = locateHomeSections(child) {
+                    return sections
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func looksLikePlaylist(_ dict: [String: Any]) -> Bool {
+        dict["playlistId"] != nil ||
+        dict["playlistName"] != nil ||
+        dict["playlistTracks"] != nil ||
+        dict["playlistTracksIds"] != nil
+    }
+
+    private static func decodeObject<T: Decodable>(_ type: T.Type, from object: [String: Any]) -> T? {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(T.self, from: data)
     }
 
     static func token(_ value: Any?) -> String? {
