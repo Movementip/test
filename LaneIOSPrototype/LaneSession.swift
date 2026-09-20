@@ -7,7 +7,8 @@ final class LaneSession: ObservableObject {
     // MARK: Account / API
     @Published var token = KeychainStore.load(account: "bearer") ?? ""
     @Published var baseURL = UserDefaults.standard.string(forKey: "lane.base") ?? "https://laneapi.com"
-    @Published var streamQuality = UserDefaults.standard.string(forKey: "lane.quality") ?? AudioQualityChoice.high.rawValue
+    // BASIC is available to every Lane account. HIGH and ULTRA require Premium.
+    @Published var streamQuality = UserDefaults.standard.string(forKey: "lane.quality") ?? AudioQualityChoice.basic.rawValue
     @Published var backendMode = LaneBackendMode(rawValue: UserDefaults.standard.string(forKey: "lane.backendMode") ?? "official") ?? .official
     @Published var apiKeyHeader = UserDefaults.standard.string(forKey: "lane.apiKeyHeader") ?? "X-API-Key"
     @Published var apiKey = KeychainStore.load(account: "lane.customApiKey") ?? ""
@@ -26,6 +27,8 @@ final class LaneSession: ObservableObject {
     @Published var searchPlaylists: [LanePlaylist] = []
     @Published var searchResultItems: [LaneSearchResultItem] = []
     @Published var searchToken: String?
+    @Published var searchMessage = ""
+    @Published var trackResolveMessage = ""
 
     private func makeSearchRefID(query: String, results: [LaneSearchResultItem]) -> String {
         // Kotlin/Java List.hashCode() is deterministic. The original objects use
@@ -115,6 +118,7 @@ final class LaneSession: ObservableObject {
 
         do {
             await configureAPI()
+            trackResolveMessage = ""
             let tracks = try await LaneAPI.shared.tracksByIds(
                 token: token,
                 ids: clean,
@@ -123,6 +127,7 @@ final class LaneSession: ObservableObject {
             return applyingRefID(refID, to: tracks.map { TrackCandidate($0) })
         } catch {
             output = "Track resolve error: \(error.localizedDescription)"
+            trackResolveMessage = "Tracks are temporarily unavailable. Reopen the album to try again."
 
             // Preserve whatever is already present locally instead of showing
             // an empty detail page if the network resolver is unavailable.
@@ -195,6 +200,10 @@ final class LaneSession: ObservableObject {
         token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    var hasPremiumAccess: Bool {
+        account?.isAutoRenewalActive == true || (account?.premiumExpiresIn ?? 0) > 0
+    }
+
     init() {
         // Migrate tokens created by earlier iOS prototype builds.
         if token.isEmpty, let legacy = KeychainStore.load(account: "lane.token"), !legacy.isEmpty {
@@ -229,6 +238,14 @@ final class LaneSession: ObservableObject {
         } else {
             KeychainStore.save(apiKey, account: "lane.customApiKey")
         }
+    }
+
+    func persistStreamQualitySelection() {
+        if !hasPremiumAccess, streamQuality != AudioQualityChoice.basic.rawValue {
+            streamQuality = AudioQualityChoice.basic.rawValue
+            output = "High and Ultra audio quality require Lane Premium."
+        }
+        persist()
     }
 
     func acceptLaneToken(_ value: String, serverBaseURL: String? = nil) {
@@ -422,6 +439,13 @@ final class LaneSession: ObservableObject {
             let accountValue = try await LaneAPI.shared.account(token: token, deviceLanguage: language)
             account = accountValue
 
+            // Earlier prototype builds stored HIGH as the default and then got
+            // 403 PREMIUM_REQUIRED on every play for regular accounts.
+            if !hasPremiumAccess, streamQuality != AudioQualityChoice.basic.rawValue {
+                streamQuality = AudioQualityChoice.basic.rawValue
+                persist()
+            }
+
             if let laneId = accountValue.laneId, !laneId.isEmpty {
                 publicProfile = try? await LaneAPI.shared.userInfo(token: token, laneId: laneId)
             }
@@ -464,6 +488,7 @@ final class LaneSession: ObservableObject {
         guard !isGuest else {
             status = 401
             output = "Sign in with Telegram before searching Lane."
+            searchMessage = "Sign in with Telegram to search."
             searchTracks = []
             searchArtists = []
             searchAlbums = []
@@ -474,6 +499,7 @@ final class LaneSession: ObservableObject {
 
         busy = true
         output = "Searching Lane…"
+        searchMessage = ""
 
         Task {
             defer { busy = false }
@@ -499,6 +525,7 @@ final class LaneSession: ObservableObject {
                 if !searchTracks.isEmpty || !searchArtists.isEmpty || !searchAlbums.isEmpty || !searchPlaylists.isEmpty {
                     status = 200
                     output = "Found \(response.results.count) results"
+                    searchMessage = ""
                     return
                 }
             }
@@ -534,6 +561,7 @@ final class LaneSession: ObservableObject {
                             )
                         }
                         output = "Found \(tracks.count) tracks · ver=\(version ?? "<omitted>")"
+                        searchMessage = ""
                         return
                     }
                 } catch {
@@ -547,6 +575,13 @@ final class LaneSession: ObservableObject {
             searchPlaylists = []
             searchResultItems = []
             output = lastMessage
+            if lastMessage.localizedCaseInsensitiveContains("HTTP 5") ||
+                lastMessage.localizedCaseInsensitiveContains("timed out") ||
+                lastMessage.localizedCaseInsensitiveContains("DATA_ACCESS_ERROR") {
+                searchMessage = "Search is temporarily unavailable. Please try again."
+            } else {
+                searchMessage = "Try another query."
+            }
         }
     }
 
@@ -1049,6 +1084,46 @@ final class LaneSession: ObservableObject {
 
     // MARK: Player
 
+    private func resolvedStream(
+        trackID: String,
+        refID: String?,
+        quality: String
+    ) async throws -> TrackStreamingResult {
+        do {
+            return try await LaneAPI.shared.stream(
+                token: token,
+                trackId: trackID,
+                refId: refID,
+                quality: quality
+            )
+        } catch {
+            guard refID != nil else { throw error }
+            return try await LaneAPI.shared.stream(
+                token: token,
+                trackId: trackID,
+                refId: nil,
+                quality: quality
+            )
+        }
+    }
+
+    private func isPremiumRequired(_ error: Error) -> Bool {
+        error.localizedDescription.localizedCaseInsensitiveContains("PREMIUM_REQUIRED")
+    }
+
+    private func userFacingPlaybackError(_ error: Error) -> String {
+        let detail = error.localizedDescription
+        if isPremiumRequired(error) {
+            return "This quality requires Lane Premium. Basic quality is available."
+        }
+        if detail.localizedCaseInsensitiveContains("timed out") ||
+            detail.localizedCaseInsensitiveContains("HTTP 5") ||
+            detail.localizedCaseInsensitiveContains("network") {
+            return "The track could not be loaded. Check your connection and try again."
+        }
+        return "The track is temporarily unavailable."
+    }
+
     func requestStream(for track: TrackCandidate) {
         // Every tap gets its own generation. Older resolver/download tasks are
         // ignored so a slow previous request can never start a different song.
@@ -1104,25 +1179,27 @@ final class LaneSession: ObservableObject {
                 guard self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
 
+                var requestedQuality = self.streamQuality
                 var result: TrackStreamingResult
                 do {
-                    result = try await LaneAPI.shared.stream(
-                        token: self.token,
-                        trackId: trackID,
-                        refId: track.refID,
-                        quality: self.streamQuality
+                    result = try await self.resolvedStream(
+                        trackID: trackID,
+                        refID: track.refID,
+                        quality: requestedQuality
                     )
                 } catch {
                     try Task.checkCancellation()
                     guard self.playbackRequestID == requestID,
                           self.currentTrack?.id == track.id else { return }
 
-                    if track.refID != nil {
-                        result = try await LaneAPI.shared.stream(
-                            token: self.token,
-                            trackId: trackID,
-                            refId: nil,
-                            quality: self.streamQuality
+                    if self.isPremiumRequired(error), requestedQuality != AudioQualityChoice.basic.rawValue {
+                        requestedQuality = AudioQualityChoice.basic.rawValue
+                        self.streamQuality = requestedQuality
+                        self.persist()
+                        result = try await self.resolvedStream(
+                            trackID: trackID,
+                            refID: track.refID,
+                            quality: requestedQuality
                         )
                     } else {
                         throw error
@@ -1143,7 +1220,7 @@ final class LaneSession: ObservableObject {
                         token: self.token,
                         trackId: trackID,
                         refId: nil,
-                        quality: self.streamQuality
+                        quality: requestedQuality
                     )
 
                     try Task.checkCancellation()
@@ -1181,7 +1258,7 @@ final class LaneSession: ObservableObject {
 
                 self.isBuffering = false
                 self.isPlaying = false
-                self.playerError = error.localizedDescription
+                self.playerError = self.userFacingPlaybackError(error)
                 self.output = "Playback error: \(error.localizedDescription)"
             }
         }
@@ -1302,7 +1379,8 @@ final class LaneSession: ObservableObject {
                             )
                             return
                         } catch {
-                            self.playerError = error.localizedDescription
+                            self.playerError = self.userFacingPlaybackError(error)
+                            self.output = "Playback error: \(error.localizedDescription)"
                         }
                     }
 
@@ -1318,7 +1396,7 @@ final class LaneSession: ObservableObject {
 
                     self.isBuffering = false
                     self.isPlaying = false
-                    self.playerError = detail
+                    self.playerError = "The track is temporarily unavailable."
                     self.output = "Playback error: \(detail)"
 
                 case .unknown:
@@ -1436,8 +1514,8 @@ final class LaneSession: ObservableObject {
         if url.pathExtension.lowercased() == "m3u8" {
             isBuffering = false
             isPlaying = false
-            playerError = "The HLS stream could not be opened by AVPlayer."
-            output = "Playback error: \(playerError)"
+            playerError = "The track is temporarily unavailable."
+            output = "Playback error: The HLS stream could not be opened by AVPlayer."
             return
         }
 
@@ -1518,7 +1596,7 @@ final class LaneSession: ObservableObject {
 
                             self.isBuffering = false
                             self.isPlaying = false
-                            self.playerError = detail
+                            self.playerError = "The track is temporarily unavailable."
                             self.output = "Playback error: \(detail)"
                         case .unknown:
                             self.isBuffering = true
@@ -1555,7 +1633,7 @@ final class LaneSession: ObservableObject {
                       self.currentTrack?.id == track.id else { return }
                 isBuffering = false
                 isPlaying = false
-                playerError = error.localizedDescription
+                playerError = userFacingPlaybackError(error)
                 output = "Playback error: \(error.localizedDescription)"
             }
         }
@@ -1624,7 +1702,7 @@ final class LaneSession: ObservableObject {
                       self.currentTrack?.id == track.id else { return }
                 isBuffering = false
                 isPlaying = false
-                playerError = error.localizedDescription
+                playerError = userFacingPlaybackError(error)
                 output = "Playback error: \(error.localizedDescription)"
             }
         }
@@ -1637,7 +1715,8 @@ final class LaneSession: ObservableObject {
     ) {
         guard let url = normalizedStreamURL(urlString) else {
             isBuffering = false
-            playerError = "Lane returned an invalid compatibility audio URL."
+            playerError = "The track is temporarily unavailable."
+            output = "Playback error: Lane returned an invalid compatibility audio URL."
             return
         }
 
@@ -1688,7 +1767,7 @@ final class LaneSession: ObservableObject {
                       self.currentTrack?.id == track.id else { return }
                 isBuffering = false
                 isPlaying = false
-                playerError = error.localizedDescription
+                playerError = userFacingPlaybackError(error)
                 output = "Playback error: \(error.localizedDescription)"
             }
         }
@@ -1736,8 +1815,8 @@ final class LaneSession: ObservableObject {
                     let detail = avError?.localizedDescription ?? "Cannot Open"
                     let code = avError.map { "\($0.domain) \($0.code)" } ?? "unknown AVFoundation error"
 
-                    self.playerError = "\(detail) · \(sourceDescription) · \(code)"
-                    self.output = "Playback error: \(self.playerError)"
+                    self.playerError = "The track is temporarily unavailable."
+                    self.output = "Playback error: \(detail) · \(sourceDescription) · \(code)"
 
                 case .unknown:
                     self.isBuffering = true

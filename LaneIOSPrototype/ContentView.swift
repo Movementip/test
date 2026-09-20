@@ -411,7 +411,7 @@ private struct SearchScreen: View {
                     EmptyLaneView(
                         icon: "magnifyingglass",
                         title: query.isEmpty ? "What are we looking for today?" : "Nothing found",
-                        subtitle: query.isEmpty ? "A track, artist, or album?" : session.output
+                        subtitle: query.isEmpty ? "A track, artist, or album?" : session.searchMessage
                     )
                     Spacer()
                 }
@@ -1843,14 +1843,15 @@ private struct ProfileScreen: View {
 
                         Picker("Streaming quality", selection: $session.streamQuality) {
                             ForEach(AudioQualityChoice.allCases) { quality in
-                                Text("\(quality.title) · \(quality.detail)")
+                                Text("\(quality.title) · \(quality.detail)\(!session.hasPremiumAccess && quality != .basic ? " · Premium" : "")")
                                     .tag(quality.rawValue)
+                                    .disabled(!session.hasPremiumAccess && quality != .basic)
                             }
                         }
                         .pickerStyle(.segmented)
                         .padding(.horizontal, 16)
                         .onChange(of: session.streamQuality) { _ in
-                            session.persist()
+                            session.persistStreamQualitySelection()
                         }
 
                         Button(role: .destructive) {
@@ -3021,7 +3022,7 @@ private struct ImportTracksScreen: View {
                 )
                 await acceptPreview(result)
             } catch {
-                message = error.localizedDescription
+                message = friendlyImportError(error)
             }
         }
     }
@@ -3034,7 +3035,7 @@ private struct ImportTracksScreen: View {
             do {
                 telegramCode = try await session.beginTelegramMusicImport()
             } catch {
-                message = error.localizedDescription
+                message = friendlyImportError(error)
             }
         }
     }
@@ -3048,7 +3049,7 @@ private struct ImportTracksScreen: View {
                 let result = try await session.finishTelegramMusicImport()
                 await acceptPreview(result)
             } catch {
-                message = error.localizedDescription
+                message = friendlyImportError(error)
             }
         }
     }
@@ -3063,9 +3064,24 @@ private struct ImportTracksScreen: View {
                 try await session.importTracks(ids, into: targetPlaylistID)
                 message = "Imported \(ids.count) tracks to Lane."
             } catch {
-                message = error.localizedDescription
+                message = friendlyImportError(error)
             }
         }
+    }
+
+    private func friendlyImportError(_ error: Error) -> String {
+        let detail = error.localizedDescription
+        if detail.localizedCaseInsensitiveContains("timed out") {
+            return "Lane is taking longer than usual. Check the link and try again."
+        }
+        if detail.localizedCaseInsensitiveContains("HTTP 5") ||
+            detail.localizedCaseInsensitiveContains("DATA_ACCESS_ERROR") {
+            return "The music service is temporarily unavailable. Please try again."
+        }
+        if detail.localizedCaseInsensitiveContains("INVALID_TRACK_IDS_BODY") {
+            return "Lane could not resolve the tracks in this playlist. Please try again."
+        }
+        return "Import failed. Check the source link and try again."
     }
 }
 
@@ -3188,11 +3204,12 @@ private struct DiagnosticsScreen: View {
             Section("Playback") {
                 Picker("Quality", selection: $session.streamQuality) {
                     ForEach(AudioQualityChoice.allCases) { quality in
-                        Text(quality.rawValue)
+                        Text("\(quality.rawValue)\(!session.hasPremiumAccess && quality != .basic ? " · Premium" : "")")
                             .tag(quality.rawValue)
+                            .disabled(!session.hasPremiumAccess && quality != .basic)
                     }
                 }
-                .onChange(of: session.streamQuality) { _ in session.persist() }
+                .onChange(of: session.streamQuality) { _ in session.persistStreamQualitySelection() }
             }
 
             Section("Request") {

@@ -739,6 +739,7 @@ struct APKAlbumCardRow: View {
 
 struct APKAlbumDetailScreen: View {
     @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
     let seed: LaneAlbum
 
     @State private var album: LaneAlbum?
@@ -834,11 +835,22 @@ struct APKAlbumDetailScreen: View {
                         }
                         .padding(.vertical, 28)
                     } else if tracks.isEmpty {
-                        Text(session.output.isEmpty ? "No tracks" : session.output)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.vertical, 24)
+                        VStack(spacing: 12) {
+                            Image(systemName: "music.note.list")
+                                .font(.system(size: 31, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Text(session.trackResolveMessage.isEmpty ? "No tracks" : session.trackResolveMessage)
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                            Button("Try again") {
+                                Task { await loadAlbum() }
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(apkPink)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 24)
                     } else {
                         VStack(spacing: 0) {
                             ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
@@ -850,9 +862,6 @@ struct APKAlbumDetailScreen: View {
                                         session.currentIndex = index
                                         session.requestStream(for: track)
                                         showPlayer = true
-                                    },
-                                    onMore: {
-                                        session.addToQueue(track)
                                     }
                                 )
                             }
@@ -876,23 +885,27 @@ struct APKAlbumDetailScreen: View {
             }
         }
         .background(apkBackground.ignoresSafeArea())
+        .tint(.white)
+        .navigationBarBackButtonHidden(true)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.plain)
+            }
             ToolbarItem(placement: .principal) {
                 Text("Album")
                     .font(.system(size: 16, weight: .semibold))
             }
         }
-        .task {
-            let detail = await session.fetchAlbumDetail(seed)
-            album = detail
-            tracks = await session.resolveTracksByIDs(
-                detail.tracks ?? [],
-                prefetch: false,
-                refID: detail.id.map { "album:\($0)" }
-            )
-            loading = false
-        }
+        .task { await loadAlbum() }
+        .refreshable { await loadAlbum() }
         .fullScreenCover(isPresented: $showPlayer) {
             APKFullPlayerView()
                 .environmentObject(session)
@@ -913,6 +926,18 @@ struct APKAlbumDetailScreen: View {
         return pieces.joined(separator: " • ")
     }
 
+    private func loadAlbum() async {
+        loading = true
+        let detail = await session.fetchAlbumDetail(seed)
+        album = detail
+        tracks = await session.resolveTracksByIDs(
+            detail.tracks ?? [],
+            prefetch: false,
+            refID: detail.id.map { "album:\($0)" }
+        )
+        loading = false
+    }
+
     private func play(shuffled: Bool) {
         guard !tracks.isEmpty else { return }
         let list = shuffled ? tracks.shuffled() : tracks
@@ -925,10 +950,10 @@ struct APKAlbumDetailScreen: View {
 
 
 private struct APKAlbumTrackRow: View {
+    @EnvironmentObject private var session: LaneSession
     let index: Int
     let track: TrackCandidate
     let onTap: () -> Void
-    let onMore: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -962,7 +987,23 @@ private struct APKAlbumTrackRow: View {
                     .foregroundStyle(Color.white.opacity(0.42))
             }
 
-            Button(action: onMore) {
+            Menu {
+                Button("Play next", systemImage: "text.insert") {
+                    session.playNext(track)
+                }
+                Button("Add to queue", systemImage: "text.badge.plus") {
+                    session.addToQueue(track)
+                }
+                Button(
+                    session.isFavorite(track) ? "Remove from favorites" : "Add to favorites",
+                    systemImage: session.isFavorite(track) ? "heart.slash" : "heart"
+                ) {
+                    session.toggleFavorite(track)
+                }
+                Button("Download", systemImage: "arrow.down.circle") {
+                    session.downloadTrack(track)
+                }
+            } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(Color.white.opacity(0.68))
@@ -1207,9 +1248,6 @@ struct APKArtistDetailScreen: View {
                             session.currentIndex = index
                             session.requestStream(for: track)
                             showPlayer = true
-                        },
-                        onMore: {
-                            session.addToQueue(track)
                         }
                     )
                 }
@@ -1569,6 +1607,19 @@ struct APKFullPlayerView: View {
                             }
                             .padding(.horizontal, 8)
                             .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                            .contentShape(Rectangle())
+                            .gesture(
+                                DragGesture(minimumDistance: 38)
+                                    .onEnded { value in
+                                        guard abs(value.translation.width) > abs(value.translation.height),
+                                              abs(value.translation.width) > 70 else { return }
+                                        if value.translation.width < 0 {
+                                            session.next()
+                                        } else {
+                                            session.previous()
+                                        }
+                                    }
+                            )
 
                             HStack(alignment: .center, spacing: 12) {
                                 VStack(alignment: .leading, spacing: 4) {
@@ -1644,6 +1695,14 @@ struct APKFullPlayerView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 45)
+                .onEnded { value in
+                    guard value.translation.height > 110,
+                          abs(value.translation.height) > abs(value.translation.width) * 1.25 else { return }
+                    dismiss()
+                }
+        )
         .sheet(isPresented: $showComments) {
             if let track = session.currentTrack {
                 APKCommentsScreen(track: track)

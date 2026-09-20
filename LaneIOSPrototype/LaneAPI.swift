@@ -321,7 +321,10 @@ actor LaneAPI {
         }
 
         if let json {
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            // Lane Android 1.4.7's kotlinx-serialization converter sends this
+            // exact media type. Keep it byte-for-byte compatible because the
+            // /user/tracks validator is stricter than most Lane endpoints.
+            request.setValue("application/json; charset=UTF8", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: json)
         }
 
@@ -346,6 +349,7 @@ actor LaneAPI {
             "/createUserOrLogin",
             "/delete-playlist",
             "/import/telegram/start",
+            "/import/telegram/finish",
             "/share/create",
             "/user/history-bump-item",
             "/user/history-delete-item",
@@ -371,64 +375,90 @@ actor LaneAPI {
 
         var lastError: Error?
         var lastResult: APIResult?
+        let retryRounds = canFailOverRegionalHost ? 2 : 1
+        let longReadPaths: Set<String> = [
+            "/user/import/preview",
+            "/user/tracks",
+            "/platforms/search",
+            "/platforms/album",
+            "/platforms/artist",
+            "/track/stream",
+            "/track/download"
+        ]
+        let requestTimeout: TimeInterval = canFailOverRegionalHost
+            ? (normalizedPath == "/user/import/preview" ? 45 : (longReadPaths.contains(normalizedPath) ? 20 : 12))
+            : 30
 
-        for (index, targetBase) in candidates.enumerated() {
-            do {
-                let unsigned = try build(
-                    path: path,
-                    method: method,
-                    token: token,
-                    query: query,
-                    headers: headers,
-                    json: json,
-                    baseURL: targetBase
-                )
+        for round in 0..<retryRounds {
+            var shouldRetryRound = false
 
-                let signer = signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
-                let signed = try signer.sign(unsigned, body: unsigned.httpBody)
+            for (index, targetBase) in candidates.enumerated() {
+                do {
+                    let unsigned = try build(
+                        path: path,
+                        method: method,
+                        token: token,
+                        query: query,
+                        headers: headers,
+                        json: json,
+                        baseURL: targetBase
+                    )
 
-                var request = signed
-                request.timeoutInterval = canFailOverRegionalHost ? 5 : 30
+                    let signer = signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
+                    let signed = try signer.sign(unsigned, body: unsigned.httpBody)
 
-                let (rawData, response) = try await URLSession.shared.data(for: request)
+                    var request = signed
+                    request.timeoutInterval = requestTimeout
 
-                guard let http = response as? HTTPURLResponse else {
-                    throw LaneAPIError.nonHTTP
-                }
+                    let (rawData, response) = try await URLSession.shared.data(for: request)
 
-                let data = try decodeOfficialTransport(rawData, response: http)
-                let result = APIResult(
-                    status: http.statusCode,
-                    headers: http.allHeaderFields,
-                    data: data
-                )
-                lastResult = result
+                    guard let http = response as? HTTPURLResponse else {
+                        throw LaneAPIError.nonHTTP
+                    }
 
-                // For safe read requests, a regional edge can be reachable
-                // but still reject the request (403/404/451/5xx or a backend-
-                // specific 400). Trying the alternate Lane host is safe here
-                // and is important on networks where one region is filtered.
-                if canFailOverRegionalHost,
-                   !(200..<400).contains(http.statusCode),
-                   index + 1 < candidates.count {
-                    continue
-                }
+                    let data = try decodeOfficialTransport(rawData, response: http)
+                    let result = APIResult(
+                        status: http.statusCode,
+                        headers: http.allHeaderFields,
+                        data: data
+                    )
+                    lastResult = result
 
-                if (200..<400).contains(http.statusCode) {
-                    if signingConfiguration.mode == .official {
-                        rememberWorkingRegionalBase(targetBase)
-                    } else {
-                        base = targetBase
+                    if (200..<400).contains(http.statusCode) {
+                        if signingConfiguration.mode == .official {
+                            rememberWorkingRegionalBase(targetBase)
+                        } else {
+                            base = targetBase
+                        }
+                        return result
+                    }
+
+                    let transient = http.statusCode == 408 ||
+                        http.statusCode == 425 ||
+                        http.statusCode == 429 ||
+                        (500...599).contains(http.statusCode)
+                    shouldRetryRound = shouldRetryRound || transient
+
+                    // Safe reads may move to the other regional edge. Mutation
+                    // requests never enter this branch, so they remain single-shot.
+                    if canFailOverRegionalHost, index + 1 < candidates.count {
+                        continue
+                    }
+
+                    if !transient || round + 1 >= retryRounds {
+                        return result
+                    }
+                } catch {
+                    lastError = error
+                    shouldRetryRound = true
+                    if index + 1 < candidates.count {
+                        continue
                     }
                 }
-
-                return result
-            } catch {
-                lastError = error
-                if index + 1 < candidates.count {
-                    continue
-                }
             }
+
+            guard shouldRetryRound, round + 1 < retryRounds else { break }
+            try? await Task.sleep(nanoseconds: round == 0 ? 350_000_000 : 750_000_000)
         }
 
         if let lastResult {
