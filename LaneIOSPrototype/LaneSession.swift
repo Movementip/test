@@ -418,18 +418,30 @@ final class LaneSession: ObservableObject {
 
     func loadPlaylistTracks(_ playlist: LanePlaylist, completion: @escaping ([TrackCandidate]) -> Void) {
         guard let id = playlist.playlistId else {
-            completion(playlist.playlistTracks?.map { TrackCandidate($0, refID: playlist.playlistId) } ?? [])
+            let fallback: [TrackCandidate] = playlist.playlistTracks?.map {
+                TrackCandidate($0, refID: nil)
+            } ?? []
+            completion(fallback)
             return
         }
 
-        Task {
+        Task { @MainActor in
             do {
                 await configureAPI()
-                let result = try await LaneAPI.shared.playlistTracks(token: token, playlistId: id)
-                completion(result.items.map { TrackCandidate($0, refID: id) })
+                let result: PaginatedResult<TrackData> = try await LaneAPI.shared.playlistTracks(
+                    token: token,
+                    playlistId: id
+                )
+                let tracks: [TrackCandidate] = result.items.map {
+                    TrackCandidate($0, refID: id)
+                }
+                completion(tracks)
             } catch {
                 output = error.localizedDescription
-                completion(playlist.playlistTracks?.map(TrackCandidate.init) ?? [])
+                let fallback: [TrackCandidate] = playlist.playlistTracks?.map {
+                    TrackCandidate($0, refID: id)
+                } ?? []
+                completion(fallback)
             }
         }
     }
