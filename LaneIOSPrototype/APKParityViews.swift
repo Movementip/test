@@ -281,35 +281,40 @@ struct APKSearchAlbumRow: View {
     let album: LaneAlbum
 
     var body: some View {
-        HStack(spacing: 0) {
-            APKRemoteImage(url: album.coverUrl, cornerRadius: 5)
-                .frame(width: 52, height: 52)
+        NavigationLink {
+            APKAlbumDetailScreen(seed: album)
+        } label: {
+            HStack(spacing: 0) {
+                APKRemoteImage(url: album.coverUrl, cornerRadius: 5)
+                    .frame(width: 52, height: 52)
 
-            Spacer().frame(width: 16)
+                Spacer().frame(width: 16)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(album.name ?? "Album")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-
-                HStack(spacing: 5) {
-                    APKPlatformIcon(platform: album.platform, size: 10)
-                    Text("Album • \(album.artistsDisplayedName ?? "")")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color.white.opacity(0.70))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(album.name ?? "Album")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
                         .lineLimit(1)
-                        .padding(.trailing, 10)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
 
-            Image(systemName: "chevron.right")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.60))
-                .frame(width: 34, height: 52)
+                    HStack(spacing: 5) {
+                        APKPlatformIcon(platform: album.platform, size: 10)
+                        Text("Album • \(album.artistsDisplayedName ?? "")")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.white.opacity(0.70))
+                            .lineLimit(1)
+                            .padding(.trailing, 10)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.60))
+                    .frame(width: 34, height: 52)
+            }
+            .padding(.vertical, 4)
         }
-        .padding(.vertical, 4)
+        .buttonStyle(.plain)
     }
 }
 
@@ -546,34 +551,286 @@ struct APKAlbumCardRow: View {
     let album: LaneAlbum
 
     var body: some View {
-        HStack(spacing: 16) {
-            APKRemoteImage(url: album.coverUrl, cornerRadius: 5)
-                .frame(width: 64, height: 64)
+        NavigationLink {
+            APKAlbumDetailScreen(seed: album)
+        } label: {
+            HStack(spacing: 16) {
+                APKRemoteImage(url: album.coverUrl, cornerRadius: 5)
+                    .frame(width: 64, height: 64)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(album.name ?? "Album")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(album.name ?? "Album")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
 
-                Text("Album • " + ((album.year?.isEmpty == false ? album.year : album.artistsDisplayedName) ?? ""))
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.58))
-                    .lineLimit(1)
+                    Text("Album • " + ((album.year?.isEmpty == false ? album.year : album.artistsDisplayedName) ?? ""))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.58))
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.42))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(apkSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.white.opacity(0.10), lineWidth: 1)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+
+struct APKAlbumDetailScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    let seed: LaneAlbum
+
+    @State private var album: LaneAlbum?
+    @State private var tracks: [TrackCandidate] = []
+    @State private var loading = true
+    @State private var showPlayer = false
+
+    private var value: LaneAlbum { album ?? seed }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                ZStack(alignment: .bottom) {
+                    APKRemoteImage(url: value.coverUrl, cornerRadius: 0)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 330)
+                        .clipped()
+                        .blur(radius: 26)
+                        .scaleEffect(1.16)
+                        .opacity(0.45)
+
+                    LinearGradient(
+                        colors: [
+                            apkBackground.opacity(0.05),
+                            apkBackground.opacity(0.60),
+                            apkBackground
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+
+                    APKRemoteImage(url: value.coverUrl, cornerRadius: 10)
+                        .frame(width: 225, height: 225)
+                        .shadow(color: .black.opacity(0.45), radius: 22, y: 14)
+                        .padding(.bottom, 18)
+                }
+                .frame(height: 345)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(value.name ?? "Album")
+                        .font(.system(size: 28, weight: .bold))
+                        .lineLimit(2)
+
+                    if let artists = value.artistsDisplayedName, !artists.isEmpty {
+                        Text(artists)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.78))
+                            .lineLimit(1)
+                    }
+
+                    HStack(spacing: 6) {
+                        APKPlatformIcon(platform: value.platform, size: 11)
+
+                        Text(albumInfo)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.white.opacity(0.56))
+                    }
+
+                    HStack(spacing: 14) {
+                        Button {
+                            play(shuffled: false)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 16, weight: .bold))
+                                Text("Play")
+                                    .font(.system(size: 15, weight: .bold))
+                            }
+                            .foregroundStyle(.black)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 48)
+                            .background(apkPink, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(tracks.isEmpty)
+
+                        Button {
+                            play(shuffled: true)
+                        } label: {
+                            Image(systemName: "shuffle")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 48, height: 48)
+                                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(tracks.isEmpty)
+                    }
+                    .padding(.top, 6)
+
+                    if loading {
+                        HStack {
+                            Spacer()
+                            ProgressView().tint(apkPink)
+                            Spacer()
+                        }
+                        .padding(.vertical, 28)
+                    } else if tracks.isEmpty {
+                        Text(session.output.isEmpty ? "No tracks" : session.output)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 24)
+                    } else {
+                        VStack(spacing: 0) {
+                            ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
+                                APKAlbumTrackRow(
+                                    index: index + 1,
+                                    track: track,
+                                    onTap: {
+                                        session.queue = tracks
+                                        session.currentIndex = index
+                                        session.requestStream(for: track)
+                                        showPlayer = true
+                                    },
+                                    onMore: {
+                                        session.addToQueue(track)
+                                    }
+                                )
+                            }
+                        }
+                        .padding(.top, 8)
+                    }
+
+                    if let year = value.year, !year.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Release date")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Text(year)
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .padding(.top, 12)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 28)
+            }
+        }
+        .background(apkBackground.ignoresSafeArea())
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Text("Album")
+                    .font(.system(size: 16, weight: .semibold))
+            }
+        }
+        .task {
+            let detail = await session.fetchAlbumDetail(seed)
+            album = detail
+            tracks = await session.resolveTracksByIDs(detail.tracks ?? [], prefetch: false)
+            loading = false
+        }
+        .fullScreenCover(isPresented: $showPlayer) {
+            APKFullPlayerView()
+                .environmentObject(session)
+        }
+    }
+
+    private var albumInfo: String {
+        var pieces: [String] = []
+        if let type = value.type, !type.isEmpty {
+            pieces.append(type.capitalized)
+        } else {
+            pieces.append("Album")
+        }
+        if let year = value.year, !year.isEmpty {
+            pieces.append(year)
+        }
+        pieces.append(tracks.count == 1 ? "1 track" : "\(tracks.count) tracks")
+        return pieces.joined(separator: " • ")
+    }
+
+    private func play(shuffled: Bool) {
+        guard !tracks.isEmpty else { return }
+        let list = shuffled ? tracks.shuffled() : tracks
+        session.queue = list
+        session.currentIndex = 0
+        session.requestStream(for: list[0])
+        showPlayer = true
+    }
+}
+
+
+private struct APKAlbumTrackRow: View {
+    let index: Int
+    let track: TrackCandidate
+    let onTap: () -> Void
+    let onMore: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("\(index)")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.48))
+                .frame(width: 22, alignment: .center)
+
+            Button(action: onTap) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(track.title)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+
+                    HStack(spacing: 5) {
+                        APKPlatformIcon(platform: track.platform, size: 9)
+                        Text(track.subtitle)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.white.opacity(0.58))
+                            .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+
+            if let duration = track.duration, !duration.isEmpty {
+                Text(duration)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.42))
             }
 
-            Spacer(minLength: 0)
+            Button(action: onMore) {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.68))
+                    .frame(width: 34, height: 46)
+            }
+            .buttonStyle(.plain)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(apkSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        .frame(minHeight: 58)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.white.opacity(0.055))
+                .frame(height: 1)
+                .padding(.leading, 34)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
     }
 }
 
