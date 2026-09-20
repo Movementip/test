@@ -527,8 +527,16 @@ actor LaneAPI {
         try await request(path: "/platforms/album", token: token, query: [.init(name: "albumId", value: albumId)])
     }
 
+    func albumDetail(token: String, albumId: String) async throws -> LaneAlbum {
+        try await decoded(LaneAlbum.self, path: "/platforms/album", token: token, query: [.init(name: "albumId", value: albumId)])
+    }
+
     func artist(token: String, artistId: String) async throws -> APIResult {
         try await request(path: "/platforms/artist", token: token, query: [.init(name: "artistId", value: artistId)])
+    }
+
+    func artistDetail(token: String, artistId: String) async throws -> LaneArtist {
+        try await decoded(LaneArtist.self, path: "/platforms/artist", token: token, query: [.init(name: "artistId", value: artistId)])
     }
 
     // MARK: Home / account
@@ -751,7 +759,8 @@ actor LaneAPI {
             query: [
                 .init(name: "page", value: String(page)),
                 .init(name: "pageSize", value: String(pageSize)),
-                .init(name: "sortBy", value: sortBy)
+                .init(name: "sortBy", value: sortBy ?? "Relevance"),
+                .init(name: "highlightCommentId", value: nil)
             ]
         )
     }
