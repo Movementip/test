@@ -295,7 +295,7 @@ private final class DirectHTTPSOperation {
         }
         text += "\r\n"
 
-        guard var data = text.data(using: .utf8) else { throw URLError(.cannotEncodeContentData) }
+        var data = Data(text.utf8)
         if let body = request.httpBody {
             data.append(body)
         }
