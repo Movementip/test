@@ -58,7 +58,6 @@ struct TrackData: Decodable, Hashable {
     let duration: String?
     let genre: String?
     let artistAvatars: [String]?
-    let artistAvatars: [String]?
 }
 
 struct LaneRelatedArtist: Decodable, Hashable {
@@ -82,6 +81,36 @@ struct LaneArtist: Decodable, Hashable {
     let albums: [LaneAlbum]?
     let relatedArtists: [LaneRelatedArtist]?
     let lastUpdated: Int64?
+
+    init(
+        name: String? = nil,
+        id: String? = nil,
+        platform: String? = nil,
+        description: String? = nil,
+        verified: Bool? = nil,
+        avatarUrl: String? = nil,
+        headerUrl: String? = nil,
+        biography: String? = nil,
+        topTracks: [String]? = nil,
+        recentTracks: [String]? = nil,
+        albums: [LaneAlbum]? = nil,
+        relatedArtists: [LaneRelatedArtist]? = nil,
+        lastUpdated: Int64? = nil
+    ) {
+        self.name = name
+        self.id = id
+        self.platform = platform
+        self.description = description
+        self.verified = verified
+        self.avatarUrl = avatarUrl
+        self.headerUrl = headerUrl
+        self.biography = biography
+        self.topTracks = topTracks
+        self.recentTracks = recentTracks
+        self.albums = albums
+        self.relatedArtists = relatedArtists
+        self.lastUpdated = lastUpdated
+    }
 }
 
 struct LaneAlbum: Decodable, Hashable {
@@ -95,6 +124,30 @@ struct LaneAlbum: Decodable, Hashable {
     let artistsDisplayedName: String?
     let tracks: [String]?
     let lastUpdated: Int64?
+
+    init(
+        name: String? = nil,
+        id: String? = nil,
+        platform: String? = nil,
+        type: String? = nil,
+        coverUrl: String? = nil,
+        year: String? = nil,
+        artists: [String]? = nil,
+        artistsDisplayedName: String? = nil,
+        tracks: [String]? = nil,
+        lastUpdated: Int64? = nil
+    ) {
+        self.name = name
+        self.id = id
+        self.platform = platform
+        self.type = type
+        self.coverUrl = coverUrl
+        self.year = year
+        self.artists = artists
+        self.artistsDisplayedName = artistsDisplayedName
+        self.tracks = tracks
+        self.lastUpdated = lastUpdated
+    }
 }
 
 struct LanePlaylist: Decodable, Hashable {
