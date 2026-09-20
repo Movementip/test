@@ -512,6 +512,14 @@ actor LaneAPI {
         try await request(path: "/track/\(trackId)/lyrics", token: token)
     }
 
+    func trackLyricsTyped(token: String, trackId: String) async throws -> LaneTrackLyrics {
+        try await decoded(
+            LaneTrackLyrics.self,
+            path: "/track/\(trackId)/lyrics",
+            token: token
+        )
+    }
+
     func recommendations(token: String, trackId: String, platform: String) async throws -> APIResult {
         try await request(
             path: "/platforms/recommendations",
