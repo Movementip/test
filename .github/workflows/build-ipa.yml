@@ -22,6 +22,11 @@ jobs:
           test -n "$APP_PATH"
           mkdir -p Payload Output
           cp -R "$APP_PATH" Payload/Lane.app
+          # Original artwork extracted from the Android Lane 1.4.7 APK.
+          unzip -o LaneOriginalAssets.zip -d Payload/Lane.app
+          # Generate iPhone icon files from the original Lane splash artwork.
+          sips -z 120 120 Payload/Lane.app/ic_splash_logo_dark.png --out Payload/Lane.app/Icon-60@2x.png >/dev/null
+          sips -z 180 180 Payload/Lane.app/ic_splash_logo_dark.png --out Payload/Lane.app/Icon-60@3x.png >/dev/null
           ditto -c -k --sequesterRsrc --keepParent Payload Output/Lane.ipa
       - uses: actions/upload-artifact@v4
         with:
