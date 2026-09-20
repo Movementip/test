@@ -112,6 +112,7 @@ final class LaneSession: ObservableObject {
     private var playerItemStatusObserver: NSKeyValueObservation?
     private var playerTimeControlObserver: NSKeyValueObservation?
     private var periodicTimeObserver: Any?
+    private var playerRetriedWithCompatibilityHeaders = false
 
     var isGuest: Bool {
         token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -473,7 +474,21 @@ final class LaneSession: ObservableObject {
         }
 
         if let recent = try? await LaneAPI.shared.recentRaw(token: token) {
-            recentTracks = JSONProbe.tracks(recent.json)
+            let context = "history:\(UUID().uuidString)"
+            recentTracks = JSONProbe.tracks(recent.json).map { track in
+                TrackCandidate(
+                    id: track.id,
+                    title: track.title,
+                    subtitle: track.subtitle,
+                    trackID: track.trackID,
+                    refID: track.refID ?? context,
+                    platform: track.platform,
+                    coverURL: track.coverURL,
+                    duration: track.duration,
+                    genre: track.genre,
+                    artistAvatars: track.artistAvatars
+                )
+            }
         }
     }
 
@@ -835,20 +850,39 @@ final class LaneSession: ObservableObject {
 
         busy = true
         isBuffering = true
+        playerRetriedWithCompatibilityHeaders = false
 
         Task {
             defer { busy = false }
             do {
                 await configureAPI()
-                let result = try await LaneAPI.shared.stream(
-                    token: token,
-                    trackId: trackID,
-                    refId: track.refID,
-                    quality: streamQuality
-                )
+
+                let result: TrackStreamingResult
+                do {
+                    result = try await LaneAPI.shared.stream(
+                        token: token,
+                        trackId: trackID,
+                        refId: track.refID,
+                        quality: streamQuality
+                    )
+                } catch {
+                    // refId is contextual in Android Lane and nullable in TracksApi.
+                    // If a migrated/fallback context is rejected, retry exactly once
+                    // without it instead of leaving the player dead.
+                    if track.refID != nil {
+                        result = try await LaneAPI.shared.stream(
+                            token: token,
+                            trackId: trackID,
+                            refId: nil,
+                            quality: streamQuality
+                        )
+                    } else {
+                        throw error
+                    }
+                }
 
                 streamURL = result.url
-                try play(urlString: result.url)
+                try play(urlString: result.url, useCompatibilityHeaders: false)
             } catch {
                 isBuffering = false
                 isPlaying = false
@@ -891,7 +925,7 @@ final class LaneSession: ObservableObject {
         periodicTimeObserver = nil
     }
 
-    private func play(urlString: String) throws {
+    private func play(urlString: String, useCompatibilityHeaders: Bool) throws {
         guard let url = normalizedStreamURL(urlString) else {
             throw NSError(
                 domain: "LanePlayer",
@@ -909,18 +943,23 @@ final class LaneSession: ObservableObject {
         )
         try AVAudioSession.sharedInstance().setActive(true)
 
-        // Android Lane resolves the URL and hands it to Media3. Supplying the
-        // same client identity helps CDN endpoints which check the media client.
-        let headers = [
-            "User-Agent": "LaneMusic/1.0 (Android; Mobile)",
-            "Accept": "*/*",
-            "Accept-Language": Locale.current.language.languageCode?.identifier ?? "en"
-        ]
-
-        let asset = AVURLAsset(
-            url: url,
-            options: ["AVURLAssetHTTPHeaderFieldsKey": headers]
-        )
+        // Android Lane's Media3 data source is a plain
+        // DefaultHttpDataSource.Factory. Start with an ordinary URL request.
+        // A compatibility header pass is used only if AVFoundation rejects it.
+        let asset: AVURLAsset
+        if useCompatibilityHeaders {
+            let headers = [
+                "User-Agent": "LaneMusic/1.0 (Android; Mobile)",
+                "Accept": "*/*",
+                "Accept-Language": Locale.current.language.languageCode?.identifier ?? "en"
+            ]
+            asset = AVURLAsset(
+                url: url,
+                options: ["AVURLAssetHTTPHeaderFieldsKey": headers]
+            )
+        } else {
+            asset = AVURLAsset(url: url)
+        }
         let item = AVPlayerItem(asset: asset)
         let newPlayer = AVPlayer(playerItem: item)
         newPlayer.automaticallyWaitsToMinimizeStalling = true
@@ -943,9 +982,25 @@ final class LaneSession: ObservableObject {
                     self.player?.play()
 
                 case .failed:
+                    let detail = item.error?.localizedDescription ?? "Unable to play this stream"
+
+                    if !useCompatibilityHeaders,
+                       !self.playerRetriedWithCompatibilityHeaders,
+                       !self.streamURL.isEmpty {
+                        self.playerRetriedWithCompatibilityHeaders = true
+                        do {
+                            try self.play(
+                                urlString: self.streamURL,
+                                useCompatibilityHeaders: true
+                            )
+                            return
+                        } catch {
+                            self.playerError = error.localizedDescription
+                        }
+                    }
+
                     self.isBuffering = false
                     self.isPlaying = false
-                    let detail = item.error?.localizedDescription ?? "Unable to play this stream"
                     self.playerError = detail
                     self.output = "Playback error: \(detail)"
 
