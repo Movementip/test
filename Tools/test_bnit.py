@@ -59,6 +59,36 @@ def sign(method,url,time_offset=0):
     client=custom_b64(os.urandom(24))
     return {'X-Accept-Red':'1','X-Core-Token':core,'X-Client-Meta':client,'X-Request-Trace-Id':trace}
 
+def verify_magic(cipher:bytes, nonce:str)->bytes:
+    key=KEY+nonce.encode()
+    S=list(range(256)); j=0
+    for i in range(256):
+        j=(j+S[i]+key[i%len(key)])&255
+        S[i],S[j]=S[j],S[i]
+    i=j=0
+    out=bytearray()
+    for b in cipher:
+        i=(i+1)&255
+        j=(j+S[i])&255
+        S[i],S[j]=S[j],S[i]
+        k=S[(S[i]+S[j])&255]
+        out.append(b^k)
+        mix=(i+k)&255
+        S[mix]=(S[mix]+k)&255
+    return bytes(out)
+
+def decode_response(body:bytes, headers:dict)->bytes:
+    if headers.get('X-Core-Red')!='1':
+        return body
+    nonce=headers.get('X-Resp-Nonce')
+    if not nonce:
+        return body
+    plain=verify_magic(body,nonce)
+    if headers.get('X-Core-Compressed')=='1':
+        import gzip
+        plain=gzip.decompress(plain)
+    return plain
+
 def req(url,signed=False,ldi='7e595d40b9b542d1',tz='Asia/Yekaterinburg',offset=0):
     h={'Accept':'application/json','Accept-Language':'ru','LDI':ldi,'TZ':tz,'X-App-Version':'207','X-Platform':'android','X-Theme':'dark','User-Agent':'LaneMusic/1.0 (Android; Mobile)','Connection':'close'}
     if signed: h.update(sign('GET',url,offset))
@@ -69,15 +99,29 @@ def req(url,signed=False,ldi='7e595d40b9b542d1',tz='Asia/Yekaterinburg',offset=0
             print('\nURL',url,'signed',signed,'STATUS',resp.status)
             print('HEADERS',dict(resp.headers))
             print('BODY_HEX',body.hex())
-            print('BODY',body[:2000].decode('utf-8','replace'))
-            return resp.status,body,dict(resp.headers)
+            headers=dict(resp.headers)
+            try:
+                decoded=decode_response(body,headers)
+            except Exception as de:
+                decoded=b''
+                print('DECODE ERROR',repr(de))
+            print('BODY RAW HEX',body[:200].hex())
+            print('BODY DECODED',decoded[:4000].decode('utf-8','replace'))
+            return resp.status,decoded,headers
     except urllib.error.HTTPError as e:
         body=e.read()
         print('\nURL',url,'signed',signed,'STATUS',e.code)
         print('HEADERS',dict(e.headers))
         print('BODY_HEX',body.hex())
-        print('BODY',body[:2000].decode('utf-8','replace'))
-        return e.code,body,dict(e.headers)
+        headers=dict(e.headers)
+        try:
+            decoded=decode_response(body,headers)
+        except Exception as de:
+            decoded=b''
+            print('DECODE ERROR',repr(de))
+        print('BODY RAW HEX',body[:200].hex())
+        print('BODY DECODED',decoded[:4000].decode('utf-8','replace'))
+        return e.code,decoded,headers
     except Exception as e:
         print('\nURL',url,'signed',signed,'ERROR',repr(e)); return 0,b'',{}
 
