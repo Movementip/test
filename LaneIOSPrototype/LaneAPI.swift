@@ -48,6 +48,10 @@ actor LaneAPI {
         }
     }
 
+    func currentBaseURL() -> String {
+        base.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
     private func build(
         path: String,
         method: String,
@@ -143,22 +147,82 @@ actor LaneAPI {
             throw LaneAPIError.decoding("Empty Telegram auth id")
         }
 
+        var candidates: [URL] = []
+        for candidate in [
+            base,
+            URL(string: "https://laneapi.com")!,
+            URL(string: "https://ru.laneapi.com")!
+        ] {
+            if !candidates.contains(where: { $0.host == candidate.host }) {
+                candidates.append(candidate)
+            }
+        }
+
         var lastStatus = 0
+        var lastBody = "No response from Lane authentication servers."
+
         for index in 0..<attempts {
-            let result = try await request(path: "/auth/\(clean)")
-            lastStatus = result.status
+            for host in candidates {
+                let url = host
+                    .appendingPathComponent("auth")
+                    .appendingPathComponent(clean)
 
-            if (200..<300).contains(result.status), !result.data.isEmpty {
-                if let response = try? JSONDecoder().decode(LaneTokenResponse.self, from: result.data) {
-                    return response
-                }
+                var req = URLRequest(url: url)
+                req.httpMethod = "GET"
+                req.timeoutInterval = 8
+                req.setValue("application/json", forHTTPHeaderField: "Accept")
 
-                // Some Lane backend revisions wrap the bearer token differently.
-                // Accept a token discovered anywhere in the JSON response.
-                if let object = result.json,
-                   let token = JSONProbe.token(object),
-                   !token.isEmpty {
-                    return LaneTokenResponse(token: token, isFirstAuth: nil)
+                do {
+                    let (data, response) = try await URLSession.shared.data(for: req)
+                    guard let http = response as? HTTPURLResponse else { continue }
+
+                    lastStatus = http.statusCode
+                    let result = APIResult(status: http.statusCode, headers: http.allHeaderFields, data: data)
+                    lastBody = result.pretty
+
+                    guard (200..<300).contains(http.statusCode), !data.isEmpty else {
+                        continue
+                    }
+
+                    if let decoded = try? JSONDecoder().decode(LaneTokenResponse.self, from: data),
+                       !decoded.token.isEmpty {
+                        base = host
+                        return decoded
+                    }
+
+                    if let object = result.json,
+                       let token = JSONProbe.token(object),
+                       !token.isEmpty {
+                        base = host
+                        return LaneTokenResponse(token: token, isFirstAuth: nil)
+                    }
+
+                    if let jsonString = try? JSONDecoder().decode(String.self, from: data),
+                       isPlausibleBearerToken(jsonString) {
+                        base = host
+                        return LaneTokenResponse(token: jsonString, isFirstAuth: nil)
+                    }
+
+                    if let plain = String(data: data, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                       isPlausibleBearerToken(plain) {
+                        base = host
+                        return LaneTokenResponse(token: plain, isFirstAuth: nil)
+                    }
+
+                    for key in ["Authorization", "authorization", "X-Auth-Token", "X-Access-Token"] {
+                        if let value = http.value(forHTTPHeaderField: key) {
+                            let token = value
+                                .replacingOccurrences(of: "Bearer ", with: "", options: [.caseInsensitive])
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            if isPlausibleBearerToken(token) {
+                                base = host
+                                return LaneTokenResponse(token: token, isFirstAuth: nil)
+                            }
+                        }
+                    }
+                } catch {
+                    lastBody = error.localizedDescription
                 }
             }
 
@@ -167,7 +231,18 @@ actor LaneAPI {
             }
         }
 
-        throw LaneAPIError.http(lastStatus, "Authorization token was not returned after \(attempts) attempts")
+        throw LaneAPIError.http(
+            lastStatus,
+            "Telegram confirmed authorization, but Lane did not return a token yet. Last response: \(lastBody)"
+        )
+    }
+
+    private func isPlausibleBearerToken(_ value: String) -> Bool {
+        let token = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard token.count >= 20 else { return false }
+
+        let rejected = ["null", "nil", "true", "false", "pending", "waiting", "success", "ok"]
+        return !rejected.contains(token.lowercased())
     }
 
     // MARK: Catalog / player
