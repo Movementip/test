@@ -274,9 +274,19 @@ actor LaneAPI {
         json: Any? = nil
     ) async throws -> APIResult {
         let upperMethod = method.uppercased()
+        let normalizedPath = "/" + path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+        // Most Lane reads are GETs, but /user/tracks is a read-only POST in
+        // Android 1.4.7. It must be allowed to fail over too: on some networks
+        // one regional host is reachable but answers this endpoint with
+        // INVALID_TRACK_IDS_BODY while the other host serves it normally.
+        let readOnlyPOSTPaths: Set<String> = ["/user/tracks"]
+        let canFailOverRegionalHost =
+            upperMethod == "GET" ||
+            (upperMethod == "POST" && readOnlyPOSTPaths.contains(normalizedPath))
 
         var candidates: [URL] = [base]
-        if signingConfiguration.mode == .official, upperMethod == "GET" {
+        if signingConfiguration.mode == .official, canFailOverRegionalHost {
             for candidate in [
                 URL(string: "https://laneapi.com")!,
                 URL(string: "https://ru.laneapi.com")!
@@ -306,7 +316,7 @@ actor LaneAPI {
                 let signed = try signer.sign(unsigned, body: unsigned.httpBody)
 
                 var request = signed
-                request.timeoutInterval = upperMethod == "GET" ? 6 : 30
+                request.timeoutInterval = canFailOverRegionalHost ? 6 : 30
 
                 let (rawData, response) = try await URLSession.shared.data(for: request)
 
@@ -326,7 +336,12 @@ actor LaneAPI {
                     408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524
                 ]
 
-                if retryableStatuses.contains(http.statusCode),
+                let resolverHostMismatch =
+                    normalizedPath == "/user/tracks" &&
+                    http.statusCode == 400 &&
+                    result.pretty.contains("INVALID_TRACK_IDS_BODY")
+
+                if (retryableStatuses.contains(http.statusCode) || resolverHostMismatch),
                    index + 1 < candidates.count {
                     continue
                 }
