@@ -623,6 +623,10 @@ struct APKFullPlayerView: View {
                                 .padding(.horizontal, 24)
                                 .padding(.top, 12)
 
+                            secondaryControls(track)
+                                .padding(.horizontal, 34)
+                                .padding(.top, 18)
+
                             if !session.playerError.isEmpty {
                                 Text(session.playerError)
                                     .font(.caption)
@@ -783,36 +787,125 @@ struct APKFullPlayerView: View {
 
     private func actionBar(_ track: TrackCandidate) -> some View {
         HStack {
-            playerAction("text.quote", "Lyrics") {
-                session.loadLyrics(track)
+            HStack(spacing: 24) {
+                actionCount(
+                    icon: session.isFavorite(track) ? "heart.fill" : "heart",
+                    value: compactCount(session.trackStats?.likesCount ?? 0),
+                    active: session.isFavorite(track)
+                ) {
+                    session.toggleFavorite(track)
+                    session.loadTrackStats(track)
+                }
+
+                actionCount(
+                    icon: "bubble.left",
+                    value: compactCount(session.trackStats?.commentsCount ?? 0),
+                    active: false
+                ) {
+                    session.loadComments(for: track)
+                    showComments = true
+                }
             }
 
             Spacer()
 
-            playerAction("bubble.left", "Comments") {
-                session.loadComments(for: track)
-                showComments = true
-            }
+            HStack(spacing: 20) {
+                Button {
+                    session.downloadTrack(track)
+                } label: {
+                    Image(systemName: session.isDownloaded(track) ? "checkmark.circle.fill" : "arrow.down.circle")
+                        .font(.system(size: 22, weight: .medium))
+                }
 
-            Spacer()
-
-            playerAction("waveform", "Wave") {
-                session.loadRecommendations(track)
-            }
-
-            Spacer()
-
-            playerAction(session.isDownloaded(track) ? "checkmark.circle.fill" : "arrow.down.circle", "Download") {
-                session.downloadTrack(track)
+                Button {
+                    showQueue = true
+                } label: {
+                    Image(systemName: "text.badge.plus")
+                        .font(.system(size: 22, weight: .medium))
+                        .offset(y: 2)
+                }
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 14)
-        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 27, style: .continuous))
+        .frame(height: 40)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 12)
+        .background(Color(red: 17/255, green: 17/255, blue: 17/255).opacity(0.92), in: RoundedRectangle(cornerRadius: 27, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 27, style: .continuous)
-                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
         }
+        .buttonStyle(.plain)
+    }
+
+    private func secondaryControls(_ track: TrackCandidate) -> some View {
+        HStack {
+            Button {
+                session.toggleShuffle()
+            } label: {
+                Image(systemName: "shuffle")
+                    .foregroundStyle(session.shuffleEnabled ? apkPink : .white)
+            }
+
+            Spacer()
+
+            Button {
+                session.cycleRepeatMode()
+            } label: {
+                Image(systemName: session.repeatMode == 2 ? "repeat.1" : "repeat")
+                    .foregroundStyle(session.repeatMode == 0 ? .white : apkPink)
+            }
+
+            Spacer()
+
+            Button {
+                session.output = "Track effects"
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .foregroundStyle(.white)
+            }
+
+            Spacer()
+
+            Button {
+                session.loadLyrics(track)
+            } label: {
+                Image(systemName: "text.quote")
+                    .foregroundStyle(.white)
+            }
+        }
+        .font(.system(size: 22, weight: .medium))
+        .buttonStyle(.plain)
+    }
+
+    private func actionCount(
+        icon: String,
+        value: String,
+        active: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: icon)
+                    .font(.system(size: 22, weight: .medium))
+                Text(value)
+                    .font(.system(size: 13, weight: .medium))
+                    .monospacedDigit()
+            }
+            .foregroundStyle(active ? apkPink : .white)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func compactCount(_ count: Int64) -> String {
+        if count >= 1_000_000 {
+            let value = Double(count) / 1_000_000.0
+            return value >= 10 ? String(format: "%.0fM", value) : String(format: "%.1fM", value)
+        }
+        if count >= 1_000 {
+            let value = Double(count) / 1_000.0
+            return value >= 10 ? String(format: "%.0fK", value) : String(format: "%.1fK", value)
+        }
+        return "\(count)"
     }
 
     private func playerAction(_ icon: String, _ title: String, action: @escaping () -> Void) -> some View {
