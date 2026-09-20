@@ -23,6 +23,7 @@ final class LaneSession: ObservableObject {
     @Published var searchArtists: [LaneArtist] = []
     @Published var searchAlbums: [LaneAlbum] = []
     @Published var searchPlaylists: [LanePlaylist] = []
+    @Published var searchResultItems: [LaneSearchResultItem] = []
     @Published var searchToken: String?
 
     private func makeSearchRefID(query: String, results: [LaneSearchResultItem]) -> String {
@@ -352,6 +353,7 @@ final class LaneSession: ObservableObject {
             searchArtists = []
             searchAlbums = []
             searchPlaylists = []
+            searchResultItems = []
             return
         }
 
@@ -366,6 +368,7 @@ final class LaneSession: ObservableObject {
             // platform=all and ver=1.0.
             if let response = try? await LaneAPI.shared.search(token: token, query: query) {
                 searchToken = response.searchToken
+                searchResultItems = response.results
 
                 // Android Lane 1.4.7 does not pass searchToken as stream refId.
                 // SearchViewModel.kt builds:
@@ -427,6 +430,7 @@ final class LaneSession: ObservableObject {
             searchArtists = []
             searchAlbums = []
             searchPlaylists = []
+            searchResultItems = []
             output = lastMessage
         }
     }
