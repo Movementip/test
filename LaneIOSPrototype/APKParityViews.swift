@@ -1,0 +1,768 @@
+import SwiftUI
+import UIKit
+
+private let apkPink = Color(red: 1.0, green: 130.0 / 255.0, blue: 132.0 / 255.0)
+private let apkBackground = Color(red: 10.0 / 255.0, green: 10.0 / 255.0, blue: 10.0 / 255.0)
+private let apkSurface = Color(red: 29.0 / 255.0, green: 29.0 / 255.0, blue: 29.0 / 255.0)
+
+struct APKLaneWordmark: View {
+    var body: some View {
+        Group {
+            if let url = Bundle.main.url(forResource: "lane", withExtension: "png"),
+               let image = UIImage(contentsOfFile: url.path) {
+                Image(uiImage: image.withRenderingMode(.alwaysOriginal))
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+            } else {
+                Text("LANE")
+                    .font(.system(size: 20, weight: .black, design: .rounded))
+                    .tracking(-0.5)
+            }
+        }
+        .frame(width: 104, height: 22, alignment: .leading)
+        .clipped()
+        .accessibilityLabel("Lane")
+    }
+}
+
+private struct APKRemoteImage: View {
+    let url: String?
+    var cornerRadius: CGFloat = 8
+    var circle = false
+
+    var body: some View {
+        AsyncImage(url: URL(string: url ?? "")) { phase in
+            switch phase {
+            case .success(let image):
+                image.resizable().scaledToFill()
+            default:
+                ZStack {
+                    Color.white.opacity(0.07)
+                    Image(systemName: circle ? "person.fill" : "music.note")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .clipShape(circle ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)))
+    }
+}
+
+private struct AnyShape: Shape {
+    private let pathBuilder: (CGRect) -> Path
+
+    init<S: Shape>(_ shape: S) {
+        pathBuilder = { rect in shape.path(in: rect) }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        pathBuilder(rect)
+    }
+}
+
+struct APKArtistCardRow: View {
+    let artist: LaneArtist
+
+    var body: some View {
+        NavigationLink {
+            APKArtistDetailScreen(seed: artist)
+        } label: {
+            HStack(spacing: 16) {
+                APKRemoteImage(url: artist.avatarUrl, circle: true)
+                    .frame(width: 64, height: 64)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 5) {
+                        Text(artist.name ?? "Artist")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+
+                        if artist.verified == true {
+                            Image(systemName: "checkmark.seal.fill")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.blue)
+                        }
+                    }
+
+                    Text((artist.description?.isEmpty == false ? artist.description : artist.platform) ?? "Artist")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 6)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary.opacity(0.65))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(apkSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct APKAlbumCardRow: View {
+    let album: LaneAlbum
+
+    var body: some View {
+        HStack(spacing: 16) {
+            APKRemoteImage(url: album.coverUrl, cornerRadius: 5)
+                .frame(width: 64, height: 64)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(album.name ?? "Album")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+
+                Text([album.artistsDisplayedName, album.year].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " • "))
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.secondary.opacity(0.65))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(apkSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+        }
+    }
+}
+
+struct APKArtistDetailScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    let seed: LaneArtist
+
+    @State private var artist: LaneArtist?
+    @State private var loading = true
+
+    private var value: LaneArtist { artist ?? seed }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                ZStack(alignment: .bottomLeading) {
+                    APKRemoteImage(url: value.headerUrl ?? value.avatarUrl, cornerRadius: 0)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 250)
+                        .clipped()
+                        .overlay {
+                            LinearGradient(
+                                colors: [.clear, apkBackground.opacity(0.35), apkBackground],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        }
+
+                    HStack(alignment: .bottom, spacing: 16) {
+                        APKRemoteImage(url: value.avatarUrl, circle: true)
+                            .frame(width: 96, height: 96)
+                            .overlay(Circle().stroke(apkBackground, lineWidth: 4))
+
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 6) {
+                                Text(value.name ?? "Artist")
+                                    .font(.system(size: 28, weight: .bold))
+                                if value.verified == true {
+                                    Image(systemName: "checkmark.seal.fill")
+                                        .foregroundStyle(.blue)
+                                }
+                            }
+
+                            Text(value.platform ?? "")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+                }
+
+                VStack(alignment: .leading, spacing: 22) {
+                    if loading {
+                        ProgressView()
+                            .tint(apkPink)
+                            .frame(maxWidth: .infinity)
+                    }
+
+                    if let description = value.description, !description.isEmpty {
+                        Text(description)
+                            .font(.system(size: 15))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let biography = value.biography, !biography.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("About")
+                                .font(.title3.bold())
+                            Text(biography)
+                                .font(.system(size: 14))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    if let albums = value.albums, !albums.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Albums")
+                                .font(.title3.bold())
+
+                            ForEach(Array(albums.enumerated()), id: \.offset) { _, album in
+                                APKAlbumCardRow(album: album)
+                            }
+                        }
+                    }
+
+                    if let related = value.relatedArtists, !related.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Related artists")
+                                .font(.title3.bold())
+
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 14) {
+                                    ForEach(Array(related.enumerated()), id: \.offset) { _, relatedArtist in
+                                        VStack(spacing: 8) {
+                                            APKRemoteImage(url: relatedArtist.avatarUrl, circle: true)
+                                                .frame(width: 92, height: 92)
+                                            Text(relatedArtist.name ?? "Artist")
+                                                .font(.system(size: 13, weight: .semibold))
+                                                .lineLimit(1)
+                                                .frame(width: 100)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(16)
+            }
+        }
+        .background(apkBackground.ignoresSafeArea())
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            artist = await session.fetchArtistDetail(seed)
+            loading = false
+        }
+    }
+}
+
+struct APKCommentsScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
+
+    let track: TrackCandidate
+    @State private var text = ""
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Capsule()
+                    .fill(Color.secondary.opacity(0.55))
+                    .frame(width: 42, height: 5)
+                    .padding(.top, 10)
+                    .padding(.bottom, 14)
+
+                HStack {
+                    Text("Comments")
+                        .font(.system(size: 20, weight: .bold))
+                    Spacer()
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .frame(width: 34, height: 34)
+                            .background(Color.white.opacity(0.08), in: Circle())
+                    }
+                }
+                .padding(.horizontal, 16)
+
+                if session.busy && session.comments.isEmpty {
+                    Spacer()
+                    ProgressView().tint(apkPink)
+                    Spacer()
+                } else if session.comments.isEmpty {
+                    Spacer()
+                    VStack(spacing: 12) {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                            .font(.system(size: 38))
+                            .foregroundStyle(.secondary)
+                        Text("No comments yet")
+                            .font(.headline)
+                        Text(session.output)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 32)
+                    }
+                    Spacer()
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(session.comments) { comment in
+                                HStack(alignment: .top, spacing: 11) {
+                                    APKRemoteImage(url: comment.userAvatar, circle: true)
+                                        .frame(width: 40, height: 40)
+
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        HStack {
+                                            Text(comment.userName ?? "Lane user")
+                                                .font(.system(size: 14, weight: .bold))
+                                            Spacer()
+                                            if let timestamp = comment.timestamp {
+                                                Text(Self.relative(timestamp))
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.tertiary)
+                                            }
+                                        }
+
+                                        Text(comment.text ?? "")
+                                            .font(.system(size: 15))
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                                        HStack(spacing: 16) {
+                                            Button {
+                                                session.toggleCommentLike(comment, for: track)
+                                            } label: {
+                                                Label(
+                                                    "\(comment.likesCount ?? 0)",
+                                                    systemImage: comment.isLiked == true ? "heart.fill" : "heart"
+                                                )
+                                                .foregroundStyle(comment.isLiked == true ? apkPink : .secondary)
+                                            }
+                                            .buttonStyle(.plain)
+
+                                            if (comment.repliesCount ?? 0) > 0 {
+                                                Label("\(comment.repliesCount ?? 0)", systemImage: "arrowshape.turn.up.left")
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        .font(.caption)
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 12)
+
+                                Divider()
+                                    .padding(.leading, 67)
+                            }
+                        }
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    TextField("Write a comment…", text: $text, axis: .vertical)
+                        .lineLimit(1...4)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 10)
+                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18))
+
+                    Button {
+                        let outgoing = text
+                        text = ""
+                        session.sendComment(outgoing, for: track)
+                    } label: {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.black)
+                            .frame(width: 38, height: 38)
+                            .background(apkPink, in: Circle())
+                    }
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .padding(12)
+                .background(.ultraThinMaterial)
+            }
+            .background(apkBackground)
+            .toolbar(.hidden, for: .navigationBar)
+            .onAppear {
+                session.loadComments(for: track)
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private static func relative(_ raw: Int64) -> String {
+        let value = raw > 10_000_000_000 ? Double(raw) / 1000.0 : Double(raw)
+        let date = Date(timeIntervalSince1970: value)
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+
+struct APKFullPlayerView: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var showQueue = false
+    @State private var showComments = false
+    @State private var draggingProgress = false
+    @State private var draggedValue: Double = 0
+
+    private var progressBinding: Binding<Double> {
+        Binding(
+            get: {
+                if draggingProgress { return draggedValue }
+                guard session.playbackDuration > 0 else { return 0 }
+                return min(max(session.playbackPosition / session.playbackDuration, 0), 1)
+            },
+            set: { newValue in
+                draggingProgress = true
+                draggedValue = newValue
+            }
+        )
+    }
+
+    var body: some View {
+        ZStack {
+            apkBackground.ignoresSafeArea()
+
+            if let track = session.currentTrack {
+                GeometryReader { proxy in
+                    ZStack {
+                        AsyncImage(url: URL(string: track.coverURL ?? "")) { phase in
+                            if case .success(let image) = phase {
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: proxy.size.width, height: proxy.size.height)
+                                    .blur(radius: 40)
+                                    .scaleEffect(1.25)
+                                    .opacity(0.42)
+                            }
+                        }
+
+                        LinearGradient(
+                            colors: [
+                                Color.black.opacity(0.30),
+                                Color.black.opacity(0.70),
+                                Color.black.opacity(0.96)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+
+                        VStack(spacing: 0) {
+                            topBar
+                                .padding(.horizontal, 8)
+                                .padding(.top, 6)
+
+                            Spacer(minLength: 12)
+
+                            APKRemoteImage(url: track.coverURL, cornerRadius: 14)
+                                .aspectRatio(1, contentMode: .fit)
+                                .frame(maxWidth: min(proxy.size.width - 32, 430))
+                                .shadow(color: .black.opacity(0.35), radius: 22, y: 12)
+                                .padding(.horizontal, 8)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(track.title)
+                                    .font(.system(size: 21, weight: .bold))
+                                    .lineLimit(1)
+
+                                HStack(spacing: 7) {
+                                    if let avatars = track.artistAvatars, !avatars.isEmpty {
+                                        HStack(spacing: -5) {
+                                            ForEach(Array(avatars.prefix(3).enumerated()), id: \.offset) { _, avatar in
+                                                APKRemoteImage(url: avatar, circle: true)
+                                                    .frame(width: 20, height: 20)
+                                                    .overlay(Circle().stroke(Color.black.opacity(0.5), lineWidth: 1))
+                                            }
+                                        }
+                                    }
+
+                                    Text(track.subtitle)
+                                        .font(.system(size: 15))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 24)
+                            .padding(.top, 18)
+
+                            progress(track)
+                                .padding(.top, 14)
+
+                            playbackControls(track)
+                                .padding(.horizontal, 24)
+                                .padding(.top, 15)
+
+                            actionBar(track)
+                                .padding(.horizontal, 24)
+                                .padding(.top, 12)
+
+                            if !session.playerError.isEmpty {
+                                Text(session.playerError)
+                                    .font(.caption)
+                                    .foregroundStyle(apkPink)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 24)
+                                    .padding(.top, 8)
+                            }
+
+                            Spacer(minLength: 14)
+                        }
+                    }
+                    .clipped()
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .sheet(isPresented: $showComments) {
+            if let track = session.currentTrack {
+                APKCommentsScreen(track: track)
+                    .environmentObject(session)
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.hidden)
+            }
+        }
+        .sheet(isPresented: $showQueue) {
+            APKQueueSheet()
+                .environmentObject(session)
+                .presentationDetents([.medium, .large])
+        }
+    }
+
+    private var topBar: some View {
+        HStack {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 20, weight: .semibold))
+                    .frame(width: 40, height: 40)
+            }
+
+            Spacer()
+
+            VStack(spacing: 1) {
+                Text("NOW PLAYING")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("Lane")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+
+            Spacer()
+
+            Menu {
+                if let track = session.currentTrack {
+                    Button("Play next", systemImage: "text.insert") { session.playNext(track) }
+                    Button("Add to queue", systemImage: "text.badge.plus") { session.addToQueue(track) }
+                    Button("Download", systemImage: "arrow.down.circle") { session.downloadTrack(track) }
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 20, weight: .semibold))
+                    .frame(width: 40, height: 40)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func progress(_ track: TrackCandidate) -> some View {
+        VStack(spacing: 4) {
+            Slider(value: progressBinding, in: 0...1, onEditingChanged: { editing in
+                if !editing {
+                    let seconds = draggedValue * max(session.playbackDuration, 0)
+                    session.seek(to: seconds)
+                    draggingProgress = false
+                } else {
+                    draggingProgress = true
+                    draggedValue = session.playbackDuration > 0
+                        ? session.playbackPosition / session.playbackDuration
+                        : 0
+                }
+            })
+            .tint(.white)
+
+            HStack {
+                Text(formatTime(draggingProgress ? draggedValue * session.playbackDuration : session.playbackPosition))
+                Spacer()
+                Text("-" + formatTime(max(0, session.playbackDuration - (draggingProgress ? draggedValue * session.playbackDuration : session.playbackPosition))))
+            }
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 24)
+    }
+
+    private func playbackControls(_ track: TrackCandidate) -> some View {
+        HStack {
+            Button {
+                session.toggleFavorite(track)
+            } label: {
+                Image(systemName: session.isFavorite(track) ? "heart.fill" : "heart")
+                    .foregroundStyle(session.isFavorite(track) ? apkPink : .white)
+            }
+
+            Spacer()
+
+            Button { session.previous() } label: {
+                Image(systemName: "backward.end.fill")
+            }
+
+            Spacer()
+
+            Button {
+                session.togglePlayback()
+            } label: {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(Color.white)
+                        .frame(width: 60, height: 60)
+
+                    if session.isBuffering {
+                        ProgressView()
+                            .tint(.black)
+                    } else {
+                        Image(systemName: session.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 28, weight: .bold))
+                            .foregroundStyle(.black)
+                    }
+                }
+            }
+
+            Spacer()
+
+            Button { session.next() } label: {
+                Image(systemName: "forward.end.fill")
+            }
+
+            Spacer()
+
+            Button {
+                showQueue = true
+            } label: {
+                Image(systemName: "list.bullet")
+            }
+        }
+        .font(.system(size: 22, weight: .semibold))
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 17)
+        .background(Color(red: 17/255, green: 17/255, blue: 17/255).opacity(0.92), in: RoundedRectangle(cornerRadius: 32, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 32, style: .continuous)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        }
+    }
+
+    private func actionBar(_ track: TrackCandidate) -> some View {
+        HStack {
+            playerAction("text.quote", "Lyrics") {
+                session.loadLyrics(track)
+            }
+
+            Spacer()
+
+            playerAction("bubble.left", "Comments") {
+                session.loadComments(for: track)
+                showComments = true
+            }
+
+            Spacer()
+
+            playerAction("waveform", "Wave") {
+                session.loadRecommendations(track)
+            }
+
+            Spacer()
+
+            playerAction(session.isDownloaded(track) ? "checkmark.circle.fill" : "arrow.down.circle", "Download") {
+                session.downloadTrack(track)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 27, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 27, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        }
+    }
+
+    private func playerAction(_ icon: String, _ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 19, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 10))
+            }
+            .foregroundStyle(.white)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func formatTime(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let total = Int(seconds.rounded(.down))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+private struct APKQueueSheet: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(session.queue.enumerated()), id: \.element.id) { index, track in
+                    Button {
+                        session.currentIndex = index
+                        session.requestStream(for: track)
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 12) {
+                            APKRemoteImage(url: track.coverURL, cornerRadius: 6)
+                                .frame(width: 50, height: 50)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(track.title)
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+                                Text(track.subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            if index == session.currentIndex {
+                                Image(systemName: "waveform")
+                                    .foregroundStyle(apkPink)
+                            }
+                        }
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(apkBackground)
+            .navigationTitle("Queue")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
