@@ -162,7 +162,7 @@ private struct HomeScreen: View {
                     if session.isGuest {
                         TelegramLoginCard()
                     } else {
-                        if session.busy && session.homeTracks.isEmpty {
+                        if session.busy && session.homeSections.isEmpty && session.homeTracks.isEmpty {
                             HStack {
                                 Spacer()
                                 ProgressView()
@@ -172,68 +172,48 @@ private struct HomeScreen: View {
                             .padding(.vertical, 24)
                         }
 
-                        if !session.homeTracks.isEmpty {
-                            TrackSection(
-                                title: "For you",
-                                subtitle: "Picked for your listening",
-                                tracks: Array(session.homeTracks.prefix(12)),
+                        if !session.homeSections.isEmpty {
+                            APKHomeFeedView(
+                                sections: session.homeSections,
                                 showPlayer: $showPlayer
                             )
-                        }
+                        } else {
+                            // Compatibility fallback for older Lane feed payloads.
+                            if !session.homeTracks.isEmpty {
+                                TrackSection(
+                                    title: "For you",
+                                    subtitle: "Picked for your listening",
+                                    tracks: Array(session.homeTracks.prefix(12)),
+                                    showPlayer: $showPlayer
+                                )
+                            }
 
-                        if !session.recentTracks.isEmpty {
-                            TrackSection(
-                                title: "Recently played",
-                                subtitle: nil,
-                                tracks: Array(session.recentTracks.prefix(10)),
-                                showPlayer: $showPlayer
-                            )
-                        }
+                            if !session.recentTracks.isEmpty {
+                                TrackSection(
+                                    title: "Recently played",
+                                    subtitle: nil,
+                                    tracks: Array(session.recentTracks.prefix(10)),
+                                    showPlayer: $showPlayer
+                                )
+                            }
 
-                        if !session.serverPlaylists.isEmpty {
-                            CardShelf(
-                                title: "Your playlists",
-                                cards: session.serverPlaylists.map {
-                                    LaneCardItem(
-                                        id: $0.playlistId ?? UUID().uuidString,
-                                        title: $0.playlistName ?? "Playlist",
-                                        subtitle: $0.playlistDescription ?? "\($0.tracksCount ?? 0) tracks",
-                                        imageURL: $0.playlistImageUrl,
-                                        kind: "playlist",
-                                        backendID: $0.playlistId,
-                                        platform: $0.platform
-                                    )
-                                }
-                            )
+                            if !session.serverPlaylists.isEmpty {
+                                CardShelf(
+                                    title: "Your playlists",
+                                    cards: session.serverPlaylists.map {
+                                        LaneCardItem(
+                                            id: $0.playlistId ?? UUID().uuidString,
+                                            title: $0.playlistName ?? "Playlist",
+                                            subtitle: $0.playlistDescription ?? "\($0.tracksCount ?? 0) tracks",
+                                            imageURL: $0.playlistImageUrl,
+                                            kind: "playlist",
+                                            backendID: $0.playlistId,
+                                            platform: $0.platform
+                                        )
+                                    }
+                                )
+                            }
                         }
-
-                        BundlePNG(name: "lane_pro_banner", contentMode: .fill)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 108)
-                            .clipShape(RoundedRectangle(cornerRadius: 22))
-                            .padding(.horizontal, 16)
-
-                        NavigationLink {
-                            WaveScreen()
-                        } label: {
-                            FeatureBanner(
-                                icon: "waveform.path.ecg",
-                                title: "Wave",
-                                subtitle: "Keep listening from a track you love"
-                            )
-                        }
-                        .buttonStyle(.plain)
-
-                        NavigationLink {
-                            TelegramImportScreen()
-                        } label: {
-                            FeatureBanner(
-                                icon: "paperplane.fill",
-                                title: "Import from Telegram",
-                                subtitle: "Bring your music into Lane"
-                            )
-                        }
-                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.bottom, 22)
