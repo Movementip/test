@@ -264,11 +264,12 @@ struct TrackCandidate: Identifiable, Hashable, Codable {
         self.artistAvatars = artistAvatars
     }
 
-    init(_ track: TrackData) {
+    init(_ track: TrackData, refID: String? = nil) {
         self.init(
             title: track.title ?? "Unknown track",
             subtitle: track.artistsDisplayedName ?? "Unknown artist",
             trackID: track.songId,
+            refID: refID,
             platform: track.platform ?? "",
             coverURL: track.coverUrl,
             duration: track.duration,
