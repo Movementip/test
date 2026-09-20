@@ -3,6 +3,11 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths:
+      - "LaneIOSPrototype/**"
+      - "LaneIOSPrototype.xcodeproj/**"
+      - "LaneAssets/**"
+      - ".github/workflows/build-ipa.yml"
 
 jobs:
   build:
