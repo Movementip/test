@@ -89,14 +89,15 @@ actor LaneAPI {
             candidates.append(candidate)
         }
 
-        // prepareRegionalHost probes the timezone region first. Once that probe
-        // succeeds, ordinary reads should keep using the verified host first;
-        // otherwise every request can pay a full timeout on a stale edge.
+        // A host remembered while VPN was enabled must never outrank the
+        // timezone region after VPN is disabled. In Russian timezones Android
+        // selects ru.laneapi.com directly, so keep that host first for every
+        // safe request, including /track/stream.
+        appendOnce(timezonePreferred)
+
         if preferCurrent {
             appendOnce(base)
         }
-
-        appendOnce(timezonePreferred)
 
         // Android selects ru.laneapi.com first in Russian time zones. A host
         // remembered while a VPN was active must not outrank that regional
@@ -385,7 +386,10 @@ actor LaneAPI {
 
         var lastError: Error?
         var lastResult: APIResult?
-        let retryRounds = canFailOverRegionalHost ? 2 : 1
+        // Stream resolution already has endpoint/quality compatibility
+        // fallbacks at the player layer. One pass over both regional hosts is
+        // enough here and prevents the UI appearing to load forever offline.
+        let retryRounds = canFailOverRegionalHost && normalizedPath != "/track/stream" ? 2 : 1
         let longReadPaths: Set<String> = [
             "/user/import/preview",
             "/user/tracks",
@@ -396,7 +400,7 @@ actor LaneAPI {
             "/track/download"
         ]
         let requestTimeout: TimeInterval = canFailOverRegionalHost
-            ? (normalizedPath == "/user/import/preview" ? 45 : (normalizedPath == "/track/stream" ? 10 : (longReadPaths.contains(normalizedPath) ? 20 : 12)))
+            ? (normalizedPath == "/user/import/preview" ? 45 : (normalizedPath == "/track/stream" ? 6 : (longReadPaths.contains(normalizedPath) ? 20 : 12)))
             : 30
 
         for round in 0..<retryRounds {

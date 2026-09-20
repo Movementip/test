@@ -203,6 +203,7 @@ final class LaneSession: ObservableObject {
     private var playerRetriedWithDownloadEndpoint = false
     private var playbackRequestID = UUID()
     private var streamResolveTask: Task<Void, Never>?
+    private var playbackWatchdogTask: Task<Void, Never>?
     private var didConfigureAPIBase = false
     private var didPrepareRegionalHost = false
     private var configuredBackendMode: LaneBackendMode?
@@ -1219,6 +1220,7 @@ final class LaneSession: ObservableObject {
         // Every tap gets its own generation. Older resolver/download tasks are
         // ignored so a slow previous request can never start a different song.
         streamResolveTask?.cancel()
+        playbackWatchdogTask?.cancel()
         let requestID = UUID()
         playbackRequestID = requestID
 
@@ -1227,6 +1229,7 @@ final class LaneSession: ObservableObject {
 
         currentTrack = track
         playerError = ""
+        streamURL = ""
         playbackPosition = 0
         playbackDuration = parseDuration(track.duration) ?? 0
         trackStats = nil
@@ -1256,6 +1259,27 @@ final class LaneSession: ObservableObject {
         playerRetriedWithLocalDownload = false
         playerRetriedWithDownloadEndpoint = false
 
+        playbackWatchdogTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 22_000_000_000)
+            } catch {
+                return
+            }
+
+            guard let self,
+                  self.playbackRequestID == requestID,
+                  self.currentTrack?.id == track.id,
+                  self.isBuffering,
+                  self.streamURL.isEmpty else { return }
+
+            self.streamResolveTask?.cancel()
+            self.busy = false
+            self.isBuffering = false
+            self.isPlaying = false
+            self.playerError = "The track could not be loaded without VPN. Try again. [NETWORK-TIMEOUT]"
+            self.output = "Playback error: stream resolution exceeded 22 seconds"
+        }
+
         streamResolveTask = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -1273,27 +1297,55 @@ final class LaneSession: ObservableObject {
                 var requestedQuality = self.streamQuality
                 var result: TrackStreamingResult
                 do {
-                    result = try await self.resolvedStream(
-                        trackID: trackID,
-                        refID: track.refID,
-                        quality: requestedQuality,
-                        retryWithoutRefOnPremium: requestedQuality == AudioQualityChoice.basic.rawValue
-                    )
+                    do {
+                        result = try await self.resolvedStream(
+                            trackID: trackID,
+                            refID: track.refID,
+                            quality: requestedQuality,
+                            retryWithoutRefOnPremium: requestedQuality == AudioQualityChoice.basic.rawValue
+                        )
+                    } catch {
+                        try Task.checkCancellation()
+                        guard self.playbackRequestID == requestID,
+                              self.currentTrack?.id == track.id else { return }
+
+                        if self.isPremiumRequired(error), requestedQuality != AudioQualityChoice.basic.rawValue {
+                            requestedQuality = AudioQualityChoice.basic.rawValue
+                            result = try await self.resolvedStream(
+                                trackID: trackID,
+                                refID: track.refID,
+                                quality: requestedQuality,
+                                retryWithoutRefOnPremium: true
+                            )
+                        } else {
+                            throw error
+                        }
+                    }
                 } catch {
                     try Task.checkCancellation()
                     guard self.playbackRequestID == requestID,
                           self.currentTrack?.id == track.id else { return }
 
-                    if self.isPremiumRequired(error), requestedQuality != AudioQualityChoice.basic.rawValue {
-                        requestedQuality = AudioQualityChoice.basic.rawValue
-                        result = try await self.resolvedStream(
-                            trackID: trackID,
-                            refID: track.refID,
-                            quality: requestedQuality,
-                            retryWithoutRefOnPremium: true
+                    // streamQuality is nullable in the Android Retrofit
+                    // contract. Older working clients let the server choose its
+                    // default; try that exact supported shape before falling
+                    // back to Android's official download resolver in BASIC.
+                    do {
+                        result = try await LaneAPI.shared.stream(
+                            token: self.token,
+                            trackId: trackID,
+                            refId: nil,
+                            quality: nil
                         )
-                    } else {
-                        throw error
+                        requestedQuality = AudioQualityChoice.basic.rawValue
+                    } catch {
+                        try Task.checkCancellation()
+                        result = try await LaneAPI.shared.downloadURL(
+                            token: self.token,
+                            trackId: trackID,
+                            quality: AudioQualityChoice.basic.rawValue
+                        )
+                        requestedQuality = AudioQualityChoice.basic.rawValue
                     }
                 }
 
@@ -1334,6 +1386,7 @@ final class LaneSession: ObservableObject {
                     result = corrected
                 }
 
+                self.playbackWatchdogTask?.cancel()
                 self.streamURL = result.url
                 try self.play(
                     urlString: result.url,
@@ -1347,6 +1400,7 @@ final class LaneSession: ObservableObject {
                 guard self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
 
+                self.playbackWatchdogTask?.cancel()
                 self.isBuffering = false
                 self.isPlaying = false
                 self.playerError = self.userFacingPlaybackError(error)
@@ -2069,6 +2123,8 @@ final class LaneSession: ObservableObject {
     }
 
     func stop() {
+        streamResolveTask?.cancel()
+        playbackWatchdogTask?.cancel()
         player?.pause()
         teardownPlayerObservers()
         player = nil
