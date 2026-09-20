@@ -151,6 +151,11 @@ final class LaneSession: ObservableObject {
         )
     }
 
+    func fetchBackendConfig() async throws -> LaneBackendConfig {
+        await configureAPI()
+        return try await LaneAPI.shared.backendConfig()
+    }
+
     // MARK: Generic request / diagnostics
 
     func rawCall(path: String, method: String = "GET", query: [URLQueryItem] = [], body: Any? = nil) {
