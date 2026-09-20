@@ -1,5 +1,15 @@
 import Foundation
 
+private struct LaneReserveResponse: Decodable {
+    let apiUrl: String
+    let cdnUrl: String
+    let countryCode: String?
+}
+
+private struct LaneServerTimeResponse: Decodable {
+    let timestamp: Int64
+}
+
 struct APIResult {
     let status: Int
     let headers: [AnyHashable: Any]
@@ -46,6 +56,7 @@ actor LaneAPI {
     private var base = URL(string: "https://laneapi.com")!
     private var serviceLDI = ""
     private var signingConfiguration = LaneSigningConfiguration.official
+    private var timeOffsetMilliseconds: Int64 = 0
 
     func setBase(_ value: String) {
         if let url = URL(string: value) {
@@ -63,6 +74,124 @@ actor LaneAPI {
 
     func setSigningConfiguration(_ value: LaneSigningConfiguration) {
         signingConfiguration = value
+    }
+
+
+    private func decodeOfficialTransport(_ data: Data, response: HTTPURLResponse) throws -> Data {
+        guard signingConfiguration.mode == .official,
+              response.value(forHTTPHeaderField: "X-Core-Red") == "1",
+              let nonce = response.value(forHTTPHeaderField: "X-Resp-Nonce"),
+              !nonce.isEmpty else {
+            return data
+        }
+
+        var decoded = BNITLaneRequestSigner.decryptResponse(data, responseNonce: nonce)
+
+        if response.value(forHTTPHeaderField: "X-Core-Compressed") == "1" {
+            decoded = try LaneGzip.decompress(decoded)
+        }
+
+        return decoded
+    }
+
+    private func syncOfficialServerTime() async throws {
+        guard let url = URL(string: "https://laneapi.com/time") else {
+            throw LaneAPIError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 8
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("close", forHTTPHeaderField: "Connection")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw LaneAPIError.nonHTTP
+        }
+
+        guard (200..<300).contains(http.statusCode) else {
+            throw LaneAPIError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
+        }
+
+        let server = try JSONDecoder().decode(LaneServerTimeResponse.self, from: data)
+        timeOffsetMilliseconds = server.timestamp - Int64(Date().timeIntervalSince1970 * 1000.0)
+    }
+
+    private func isRussianLaneTimezone(_ value: String) -> Bool {
+        let zones: Set<String> = [
+            "Europe/Kaliningrad", "Europe/Moscow", "Europe/Simferopol", "Europe/Kirov",
+            "Europe/Astrakhan", "Europe/Volgograd", "Europe/Saratov", "Europe/Ulyanovsk",
+            "Europe/Samara", "Asia/Yekaterinburg", "Asia/Omsk", "Asia/Novosibirsk",
+            "Asia/Barnaul", "Asia/Tomsk", "Asia/Novokuznetsk", "Asia/Krasnoyarsk",
+            "Asia/Irkutsk", "Asia/Chita", "Asia/Yakutsk", "Asia/Khandyga",
+            "Asia/Vladivostok", "Asia/Ust-Nera", "Asia/Magadan", "Asia/Sakhalin",
+            "Asia/Srednekolymsk", "Asia/Kamchatka", "Asia/Anadyr"
+        ]
+        return zones.contains(value)
+    }
+
+    @discardableResult
+    func discoverOfficialServer() async throws -> String {
+        guard signingConfiguration.mode == .official else {
+            return currentBaseURL()
+        }
+
+        var timezone = TimeZone.current.identifier
+        if timezone == "Europe/Kiev" { timezone = "Europe/Kyiv" }
+
+        // LaneApp uses the RU server directly for Russian time zones.
+        if isRussianLaneTimezone(timezone) {
+            base = URL(string: "https://ru.laneapi.com")!
+            return currentBaseURL()
+        }
+
+        guard let reserveURL = URL(string: "https://laneapi.com/reserve") else {
+            throw LaneAPIError.invalidURL
+        }
+
+        func fetchReserve() async throws -> (Data, HTTPURLResponse) {
+            var reserveRequest = URLRequest(url: reserveURL)
+            reserveRequest.httpMethod = "GET"
+            reserveRequest.timeoutInterval = 8
+            reserveRequest.setValue(timezone, forHTTPHeaderField: "TZ")
+            reserveRequest.setValue("close", forHTTPHeaderField: "Connection")
+
+            let signer = signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
+            let signed = try signer.sign(reserveRequest, body: nil)
+            let (rawData, response) = try await URLSession.shared.data(for: signed)
+
+            guard let http = response as? HTTPURLResponse else {
+                throw LaneAPIError.nonHTTP
+            }
+
+            let decoded = try decodeOfficialTransport(rawData, response: http)
+            return (decoded, http)
+        }
+
+        var (data, response) = try await fetchReserve()
+
+        // Android retries /reserve after correcting its clock when the signature
+        // is rejected due to time drift.
+        if response.statusCode == 401 {
+            try await syncOfficialServerTime()
+            (data, response) = try await fetchReserve()
+        }
+
+        guard (200..<300).contains(response.statusCode) else {
+            throw LaneAPIError.http(
+                response.statusCode,
+                String(data: data, encoding: .utf8) ?? "<reserve response>"
+            )
+        }
+
+        let reserve = try JSONDecoder().decode(LaneReserveResponse.self, from: data)
+        guard let discovered = URL(string: reserve.apiUrl), discovered.host != nil else {
+            throw LaneAPIError.invalidURL
+        }
+
+        base = discovered
+        return currentBaseURL()
     }
 
     func backendConfig() async throws -> LaneBackendConfig {
@@ -143,13 +272,15 @@ actor LaneAPI {
         json: Any? = nil
     ) async throws -> APIResult {
         let unsigned = try build(path: path, method: method, token: token, query: query, headers: headers, json: json)
-        let request = try signingConfiguration.signer.sign(unsigned, body: unsigned.httpBody)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let signer = signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
+        let request = try signer.sign(unsigned, body: unsigned.httpBody)
+        let (rawData, response) = try await URLSession.shared.data(for: request)
 
         guard let http = response as? HTTPURLResponse else {
             throw LaneAPIError.nonHTTP
         }
 
+        let data = try decodeOfficialTransport(rawData, response: http)
         return APIResult(status: http.statusCode, headers: http.allHeaderFields, data: data)
     }
 
@@ -189,11 +320,22 @@ actor LaneAPI {
             throw LaneAPIError.decoding("Empty Telegram auth id")
         }
 
+        if serviceLDI.isEmpty {
+            serviceLDI = clean
+        }
+
         var candidates: [URL] = []
 
         if signingConfiguration.mode == .custom {
             candidates = [base]
         } else {
+            // Match Android startup: choose the actual regional API server before
+            // polling /auth/{ANDROID_ID}. /reserve is itself BNIT protected.
+            if let discovered = try? await discoverOfficialServer(),
+               let discoveredURL = URL(string: discovered) {
+                candidates.append(discoveredURL)
+            }
+
             for candidate in [
                 base,
                 URL(string: "https://laneapi.com")!,
@@ -224,7 +366,7 @@ actor LaneAPI {
                 if timezone == "Europe/Kiev" { timezone = "Europe/Kyiv" }
 
                 req.setValue(language, forHTTPHeaderField: "Accept-Language")
-                req.setValue(clean, forHTTPHeaderField: "LDI")
+                req.setValue(serviceLDI.isEmpty ? clean : serviceLDI, forHTTPHeaderField: "LDI")
                 req.setValue(timezone, forHTTPHeaderField: "TZ")
                 req.setValue("207", forHTTPHeaderField: "X-App-Version")
                 req.setValue("android", forHTTPHeaderField: "X-Platform")
@@ -232,10 +374,12 @@ actor LaneAPI {
                 req.setValue("LaneMusic/1.0 (Android; Mobile)", forHTTPHeaderField: "User-Agent")
 
                 do {
-                    let signedReq = try signingConfiguration.signer.sign(req, body: req.httpBody)
-                    let (data, response) = try await URLSession.shared.data(for: signedReq)
+                    let signer = signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
+                    let signedReq = try signer.sign(req, body: nil)
+                    let (rawData, response) = try await URLSession.shared.data(for: signedReq)
                     guard let http = response as? HTTPURLResponse else { continue }
 
+                    let data = try decodeOfficialTransport(rawData, response: http)
                     lastStatus = http.statusCode
                     let result = APIResult(status: http.statusCode, headers: http.allHeaderFields, data: data)
                     lastBody = result.pretty
@@ -243,7 +387,9 @@ actor LaneAPI {
                     if http.statusCode == 401,
                        signingConfiguration.mode == .official,
                        result.pretty.contains("MISSING_SIGNATURE_TOKEN") {
-                        throw LaneAPIError.protectedClientSignatureRequired
+                        // Re-sync once just like ServerDiscoveryRepository does.
+                        try? await syncOfficialServerTime()
+                        continue
                     }
 
                     guard (200..<300).contains(http.statusCode), !data.isEmpty else {
@@ -275,23 +421,6 @@ actor LaneAPI {
                         base = host
                         return LaneTokenResponse(token: plain, isFirstAuth: nil)
                     }
-
-                    for key in ["Authorization", "authorization", "X-Auth-Token", "X-Access-Token"] {
-                        if let value = http.value(forHTTPHeaderField: key) {
-                            let token = value
-                                .replacingOccurrences(of: "Bearer ", with: "", options: [.caseInsensitive])
-                                .trimmingCharacters(in: .whitespacesAndNewlines)
-                            if isPlausibleBearerToken(token) {
-                                base = host
-                                return LaneTokenResponse(token: token, isFirstAuth: nil)
-                            }
-                        }
-                    }
-                } catch let error as LaneAPIError {
-                    if case .protectedClientSignatureRequired = error {
-                        throw error
-                    }
-                    lastBody = error.localizedDescription
                 } catch {
                     lastBody = error.localizedDescription
                 }
@@ -304,7 +433,7 @@ actor LaneAPI {
 
         throw LaneAPIError.http(
             lastStatus,
-            "Telegram confirmed authorization, but Lane did not return a token yet. Last response: \(lastBody)"
+            "Lane auth polling ended without a token. Server: \(currentBaseURL()). Last response: \(lastBody)"
         )
     }
 
