@@ -12,8 +12,10 @@ private struct BundlePNG: View {
     var body: some View {
         if let url = Bundle.main.url(forResource: name, withExtension: "png"),
            let image = UIImage(contentsOfFile: url.path) {
-            Image(uiImage: image)
+            Image(uiImage: image.withRenderingMode(.alwaysOriginal))
                 .resizable()
+                .interpolation(.high)
+                .antialiased(true)
                 .aspectRatio(contentMode: contentMode)
         } else {
             ZStack {
@@ -36,6 +38,23 @@ private struct BundlePNG: View {
         }
     }
 }
+
+private struct TelegramIcon: View {
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color(red: 11.0 / 255.0, green: 45.0 / 255.0, blue: 66.0 / 255.0))
+            Image(systemName: "paperplane.fill")
+                .font(.system(size: size * 0.47, weight: .semibold))
+                .foregroundStyle(Color(red: 3.0 / 255.0, green: 155.0 / 255.0, blue: 229.0 / 255.0))
+                .rotationEffect(.degrees(-8))
+        }
+        .frame(width: size, height: size)
+    }
+}
+
 
 struct ContentView: View {
     @EnvironmentObject private var session: LaneSession
@@ -194,7 +213,7 @@ private struct HomeHeader: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 BundlePNG(name: "lane")
-                    .frame(width: 88, height: 22, alignment: .leading)
+                    .frame(width: 190, height: 36, alignment: .leading)
                 if let name = session.account?.displayedName, !name.isEmpty {
                     Text(name)
                         .font(.caption)
@@ -237,8 +256,7 @@ private struct TelegramLoginCard: View {
             TelegramLoginScreen()
         } label: {
             HStack(spacing: 16) {
-                BundlePNG(name: "telegram")
-                    .frame(width: 52, height: 52)
+                TelegramIcon(size: 52)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Sign in to Lane")
@@ -1294,8 +1312,7 @@ private struct TelegramLoginScreen: View {
         VStack(spacing: 24) {
             Spacer()
 
-            BundlePNG(name: "telegram")
-                .frame(width: 116, height: 116)
+            TelegramIcon(size: 116)
 
             VStack(spacing: 8) {
                 Text("Sign in with Telegram")
@@ -1335,6 +1352,17 @@ private struct TelegramLoginScreen: View {
                     .padding(.horizontal, 30)
             }
 
+            if polling {
+                Button {
+                    checkAuthorizationNow()
+                } label: {
+                    Text("Check authorization now")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .tint(lanePink)
+            }
+
             Spacer()
 
             Text("Authentication ID: \(authId)")
@@ -1356,6 +1384,25 @@ private struct TelegramLoginScreen: View {
         }
     }
 
+    private func checkAuthorizationNow() {
+        let id = session.persistentTelegramAuthID()
+        authId = id
+        message = "Checking Lane authorization servers…"
+
+        Task {
+            await LaneAPI.shared.setBase(session.baseURL)
+            do {
+                let response = try await LaneAPI.shared.pollAuth(authId: id, attempts: 1)
+                let successfulBase = await LaneAPI.shared.currentBaseURL()
+                session.acceptLaneToken(response.token, serverBaseURL: successfulBase)
+                message = "Authorization successful."
+                polling = false
+            } catch {
+                message = "Token is not available yet. If the bot already confirmed authorization, wait a few seconds and tap Check authorization now."
+            }
+        }
+    }
+
     private func beginTelegramLogin() {
         let id = session.persistentTelegramAuthID()
         authId = id
@@ -1373,7 +1420,8 @@ private struct TelegramLoginScreen: View {
             await LaneAPI.shared.setBase(session.baseURL)
             do {
                 let response = try await LaneAPI.shared.pollAuth(authId: id)
-                session.acceptLaneToken(response.token)
+                let successfulBase = await LaneAPI.shared.currentBaseURL()
+                session.acceptLaneToken(response.token, serverBaseURL: successfulBase)
                 message = "Authorization successful."
             } catch {
                 message = error.localizedDescription
