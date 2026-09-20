@@ -90,6 +90,8 @@ final class LaneSession: ObservableObject {
     @Published var friends: [UserInfoDTO] = []
     @Published var userSearchResults: [UserInfoDTO] = []
     @Published var comments: [LaneTrackCommentDTO] = []
+    @Published var commentReplies: [String: [LaneTrackCommentDTO]] = [:]
+    @Published var loadingReplyIDs: Set<String> = []
     @Published var notificationCards: [LaneCardItem] = []
 
     // MARK: Player
@@ -686,6 +688,68 @@ final class LaneSession: ObservableObject {
                     _ = try await LaneAPI.shared.likeComment(token: token, commentId: comment.id)
                 }
                 loadComments(for: track)
+            } catch {
+                output = error.localizedDescription
+            }
+        }
+    }
+
+    func loadReplies(for comment: LaneTrackCommentDTO) {
+        guard !loadingReplyIDs.contains(comment.id) else { return }
+        loadingReplyIDs.insert(comment.id)
+
+        Task {
+            defer { loadingReplyIDs.remove(comment.id) }
+            do {
+                await configureAPI()
+                let page = try await LaneAPI.shared.replies(
+                    token: token,
+                    commentId: comment.id,
+                    page: 0,
+                    pageSize: 30
+                )
+                commentReplies[comment.id] = page.items
+            } catch {
+                output = "Replies error: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func sendReply(
+        _ text: String,
+        to comment: LaneTrackCommentDTO,
+        replyTo user: LaneTrackCommentDTO? = nil
+    ) {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+
+        Task {
+            do {
+                await configureAPI()
+                _ = try await LaneAPI.shared.createReply(
+                    token: token,
+                    commentId: comment.id,
+                    text: clean,
+                    attachment: "",
+                    replyToUserId: user?.userId ?? comment.userId ?? ""
+                )
+                loadReplies(for: comment)
+            } catch {
+                output = "Reply error: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func toggleReplyLike(_ reply: LaneTrackCommentDTO, parentComment: LaneTrackCommentDTO) {
+        Task {
+            do {
+                await configureAPI()
+                if reply.isLiked == true {
+                    _ = try await LaneAPI.shared.unlikeComment(token: token, commentId: reply.id)
+                } else {
+                    _ = try await LaneAPI.shared.likeComment(token: token, commentId: reply.id)
+                }
+                loadReplies(for: parentComment)
             } catch {
                 output = error.localizedDescription
             }
