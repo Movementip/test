@@ -41,6 +41,7 @@ actor LaneAPI {
     static let shared = LaneAPI()
 
     private var base = URL(string: "https://laneapi.com")!
+    private var serviceLDI = ""
 
     func setBase(_ value: String) {
         if let url = URL(string: value) {
@@ -50,6 +51,10 @@ actor LaneAPI {
 
     func currentBaseURL() -> String {
         base.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    func setServiceLDI(_ value: String) {
+        serviceLDI = value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func build(
@@ -81,6 +86,21 @@ actor LaneAPI {
         request.httpMethod = method
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        // Mirror Lane Android 1.4.7 ServiceInfoInterceptor exactly.
+        let language = Locale.current.language.languageCode?.identifier ?? "en"
+        var timezone = TimeZone.current.identifier
+        if timezone == "Europe/Kiev" { timezone = "Europe/Kyiv" }
+
+        request.setValue(language, forHTTPHeaderField: "Accept-Language")
+        if !serviceLDI.isEmpty {
+            request.setValue(serviceLDI, forHTTPHeaderField: "LDI")
+        }
+        request.setValue(timezone, forHTTPHeaderField: "TZ")
+        request.setValue("207", forHTTPHeaderField: "X-App-Version")
+        request.setValue("android", forHTTPHeaderField: "X-Platform")
+        request.setValue("dark", forHTTPHeaderField: "X-Theme")
+        request.setValue("LaneMusic/1.0 (Android; Mobile)", forHTTPHeaderField: "User-Agent")
 
         if let token, !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -172,6 +192,18 @@ actor LaneAPI {
                 req.timeoutInterval = 8
                 req.setValue("application/json", forHTTPHeaderField: "Accept")
 
+                let language = Locale.current.language.languageCode?.identifier ?? "en"
+                var timezone = TimeZone.current.identifier
+                if timezone == "Europe/Kiev" { timezone = "Europe/Kyiv" }
+
+                req.setValue(language, forHTTPHeaderField: "Accept-Language")
+                req.setValue(clean, forHTTPHeaderField: "LDI")
+                req.setValue(timezone, forHTTPHeaderField: "TZ")
+                req.setValue("207", forHTTPHeaderField: "X-App-Version")
+                req.setValue("android", forHTTPHeaderField: "X-Platform")
+                req.setValue("dark", forHTTPHeaderField: "X-Theme")
+                req.setValue("LaneMusic/1.0 (Android; Mobile)", forHTTPHeaderField: "User-Agent")
+
                 do {
                     let (data, response) = try await URLSession.shared.data(for: req)
                     guard let http = response as? HTTPURLResponse else { continue }
@@ -255,7 +287,7 @@ actor LaneAPI {
             token: token,
             query: [
                 .init(name: "q", value: query),
-                .init(name: "platform", value: "android"),
+                .init(name: "platform", value: "all"),
                 .init(name: "ver", value: "1.0")
             ]
         )
@@ -267,7 +299,7 @@ actor LaneAPI {
             token: token,
             query: [
                 .init(name: "q", value: query),
-                .init(name: "platform", value: "android"),
+                .init(name: "platform", value: "all"),
                 .init(name: "ver", value: version)
             ]
         )
