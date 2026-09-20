@@ -25,6 +25,33 @@ final class LaneSession: ObservableObject {
     @Published var searchPlaylists: [LanePlaylist] = []
     @Published var searchToken: String?
 
+    private func makeSearchRefID(query: String, results: [LaneSearchResultItem]) -> String {
+        // Kotlin/Java List.hashCode() is deterministic. The original objects use
+        // data-class hashCode(); for interoperability Lane only needs the same
+        // context shape and a stable list discriminator.
+        var listHash: Int32 = 1
+
+        for result in results {
+            var elementHash: Int32 = 17
+            elementHash = elementHash &* 31 &+ javaStringHash(result.type ?? "")
+            elementHash = elementHash &* 31 &+ javaStringHash(result.track?.songId ?? "")
+            elementHash = elementHash &* 31 &+ javaStringHash(result.artist?.id ?? "")
+            elementHash = elementHash &* 31 &+ javaStringHash(result.album?.id ?? "")
+            elementHash = elementHash &* 31 &+ javaStringHash(result.playlist?.playlistId ?? "")
+            listHash = listHash &* 31 &+ elementHash
+        }
+
+        return "search:\(query)\(listHash)"
+    }
+
+    private func javaStringHash(_ value: String) -> Int32 {
+        var hash: Int32 = 0
+        for scalar in value.utf16 {
+            hash = hash &* 31 &+ Int32(scalar)
+        }
+        return hash
+    }
+
     // MARK: Library
     @Published var serverPlaylists: [LanePlaylist] = []
     @Published var serverAlbums: [LaneAlbum] = []
@@ -339,7 +366,14 @@ final class LaneSession: ObservableObject {
             // platform=all and ver=1.0.
             if let response = try? await LaneAPI.shared.search(token: token, query: query) {
                 searchToken = response.searchToken
-                searchTracks = response.results.compactMap { $0.track }.map { TrackCandidate($0, refID: response.searchToken) }
+
+                // Android Lane 1.4.7 does not pass searchToken as stream refId.
+                // SearchViewModel.kt builds:
+                // "search:" + query + searchResultList.hashCode()
+                let searchRefID = makeSearchRefID(query: query, results: response.results)
+                searchTracks = response.results.compactMap { $0.track }.map {
+                    TrackCandidate($0, refID: searchRefID)
+                }
                 searchArtists = response.results.compactMap { $0.artist }
                 searchAlbums = response.results.compactMap { $0.album }
                 searchPlaylists = response.results.compactMap { $0.playlist }
@@ -366,7 +400,21 @@ final class LaneSession: ObservableObject {
 
                     let tracks = JSONProbe.tracks(raw.json)
                     if !tracks.isEmpty {
-                        searchTracks = tracks
+                        let fallbackRef = "search:\(query)\(javaStringHash(query))"
+                        searchTracks = tracks.map { track in
+                            TrackCandidate(
+                                id: track.id,
+                                title: track.title,
+                                subtitle: track.subtitle,
+                                trackID: track.trackID,
+                                refID: track.refID ?? fallbackRef,
+                                platform: track.platform,
+                                coverURL: track.coverURL,
+                                duration: track.duration,
+                                genre: track.genre,
+                                artistAvatars: track.artistAvatars
+                            )
+                        }
                         output = "Found \(tracks.count) tracks · ver=\(version ?? "<omitted>")"
                         return
                     }
