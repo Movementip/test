@@ -1,0 +1,16 @@
+name: Diagnose Lane BNIT
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Tools/test_bnit.py'
+      - '.github/workflows/diagnose-bnit.yml'
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test signed Lane endpoints
+        run: python3 Tools/test_bnit.py
