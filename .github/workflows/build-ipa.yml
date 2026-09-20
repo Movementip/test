@@ -38,11 +38,6 @@ jobs:
             cp LaneAssets/*.png Payload/Lane.app/ 2>/dev/null || true
           fi
 
-          # Vector drawables rendered from the original Lane 1.4.7 APK.
-          if [ -f LaneVectorIcons.zip ]; then
-            unzip -o LaneVectorIcons.zip -d Payload/Lane.app >/dev/null
-          fi
-
           # Generate standard iPhone icon sizes from the original Lane splash mark.
           if [ -f LaneAssets/ic_splash_logo_dark.png ]; then
             sips -z 120 120 LaneAssets/ic_splash_logo_dark.png --out Payload/Lane.app/Icon-60@2x.png >/dev/null
