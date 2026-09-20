@@ -1307,6 +1307,7 @@ private struct TelegramLoginScreen: View {
     @State private var authId = ""
     @State private var polling = false
     @State private var message = ""
+    @State private var botUsername = "lane_music_bot"
 
     var body: some View {
         VStack(spacing: 24) {
@@ -1317,7 +1318,8 @@ private struct TelegramLoginScreen: View {
             VStack(spacing: 8) {
                 Text("Sign in with Telegram")
                     .font(.title.bold())
-                Text("Lane will open @lane_music_bot. Confirm the authorization there, then return to this app.")
+
+                Text("Lane will open @\(botUsername). Confirm the authorization there, then return to this app.")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
@@ -1333,6 +1335,7 @@ private struct TelegramLoginScreen: View {
                     } else {
                         Image(systemName: "paperplane.fill")
                     }
+
                     Text(polling ? "Waiting for Telegram…" : "Continue with Telegram")
                         .font(.headline)
                 }
@@ -1350,6 +1353,7 @@ private struct TelegramLoginScreen: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 30)
+                    .textSelection(.enabled)
             }
 
             if polling {
@@ -1371,6 +1375,19 @@ private struct TelegramLoginScreen: View {
                 .textSelection(.enabled)
                 .padding(.bottom, 4)
 
+            if session.backendMode == .custom {
+                Text("Custom backend: \(session.baseURL)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+            } else {
+                Text("Official Lane requires its supported signed client.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
             Text("Keep this screen open after confirming in Telegram.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -1381,16 +1398,45 @@ private struct TelegramLoginScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             authId = session.persistentTelegramAuthID()
+            Task {
+                await loadLoginConfiguration()
+            }
+        }
+    }
+
+    private func loadLoginConfiguration() async {
+        if session.backendMode == .official {
+            botUsername = "lane_music_bot"
+            await session.prepareAPI()
+            return
+        }
+
+        do {
+            let config = try await session.fetchBackendConfig()
+            let username = (config.telegramBotUsername ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "@", with: "")
+
+            guard !username.isEmpty else {
+                message = "Custom backend is reachable, but TELEGRAM_BOT_USERNAME is not configured."
+                return
+            }
+
+            botUsername = username
+            message = ""
+        } catch {
+            message = "Could not connect to custom backend: \(error.localizedDescription)"
         }
     }
 
     private func checkAuthorizationNow() {
         let id = session.persistentTelegramAuthID()
         authId = id
-        message = "Checking Lane authorization servers…"
+        message = "Checking authorization…"
 
         Task {
-            await LaneAPI.shared.setBase(session.baseURL)
+            await session.prepareAPI()
+
             do {
                 let response = try await LaneAPI.shared.pollAuth(authId: id, attempts: 1)
                 let successfulBase = await LaneAPI.shared.currentBaseURL()
@@ -1406,18 +1452,43 @@ private struct TelegramLoginScreen: View {
     private func beginTelegramLogin() {
         let id = session.persistentTelegramAuthID()
         authId = id
-
-        guard let url = URL(string: "https://t.me/lane_music_bot?start=auth\(id)") else {
-            message = "Could not create Telegram link."
-            return
-        }
-
-        openURL(url)
         polling = true
-        message = "Confirm authorization in Telegram. Lane is checking for your token…"
+        message = "Preparing Telegram authorization…"
 
         Task {
-            await LaneAPI.shared.setBase(session.baseURL)
+            if session.backendMode == .custom {
+                do {
+                    let config = try await session.fetchBackendConfig()
+                    let username = (config.telegramBotUsername ?? "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .replacingOccurrences(of: "@", with: "")
+
+                    guard !username.isEmpty else {
+                        polling = false
+                        message = "Custom backend has no Telegram bot username configured."
+                        return
+                    }
+
+                    botUsername = username
+                } catch {
+                    polling = false
+                    message = "Custom backend is unavailable: \(error.localizedDescription)"
+                    return
+                }
+            } else {
+                await session.prepareAPI()
+                botUsername = "lane_music_bot"
+            }
+
+            guard let url = URL(string: "https://t.me/\(botUsername)?start=auth\(id)") else {
+                polling = false
+                message = "Could not create Telegram link."
+                return
+            }
+
+            openURL(url)
+            message = "Confirm authorization in Telegram. Lane is checking for your token…"
+
             do {
                 let response = try await LaneAPI.shared.pollAuth(authId: id)
                 let successfulBase = await LaneAPI.shared.currentBaseURL()
@@ -1426,6 +1497,7 @@ private struct TelegramLoginScreen: View {
             } catch {
                 message = error.localizedDescription
             }
+
             polling = false
         }
     }
@@ -1443,7 +1515,7 @@ private struct EditProfileSheet: View {
         NavigationStack {
             Form {
                 Section("Profile") {
-                    TextField("Playlist name", text: $name)
+                    TextField("Name", text: $name)
                     TextField("Username", text: $username)
                         .textInputAutocapitalization(.never)
                     TextField("About me", text: $statusText, axis: .vertical)
