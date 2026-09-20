@@ -58,6 +58,14 @@ struct TrackData: Decodable, Hashable {
     let duration: String?
     let genre: String?
     let artistAvatars: [String]?
+    let artistAvatars: [String]?
+}
+
+struct LaneRelatedArtist: Decodable, Hashable {
+    let id: String?
+    let name: String?
+    let avatarUrl: String?
+    let platform: String?
 }
 
 struct LaneArtist: Decodable, Hashable {
@@ -72,6 +80,8 @@ struct LaneArtist: Decodable, Hashable {
     let topTracks: [String]?
     let recentTracks: [String]?
     let albums: [LaneAlbum]?
+    let relatedArtists: [LaneRelatedArtist]?
+    let lastUpdated: Int64?
 }
 
 struct LaneAlbum: Decodable, Hashable {
@@ -84,6 +94,7 @@ struct LaneAlbum: Decodable, Hashable {
     let artists: [String]?
     let artistsDisplayedName: String?
     let tracks: [String]?
+    let lastUpdated: Int64?
 }
 
 struct LanePlaylist: Decodable, Hashable {
@@ -184,7 +195,8 @@ struct TrackCandidate: Identifiable, Hashable, Codable {
         platform: String = "",
         coverURL: String? = nil,
         duration: String? = nil,
-        genre: String? = nil
+        genre: String? = nil,
+        artistAvatars: [String]? = nil
     ) {
         self.id = id ?? trackID ?? refID ?? "\(title)|\(subtitle)"
         self.title = title
@@ -195,6 +207,7 @@ struct TrackCandidate: Identifiable, Hashable, Codable {
         self.coverURL = coverURL
         self.duration = duration
         self.genre = genre
+        self.artistAvatars = artistAvatars
     }
 
     init(_ track: TrackData) {
@@ -205,7 +218,8 @@ struct TrackCandidate: Identifiable, Hashable, Codable {
             platform: track.platform ?? "",
             coverURL: track.coverUrl,
             duration: track.duration,
-            genre: track.genre
+            genre: track.genre,
+            artistAvatars: track.artistAvatars
         )
     }
 }
