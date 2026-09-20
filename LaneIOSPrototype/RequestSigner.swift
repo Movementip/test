@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Security
+import zlib
 
 protocol LaneRequestSigner: Sendable {
     func sign(_ request: URLRequest, body: Data?) throws -> URLRequest
@@ -29,21 +30,29 @@ struct APIKeyLaneRequestSigner: LaneRequestSigner {
     }
 }
 
-/// Swift port of the request-signing path used by Lane Android 1.4.7.
+/// Swift port of the request signing/transport used by Lane Android 1.4.7.
 ///
-/// The native Android implementation builds three request headers:
+/// Request side:
+/// - X-Accept-Red
 /// - X-Core-Token
 /// - X-Client-Meta
 /// - X-Request-Trace-Id
 ///
-/// GET requests are reproduced byte-for-byte at the algorithm level. The
-/// non-empty body transform used for mutation requests is handled separately;
-/// the current signer intentionally leaves an already-built body unchanged.
+/// Response side:
+/// - X-Core-Red
+/// - X-Resp-Nonce
+/// - X-Core-Compressed
 struct BNITLaneRequestSigner: LaneRequestSigner {
     private static let signingKey = Data("SqperSzvbntKmv_CbnngeThis_12303!".utf8)
 
     private static let customBase64Alphabet: [UInt8] =
         Array("zxcvbnmasdfghjklqwertyuiop1234567890-_QWERTYUIOPASDFGHJKLZXCVBNM".utf8)
+
+    let timeOffsetMilliseconds: Int64
+
+    init(timeOffsetMilliseconds: Int64 = 0) {
+        self.timeOffsetMilliseconds = timeOffsetMilliseconds
+    }
 
     func sign(_ request: URLRequest, body: Data?) throws -> URLRequest {
         guard let url = request.url else {
@@ -55,12 +64,10 @@ struct BNITLaneRequestSigner: LaneRequestSigner {
         let method = (request.httpMethod ?? "GET").uppercased()
         let path = Self.encodedPath(of: url)
         let query = Self.canonicalQuery(of: url)
-        let timestamp = String(Int64(Date().timeIntervalSince1970 * 1000.0))
+        let timestamp = String(Int64(Date().timeIntervalSince1970 * 1000.0) + timeOffsetMilliseconds)
         let nonce = Self.hex(try Self.randomBytes(count: 16))
 
-        // These are valid fallback branches present in the Android native code.
-        // The server receives the same values inside the encrypted metadata and
-        // verifies the request against them.
+        // These are fallback values present in Lane's Android native library.
         let bootID = "UNKNOWN_BOOT"
         let apkInode = "NO_APK_INODE"
 
@@ -77,13 +84,7 @@ struct BNITLaneRequestSigner: LaneRequestSigner {
         canonical.append(0x3A)
         Self.append(nonce, to: &canonical)
         canonical.append(0x3A)
-
-        // Android BNIT applies an additional transform for non-empty bodies.
-        // GET/auth/search requests have an empty body and therefore follow this
-        // exact path. Keeping the bytes here preserves compatibility for empty
-        // body requests while body signing is implemented independently.
         canonical.append(requestBody)
-
         canonical.append(0x3A)
         Self.append(bootID, to: &canonical)
         canonical.append(0x3A)
@@ -108,6 +109,40 @@ struct BNITLaneRequestSigner: LaneRequestSigner {
         return signed
     }
 
+    /// Mirrors BNITManager.verifyMagic used by the Android interceptor.
+    static func decryptResponse(_ cipher: Data, responseNonce: String) -> Data {
+        let key = [UInt8](signingKey + Data(responseNonce.utf8))
+        guard !key.isEmpty else { return cipher }
+
+        var state = Array(0...255).map(UInt8.init)
+        var j = 0
+
+        for i in 0..<256 {
+            j = (j + Int(state[i]) + Int(key[i % key.count])) & 0xFF
+            state.swapAt(i, j)
+        }
+
+        var i = 0
+        j = 0
+        var output = Data()
+        output.reserveCapacity(cipher.count)
+
+        for byte in cipher {
+            i = (i + 1) & 0xFF
+            j = (j + Int(state[i])) & 0xFF
+            state.swapAt(i, j)
+
+            let streamByte = state[(Int(state[i]) + Int(state[j])) & 0xFF]
+            output.append(byte ^ streamByte)
+
+            // Extra state mutation present in Lane's verifyMagic routine.
+            let mixIndex = (i + Int(streamByte)) & 0xFF
+            state[mixIndex] = state[mixIndex] &+ streamByte
+        }
+
+        return output
+    }
+
     private static func encodedPath(of url: URL) -> String {
         if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
            !components.percentEncodedPath.isEmpty {
@@ -116,8 +151,8 @@ struct BNITLaneRequestSigner: LaneRequestSigner {
         return url.path.isEmpty ? "/" : url.path
     }
 
-    /// Mirrors the Android interceptor: distinct query parameter names, sorted,
-    /// then rendered as name=value and joined by '&'.
+    /// Mirrors Android BNITInterceptor query canonicalization:
+    /// unique parameter names, sorted, rendered as name=value.
     private static func canonicalQuery(of url: URL) -> String {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let items = components.queryItems,
@@ -260,6 +295,70 @@ struct BNITLaneRequestSigner: LaneRequestSigner {
     }
 }
 
+enum LaneGzip {
+    static func decompress(_ data: Data) throws -> Data {
+        guard !data.isEmpty else { return data }
+
+        var stream = z_stream()
+        let initStatus = inflateInit2_(
+            &stream,
+            15 + 32,
+            ZLIB_VERSION,
+            Int32(MemoryLayout<z_stream>.size)
+        )
+
+        guard initStatus == Z_OK else {
+            throw NSError(
+                domain: "LaneGzip",
+                code: Int(initStatus),
+                userInfo: [NSLocalizedDescriptionKey: "gzip inflate initialization failed"]
+            )
+        }
+
+        defer {
+            inflateEnd(&stream)
+        }
+
+        var result = Data()
+        let chunkSize = 64 * 1024
+        var output = [UInt8](repeating: 0, count: chunkSize)
+
+        return try data.withUnsafeBytes { rawBuffer -> Data in
+            guard let inputBase = rawBuffer.bindMemory(to: Bytef.self).baseAddress else {
+                return Data()
+            }
+
+            stream.next_in = UnsafeMutablePointer<Bytef>(mutating: inputBase)
+            stream.avail_in = uInt(data.count)
+
+            while true {
+                let status: Int32 = output.withUnsafeMutableBytes { outputBuffer in
+                    stream.next_out = outputBuffer.bindMemory(to: Bytef.self).baseAddress
+                    stream.avail_out = uInt(chunkSize)
+                    return inflate(&stream, Z_NO_FLUSH)
+                }
+
+                let produced = chunkSize - Int(stream.avail_out)
+                if produced > 0 {
+                    result.append(contentsOf: output[0..<produced])
+                }
+
+                if status == Z_STREAM_END {
+                    return result
+                }
+
+                guard status == Z_OK else {
+                    throw NSError(
+                        domain: "LaneGzip",
+                        code: Int(status),
+                        userInfo: [NSLocalizedDescriptionKey: "gzip inflate failed (\(status))"]
+                    )
+                }
+            }
+        }
+    }
+}
+
 enum LaneBackendMode: String, CaseIterable, Identifiable {
     case official = "official"
     case custom = "custom"
@@ -285,15 +384,19 @@ struct LaneSigningConfiguration: Equatable {
         apiKey: ""
     )
 
-    var signer: any LaneRequestSigner {
+    func signer(timeOffsetMilliseconds: Int64 = 0) -> any LaneRequestSigner {
         switch mode {
         case .official:
-            return BNITLaneRequestSigner()
+            return BNITLaneRequestSigner(timeOffsetMilliseconds: timeOffsetMilliseconds)
         case .custom:
             return APIKeyLaneRequestSigner(
                 headerName: apiKeyHeader,
                 token: apiKey
             )
         }
+    }
+
+    var signer: any LaneRequestSigner {
+        signer(timeOffsetMilliseconds: 0)
     }
 }
