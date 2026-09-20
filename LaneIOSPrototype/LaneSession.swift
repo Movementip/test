@@ -187,6 +187,7 @@ final class LaneSession: ObservableObject {
     private var playerRetriedWithDownloadEndpoint = false
     private var playbackRequestID = UUID()
     private var streamResolveTask: Task<Void, Never>?
+    private var didConfigureAPIBase = false
 
     var isGuest: Bool {
         token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -305,8 +306,14 @@ final class LaneSession: ObservableObject {
     }
 
     private func configureAPI() async {
-        persist()
-        await LaneAPI.shared.setBase(baseURL)
+        // Set the configured base once. After that LaneAPI is allowed to keep
+        // whichever regional host actually works; resetting it before every
+        // request caused repeated timeouts on networks where one host is poor.
+        if !didConfigureAPIBase || backendMode == .custom {
+            await LaneAPI.shared.setBase(baseURL)
+            didConfigureAPIBase = true
+        }
+
         await LaneAPI.shared.setServiceLDI(persistentTelegramAuthID())
         await LaneAPI.shared.setSigningConfiguration(
             LaneSigningConfiguration(
