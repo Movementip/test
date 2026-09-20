@@ -18,6 +18,7 @@ final class LaneSession: ObservableObject {
     @Published var busy = false
 
     // MARK: Catalog
+    @Published var homeSections: [LaneHomeSection] = []
     @Published var homeTracks: [TrackCandidate] = []
     @Published var searchTracks: [TrackCandidate] = []
     @Published var searchArtists: [LaneArtist] = []
@@ -169,6 +170,7 @@ final class LaneSession: ObservableObject {
         serverPlaylists = []
         serverAlbums = []
         serverArtists = []
+        homeSections = []
         friends = []
         comments = []
         output = "Signed out"
@@ -283,7 +285,12 @@ final class LaneSession: ObservableObject {
             let result = try await LaneAPI.shared.home(token: token)
             status = result.status
             output = result.pretty
+            homeSections = JSONProbe.homeSections(result.json)
             homeTracks = JSONProbe.tracks(result.json)
+
+            if !homeSections.isEmpty {
+                output = "Loaded \(homeSections.count) Lane home sections."
+            }
         } catch {
             output = error.localizedDescription
         }
