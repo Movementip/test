@@ -433,7 +433,9 @@ actor LaneAPI {
 
         throw LaneAPIError.http(
             lastStatus,
-            "Lane auth polling ended without a token. Server: \(currentBaseURL()). Last response: \(lastBody)"
+            lastStatus == 404
+                ? "No pending Telegram token exists for Authentication ID \(clean). Open Telegram from this screen and send /start auth\(clean), then return and check again."
+                : "Lane auth polling ended without a token. Server: \(currentBaseURL()). Last response: \(lastBody)"
         )
     }
 
