@@ -152,6 +152,14 @@ actor LaneAPI {
                 if let response = try? JSONDecoder().decode(LaneTokenResponse.self, from: result.data) {
                     return response
                 }
+
+                // Some Lane backend revisions wrap the bearer token differently.
+                // Accept a token discovered anywhere in the JSON response.
+                if let object = result.json,
+                   let token = JSONProbe.token(object),
+                   !token.isEmpty {
+                    return LaneTokenResponse(token: token, isFirstAuth: nil)
+                }
             }
 
             if index + 1 < attempts {
