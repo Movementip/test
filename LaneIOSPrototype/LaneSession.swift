@@ -93,10 +93,17 @@ final class LaneSession: ObservableObject {
     }
 
     func persistentTelegramAuthID() -> String {
-        if let existing = KeychainStore.load(account: "telegramAuthId"), !existing.isEmpty {
+        // Android Settings.Secure.ANDROID_ID is a 64-bit value normally represented
+        // as 16 lowercase hexadecimal characters. Reproduce that shape on iOS.
+        if let existing = KeychainStore.load(account: "telegramAuthId"),
+           existing.range(of: "^[0-9a-f]{16}$", options: .regularExpression) != nil {
             return existing
         }
-        let generated = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+
+        let hex = UUID().uuidString
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased()
+        let generated = String(hex.prefix(16))
         KeychainStore.save(generated, account: "telegramAuthId")
         return generated
     }
@@ -212,6 +219,16 @@ final class LaneSession: ObservableObject {
     func search(_ text: String) {
         let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return }
+
+        guard !isGuest else {
+            status = 401
+            output = "Sign in with Telegram before searching Lane."
+            searchTracks = []
+            searchArtists = []
+            searchAlbums = []
+            searchPlaylists = []
+            return
+        }
 
         busy = true
         output = "Searching Lane…"
