@@ -92,6 +92,25 @@ struct LanePlaylist: Decodable, Hashable {
     let collaboratorIds: [String]?
 }
 
+
+struct UserAccountDTO: Decodable, Hashable {
+    let telegramId: Int64?
+    let displayedName: String?
+    let userName: String?
+    let laneId: String?
+    let email: String?
+    let premiumExpiresIn: Int64?
+    let avatarUrl: String?
+    let headerUrl: String?
+    let userPlaylists: [String]?
+    let deviceIds: [String]?
+    let searchHistory: [String]?
+    let equippedBadgeId: String?
+    let countryCode: String?
+    let isAutoRenewalActive: Bool?
+    let statusText: String?
+}
+
 struct UserInfoDTO: Decodable, Hashable {
     let displayedName: String?
     let premiumExpiresIn: Int64?
