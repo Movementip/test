@@ -1968,6 +1968,7 @@ private struct DiagnosticsScreen: View {
                     }
                 }
                 .onChange(of: session.backendMode) { _ in
+                    session.clearAccount()
                     session.persist()
                 }
 
