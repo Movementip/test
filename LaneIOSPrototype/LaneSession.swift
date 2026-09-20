@@ -884,13 +884,55 @@ final class LaneSession: ObservableObject {
     }
 
     private func serverTrackIDs(in playlistID: String) async throws -> Set<String> {
+        let cached = serverPlaylists.first { $0.playlistId == playlistID }
+
+        // Newly created/empty playlists already carry enough information in
+        // Library. Do not block the first import on a second details request.
+        if let ids = cached?.playlistTracksIds {
+            return Set(ids.filter { !$0.isEmpty })
+        }
+        if let tracks = cached?.playlistTracks {
+            return Set(tracks.compactMap(\.songId).filter { !$0.isEmpty })
+        }
+        if cached?.tracksCount == 0 {
+            return []
+        }
+
         let playlist = try await LaneAPI.shared.playlist(
             token: token,
-            playlistId: playlistID
+            playlistId: playlistID,
+            platform: cached?.platform
         )
 
-        let ids = playlist.playlistTracksIds ?? playlist.playlistTracks?.compactMap(\.songId) ?? []
-        return Set(ids.filter { !$0.isEmpty })
+        if let ids = playlist.playlistTracksIds {
+            return Set(ids.filter { !$0.isEmpty })
+        }
+        if let tracks = playlist.playlistTracks {
+            return Set(tracks.compactMap(\.songId).filter { !$0.isEmpty })
+        }
+        if playlist.tracksCount == 0 {
+            return []
+        }
+
+        // Some older Lane playlist responses expose only tracksCount. Read the
+        // paginated track endpoint so resuming an interrupted import remains
+        // duplicate-safe.
+        var existing = Set<String>()
+        var pageNumber = 1
+        while true {
+            let page = try await LaneAPI.shared.playlistTracks(
+                token: token,
+                playlistId: playlistID,
+                page: pageNumber,
+                pageSize: 50
+            )
+            existing.formUnion(page.items.compactMap(\.songId).filter { !$0.isEmpty })
+
+            guard let totalPages = page.totalPages,
+                  pageNumber < totalPages else { break }
+            pageNumber += 1
+        }
+        return existing
     }
 
     @discardableResult

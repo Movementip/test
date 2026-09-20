@@ -3302,7 +3302,10 @@ private struct ImportTracksScreen: View {
         if detail.localizedCaseInsensitiveContains("PREMIUM_REQUIRED") {
             return "Lane refused the server import. You can still save the complete playlist on this iPhone."
         }
-        return "Import failed. Check the source link and try again."
+        let compact = detail
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        return "Import failed: \(String(compact.prefix(280)))"
     }
 }
 
