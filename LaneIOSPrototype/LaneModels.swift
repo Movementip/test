@@ -296,11 +296,14 @@ struct LocalPlaylist: Identifiable, Codable, Hashable {
 }
 
 enum SearchFilter: String, CaseIterable, Identifiable {
+    // Exact SearchFilter enum recovered from Lane Android 1.4.7:
+    // ALL, SPOTIFY, SOUNDCLOUD, TRACKS, PLAYLISTS, ALBUMS.
     case all = "All"
+    case spotify = "Spotify"
+    case soundcloud = "SoundCloud"
     case tracks = "Tracks"
-    case artists = "Artists"
-    case albums = "Albums"
     case playlists = "Playlists"
+    case albums = "Albums"
 
     var id: String { rawValue }
 }
