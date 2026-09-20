@@ -25,6 +25,7 @@ enum LaneAPIError: LocalizedError {
     case http(Int, String)
     case decoding(String)
     case emptyResponse
+    case protectedClientSignatureRequired
 
     var errorDescription: String? {
         switch self {
@@ -33,6 +34,8 @@ enum LaneAPIError: LocalizedError {
         case let .http(code, body): return "HTTP \(code): \(body)"
         case let .decoding(message): return "Decode error: \(message)"
         case .emptyResponse: return "Lane returned an empty response"
+        case .protectedClientSignatureRequired:
+            return "The official Lane API requires its supported client-signature mechanism. Configure an authorized signer/SDK or switch to a custom backend."
         }
     }
 }
@@ -42,6 +45,7 @@ actor LaneAPI {
 
     private var base = URL(string: "https://laneapi.com")!
     private var serviceLDI = ""
+    private var signingConfiguration = LaneSigningConfiguration.official
 
     func setBase(_ value: String) {
         if let url = URL(string: value) {
@@ -55,6 +59,10 @@ actor LaneAPI {
 
     func setServiceLDI(_ value: String) {
         serviceLDI = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func setSigningConfiguration(_ value: LaneSigningConfiguration) {
+        signingConfiguration = value
     }
 
     private func build(
@@ -126,7 +134,8 @@ actor LaneAPI {
         headers: [String: String] = [:],
         json: Any? = nil
     ) async throws -> APIResult {
-        let request = try build(path: path, method: method, token: token, query: query, headers: headers, json: json)
+        let unsigned = try build(path: path, method: method, token: token, query: query, headers: headers, json: json)
+        let request = try signingConfiguration.signer.sign(unsigned, body: unsigned.httpBody)
         let (data, response) = try await URLSession.shared.data(for: request)
 
         guard let http = response as? HTTPURLResponse else {
@@ -148,6 +157,11 @@ actor LaneAPI {
         let result = try await request(path: path, method: method, token: token, query: query, headers: headers, json: json)
 
         guard (200..<300).contains(result.status) else {
+            if result.status == 401,
+               signingConfiguration.mode == .official,
+               result.pretty.contains("MISSING_SIGNATURE_TOKEN") {
+                throw LaneAPIError.protectedClientSignatureRequired
+            }
             throw LaneAPIError.http(result.status, result.pretty)
         }
 
@@ -205,12 +219,19 @@ actor LaneAPI {
                 req.setValue("LaneMusic/1.0 (Android; Mobile)", forHTTPHeaderField: "User-Agent")
 
                 do {
-                    let (data, response) = try await URLSession.shared.data(for: req)
+                    let signedReq = try signingConfiguration.signer.sign(req, body: req.httpBody)
+                    let (data, response) = try await URLSession.shared.data(for: signedReq)
                     guard let http = response as? HTTPURLResponse else { continue }
 
                     lastStatus = http.statusCode
                     let result = APIResult(status: http.statusCode, headers: http.allHeaderFields, data: data)
                     lastBody = result.pretty
+
+                    if http.statusCode == 401,
+                       signingConfiguration.mode == .official,
+                       result.pretty.contains("MISSING_SIGNATURE_TOKEN") {
+                        throw LaneAPIError.protectedClientSignatureRequired
+                    }
 
                     guard (200..<300).contains(http.statusCode), !data.isEmpty else {
                         continue
