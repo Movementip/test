@@ -52,6 +52,11 @@ final class LaneSession: ObservableObject {
     }
 
     init() {
+        // Migrate tokens created by earlier iOS prototype builds.
+        if token.isEmpty, let legacy = KeychainStore.load(account: "lane.token"), !legacy.isEmpty {
+            token = legacy
+            KeychainStore.save(legacy, account: "bearer")
+        }
         loadLocalState()
         configureRemoteCommands()
     }
