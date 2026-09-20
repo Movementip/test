@@ -1045,7 +1045,15 @@ final class LaneSession: ObservableObject {
         periodicTimeObserver = nil
     }
 
-    private func play(urlString: String, useCompatibilityHeaders: Bool) throws {
+    private func play(
+        urlString: String,
+        useCompatibilityHeaders: Bool,
+        requestID: UUID,
+        track: TrackCandidate
+    ) throws {
+        guard playbackRequestID == requestID,
+              currentTrack?.id == track.id else { return }
+
         guard let url = normalizedStreamURL(urlString) else {
             throw NSError(
                 domain: "LanePlayer",
@@ -1087,7 +1095,9 @@ final class LaneSession: ObservableObject {
 
         playerItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self,
+                      self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
 
                 switch item.status {
                 case .readyToPlay:
@@ -1111,7 +1121,9 @@ final class LaneSession: ObservableObject {
                         do {
                             try self.play(
                                 urlString: self.streamURL,
-                                useCompatibilityHeaders: true
+                                useCompatibilityHeaders: true,
+                                requestID: requestID,
+                                track: track
                             )
                             return
                         } catch {
@@ -1123,7 +1135,11 @@ final class LaneSession: ObservableObject {
                        !self.playerRetriedWithLocalDownload,
                        !self.streamURL.isEmpty {
                         self.playerRetriedWithLocalDownload = true
-                        self.downloadStreamAndPlayLocally(self.streamURL)
+                        self.downloadStreamAndPlayLocally(
+                            self.streamURL,
+                            requestID: requestID,
+                            track: track
+                        )
                         return
                     }
 
@@ -1143,7 +1159,9 @@ final class LaneSession: ObservableObject {
 
         playerTimeControlObserver = newPlayer.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self,
+                      self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
 
                 switch player.timeControlStatus {
                 case .playing:
@@ -1167,7 +1185,9 @@ final class LaneSession: ObservableObject {
             queue: .main
         ) { [weak self] time in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self,
+                      self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
                 let seconds = time.seconds
                 if seconds.isFinite {
                     self.playbackPosition = max(0, seconds)
@@ -1188,21 +1208,40 @@ final class LaneSession: ObservableObject {
         // Media3 retries the source; mirror that behavior here.
         Task { [weak self, weak newPlayer] in
             try? await Task.sleep(nanoseconds: 8_000_000_000)
-            guard let self, let newPlayer, self.player === newPlayer else { return }
-            guard self.isBuffering, self.playbackPosition < 0.25, !self.streamURL.isEmpty else { return }
+            guard let self,
+                  let newPlayer,
+                  self.player === newPlayer,
+                  self.playbackRequestID == requestID,
+                  self.currentTrack?.id == track.id else { return }
+
+            guard self.isBuffering,
+                  self.playbackPosition < 0.25,
+                  !self.streamURL.isEmpty else { return }
 
             if !useCompatibilityHeaders && !self.playerRetriedWithCompatibilityHeaders {
                 self.playerRetriedWithCompatibilityHeaders = true
-                try? self.play(urlString: self.streamURL, useCompatibilityHeaders: true)
-            } else if useCompatibilityHeaders && !self.playerRetriedWithLocalDownload {
-                self.playerRetriedWithLocalDownload = true
-                self.downloadStreamAndPlayLocally(self.streamURL)
+                try? self.play(
+                    urlString: self.streamURL,
+                    useCompatibilityHeaders: true,
+                    requestID: requestID,
+                    track: track
+                )
+            } else if useCompatibilityHeaders && !self.playerRetriedWithDownloadEndpoint {
+                // If the direct CDN route stalls without VPN, ask Lane for the
+                // download-compatible endpoint before spending 30s downloading
+                // the same stalled stream URL.
+                self.playerRetriedWithDownloadEndpoint = true
+                self.resolveDownloadEndpointAndPlay(
+                    requestID: requestID,
+                    track: track
+                )
             }
         }
 
-        if let currentTrack {
-            history.removeAll { $0.id == currentTrack.id }
-            history.insert(currentTrack, at: 0)
+        if playbackRequestID == requestID,
+           currentTrack?.id == track.id {
+            history.removeAll { $0.id == track.id }
+            history.insert(track, at: 0)
             if history.count > 100 {
                 history = Array(history.prefix(100))
             }
@@ -1212,7 +1251,11 @@ final class LaneSession: ObservableObject {
         updateNowPlaying()
     }
 
-    private func downloadStreamAndPlayLocally(_ urlString: String) {
+    private func downloadStreamAndPlayLocally(
+        _ urlString: String,
+        requestID: UUID,
+        track: TrackCandidate
+    ) {
         guard let url = normalizedStreamURL(urlString) else { return }
 
         // HLS playlists need AVPlayer's segment loader and cannot be converted
@@ -1240,6 +1283,12 @@ final class LaneSession: ObservableObject {
                 )
 
                 let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+
+                guard self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else {
+                    try? FileManager.default.removeItem(at: temporaryURL)
+                    return
+                }
 
                 if let http = response as? HTTPURLResponse,
                    !(200..<300).contains(http.statusCode) {
@@ -1282,9 +1331,15 @@ final class LaneSession: ObservableObject {
                         case .failed:
                             let detail = item.error?.localizedDescription ?? "Unable to decode Lane audio"
 
+                            guard self.playbackRequestID == requestID,
+                                  self.currentTrack?.id == track.id else { return }
+
                             if !self.playerRetriedWithDownloadEndpoint {
                                 self.playerRetriedWithDownloadEndpoint = true
-                                self.resolveDownloadEndpointAndPlay()
+                                self.resolveDownloadEndpointAndPlay(
+                                    requestID: requestID,
+                                    track: track
+                                )
                                 return
                             }
 
@@ -1332,8 +1387,12 @@ final class LaneSession: ObservableObject {
     }
 
 
-    private func resolveDownloadEndpointAndPlay() {
-        guard let track = currentTrack,
+    private func resolveDownloadEndpointAndPlay(
+        requestID: UUID,
+        track: TrackCandidate
+    ) {
+        guard playbackRequestID == requestID,
+              currentTrack?.id == track.id,
               let trackID = track.trackID,
               !trackID.isEmpty else {
             isBuffering = false
@@ -1356,6 +1415,9 @@ final class LaneSession: ObservableObject {
                     quality: streamQuality
                 )
 
+                guard self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
+
                 let raw = resolved.url.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !raw.isEmpty else {
                     throw NSError(
@@ -1368,11 +1430,20 @@ final class LaneSession: ObservableObject {
                 // DownloadWorker in Android treats .m3u8 specially. For online
                 // playback AVPlayer can consume HLS directly, so try it as-is.
                 if raw.lowercased().contains(".m3u8") {
-                    try play(urlString: raw, useCompatibilityHeaders: true)
+                    try play(
+                        urlString: raw,
+                        useCompatibilityHeaders: true,
+                        requestID: requestID,
+                        track: track
+                    )
                     return
                 }
 
-                downloadCompatibilityAudio(raw)
+                downloadCompatibilityAudio(
+                    raw,
+                    requestID: requestID,
+                    track: track
+                )
             } catch {
                 isBuffering = false
                 isPlaying = false
@@ -1382,7 +1453,11 @@ final class LaneSession: ObservableObject {
         }
     }
 
-    private func downloadCompatibilityAudio(_ urlString: String) {
+    private func downloadCompatibilityAudio(
+        _ urlString: String,
+        requestID: UUID,
+        track: TrackCandidate
+    ) {
         guard let url = normalizedStreamURL(urlString) else {
             isBuffering = false
             playerError = "Lane returned an invalid compatibility audio URL."
@@ -1401,6 +1476,12 @@ final class LaneSession: ObservableObject {
                 )
 
                 let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+
+                guard self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else {
+                    try? FileManager.default.removeItem(at: temporaryURL)
+                    return
+                }
 
                 if let http = response as? HTTPURLResponse,
                    !(200..<300).contains(http.statusCode) {
@@ -1421,7 +1502,9 @@ final class LaneSession: ObservableObject {
 
                 try playLocalCompatibilityFile(
                     destination,
-                    sourceDescription: signature.description
+                    sourceDescription: signature.description,
+                    requestID: requestID,
+                    track: track
                 )
             } catch {
                 isBuffering = false
@@ -1434,8 +1517,13 @@ final class LaneSession: ObservableObject {
 
     private func playLocalCompatibilityFile(
         _ url: URL,
-        sourceDescription: String
+        sourceDescription: String,
+        requestID: UUID,
+        track: TrackCandidate
     ) throws {
+        guard playbackRequestID == requestID,
+              currentTrack?.id == track.id else { return }
+
         teardownPlayerObservers()
 
         let item = AVPlayerItem(url: url)
@@ -1445,7 +1533,9 @@ final class LaneSession: ObservableObject {
 
         playerItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self,
+                      self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
 
                 switch item.status {
                 case .readyToPlay:
