@@ -185,6 +185,8 @@ final class LaneSession: ObservableObject {
     private var playerRetriedWithCompatibilityHeaders = false
     private var playerRetriedWithLocalDownload = false
     private var playerRetriedWithDownloadEndpoint = false
+    private var playbackRequestID = UUID()
+    private var streamResolveTask: Task<Void, Never>?
 
     var isGuest: Bool {
         token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -906,6 +908,15 @@ final class LaneSession: ObservableObject {
     // MARK: Player
 
     func requestStream(for track: TrackCandidate) {
+        // Every tap gets its own generation. Older resolver/download tasks are
+        // ignored so a slow previous request can never start a different song.
+        streamResolveTask?.cancel()
+        let requestID = UUID()
+        playbackRequestID = requestID
+
+        player?.pause()
+        teardownPlayerObservers()
+
         currentTrack = track
         playerError = ""
         playbackPosition = 0
@@ -937,42 +948,66 @@ final class LaneSession: ObservableObject {
         playerRetriedWithLocalDownload = false
         playerRetriedWithDownloadEndpoint = false
 
-        Task {
-            defer { busy = false }
+        streamResolveTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.playbackRequestID == requestID {
+                    self.busy = false
+                }
+            }
+
             do {
-                await configureAPI()
+                await self.configureAPI()
+                try Task.checkCancellation()
+                guard self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
 
                 let result: TrackStreamingResult
                 do {
                     result = try await LaneAPI.shared.stream(
-                        token: token,
+                        token: self.token,
                         trackId: trackID,
                         refId: track.refID,
-                        quality: streamQuality
+                        quality: self.streamQuality
                     )
                 } catch {
-                    // refId is contextual in Android Lane and nullable in TracksApi.
-                    // If a migrated/fallback context is rejected, retry exactly once
-                    // without it instead of leaving the player dead.
+                    try Task.checkCancellation()
+                    guard self.playbackRequestID == requestID,
+                          self.currentTrack?.id == track.id else { return }
+
                     if track.refID != nil {
                         result = try await LaneAPI.shared.stream(
-                            token: token,
+                            token: self.token,
                             trackId: trackID,
                             refId: nil,
-                            quality: streamQuality
+                            quality: self.streamQuality
                         )
                     } else {
                         throw error
                     }
                 }
 
-                streamURL = result.url
-                try play(urlString: result.url, useCompatibilityHeaders: false)
+                try Task.checkCancellation()
+                guard self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
+
+                self.streamURL = result.url
+                try self.play(
+                    urlString: result.url,
+                    useCompatibilityHeaders: false,
+                    requestID: requestID,
+                    track: track
+                )
+            } catch is CancellationError {
+                return
             } catch {
-                isBuffering = false
-                isPlaying = false
-                playerError = error.localizedDescription
-                output = "Playback error: \(error.localizedDescription)"
+                guard self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
+
+                self.isBuffering = false
+                self.isPlaying = false
+                self.playerError = error.localizedDescription
+                self.output = "Playback error: \(error.localizedDescription)"
             }
         }
     }
