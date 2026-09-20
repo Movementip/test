@@ -1889,12 +1889,46 @@ private struct DiagnosticsScreen: View {
 
     var body: some View {
         Form {
-            Section("Server") {
+            Section("Backend") {
+                Picker("Mode", selection: $session.backendMode) {
+                    ForEach(LaneBackendMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .onChange(of: session.backendMode) { _ in
+                    session.persist()
+                }
+
                 TextField("Base URL", text: $session.baseURL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .onSubmit { session.persist() }
 
+                if session.backendMode == .custom {
+                    TextField("API-key header", text: $session.apiKeyHeader)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    SecureField("API key", text: $session.apiKey)
+
+                    Button("Save custom backend settings") {
+                        session.persist()
+                    }
+
+                    Text("Custom mode uses a standard API-key header and is intended for a backend you control or are authorized to access.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label(
+                        "Official Lane currently requires its supported client-signature mechanism. The iOS port will not attempt to recreate or bypass that protection.",
+                        systemImage: "lock.shield"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Playback") {
                 Picker("Quality", selection: $session.streamQuality) {
                     ForEach(AudioQualityChoice.allCases) { quality in
                         Text(quality.rawValue)
@@ -1907,6 +1941,7 @@ private struct DiagnosticsScreen: View {
             Section("Request") {
                 TextField("/endpoint", text: $path)
                     .textInputAutocapitalization(.never)
+
                 Picker("Method", selection: $method) {
                     Text("GET").tag("GET")
                     Text("POST").tag("POST")
@@ -1915,6 +1950,7 @@ private struct DiagnosticsScreen: View {
                 .pickerStyle(.segmented)
 
                 Button("Send request") {
+                    session.persist()
                     session.rawCall(path: path, method: method)
                 }
             }
