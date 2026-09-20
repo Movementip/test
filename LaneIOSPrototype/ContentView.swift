@@ -325,7 +325,18 @@ private struct SearchScreen: View {
                 }
                 .padding(.vertical, 10)
 
-                if session.busy && session.searchTracks.isEmpty {
+                if session.isGuest {
+                    Spacer()
+                    VStack(spacing: 16) {
+                        EmptyLaneView(
+                            icon: "person.crop.circle.badge.exclamationmark",
+                            title: "Sign in to search",
+                            subtitle: "Lane search uses your Telegram authorization token."
+                        )
+                        TelegramLoginCard()
+                    }
+                    Spacer()
+                } else if session.busy && session.searchTracks.isEmpty {
                     Spacer()
                     ProgressView()
                         .tint(lanePink)
@@ -337,7 +348,7 @@ private struct SearchScreen: View {
                     EmptyLaneView(
                         icon: "magnifyingglass",
                         title: query.isEmpty ? "What are we looking for today?" : "Nothing found",
-                        subtitle: query.isEmpty ? "A track, artist, or album?" : "Try a different search."
+                        subtitle: query.isEmpty ? "A track, artist, or album?" : session.output
                     )
                     Spacer()
                 }
@@ -1330,6 +1341,11 @@ private struct TelegramLoginScreen: View {
                 .font(.caption2.monospaced())
                 .foregroundStyle(.tertiary)
                 .textSelection(.enabled)
+                .padding(.bottom, 4)
+
+            Text("Keep this screen open after confirming in Telegram.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
                 .padding(.bottom, 14)
         }
         .background(laneBackground.ignoresSafeArea())
