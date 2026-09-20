@@ -831,9 +831,11 @@ struct APKFullPlayerView: View {
                         ProgressView()
                             .tint(.black)
                     } else {
-                        Image(systemName: session.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 28, weight: .bold))
-                            .foregroundStyle(.black)
+                        APKTemplateIcon(
+                            name: session.isPlaying ? "baseline_pause_24" : "baseline_play_arrow_24",
+                            size: 31,
+                            color: .black
+                        )
                     }
                 }
             }
@@ -867,7 +869,7 @@ struct APKFullPlayerView: View {
         HStack {
             HStack(spacing: 24) {
                 actionCount(
-                    icon: session.isFavorite(track) ? "heart.fill" : "heart",
+                    asset: session.isFavorite(track) ? "like" : "heart",
                     value: compactCount(session.trackStats?.likesCount ?? 0),
                     active: session.isFavorite(track)
                 ) {
@@ -876,7 +878,7 @@ struct APKFullPlayerView: View {
                 }
 
                 actionCount(
-                    icon: "bubble.left",
+                    asset: "comment",
                     value: compactCount(session.trackStats?.commentsCount ?? 0),
                     active: false
                 ) {
@@ -891,15 +893,17 @@ struct APKFullPlayerView: View {
                 Button {
                     session.downloadTrack(track)
                 } label: {
-                    Image(systemName: session.isDownloaded(track) ? "checkmark.circle.fill" : "arrow.down.circle")
-                        .font(.system(size: 22, weight: .medium))
+                    APKTemplateIcon(
+                        name: "ic_download",
+                        size: 22,
+                        color: session.isDownloaded(track) ? apkPink : .white
+                    )
                 }
 
                 Button {
                     showQueue = true
                 } label: {
-                    Image(systemName: "text.badge.plus")
-                        .font(.system(size: 22, weight: .medium))
+                    APKTemplateIcon(name: "queue", size: 24, color: .white)
                         .offset(y: 2)
                 }
             }
@@ -920,8 +924,11 @@ struct APKFullPlayerView: View {
             Button {
                 session.toggleShuffle()
             } label: {
-                Image(systemName: "shuffle")
-                    .foregroundStyle(session.shuffleEnabled ? apkPink : .white)
+                APKTemplateIcon(
+                    name: "shuffle",
+                    size: 22,
+                    color: session.shuffleEnabled ? apkPink : .white
+                )
             }
 
             Spacer()
@@ -929,8 +936,11 @@ struct APKFullPlayerView: View {
             Button {
                 session.cycleRepeatMode()
             } label: {
-                Image(systemName: session.repeatMode == 2 ? "repeat.1" : "repeat")
-                    .foregroundStyle(session.repeatMode == 0 ? .white : apkPink)
+                APKTemplateIcon(
+                    name: session.repeatMode == 2 ? "repeat_1" : "repeat",
+                    size: 22,
+                    color: session.repeatMode == 0 ? .white : apkPink
+                )
             }
 
             Spacer()
@@ -938,8 +948,7 @@ struct APKFullPlayerView: View {
             Button {
                 session.output = "Track effects"
             } label: {
-                Image(systemName: "slider.horizontal.3")
-                    .foregroundStyle(.white)
+                APKTemplateIcon(name: "ic_track_effect", size: 22, color: .white)
             }
 
             Spacer()
@@ -947,8 +956,7 @@ struct APKFullPlayerView: View {
             Button {
                 session.loadLyrics(track)
             } label: {
-                Image(systemName: "text.quote")
-                    .foregroundStyle(.white)
+                APKTemplateIcon(name: "text", size: 22, color: .white)
             }
         }
         .font(.system(size: 22, weight: .medium))
@@ -956,7 +964,7 @@ struct APKFullPlayerView: View {
     }
 
     private func actionCount(
-        icon: String,
+        asset: String,
         value: String,
         active: Bool,
         action: @escaping () -> Void
