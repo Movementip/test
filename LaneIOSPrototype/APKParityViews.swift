@@ -119,6 +119,234 @@ private struct APKBundleImage: View {
     }
 }
 
+
+struct APKPlatformIcon: View {
+    let platform: String?
+    var size: CGFloat = 10
+
+    private var assetName: String? {
+        let value = (platform ?? "").lowercased()
+        if value.contains("spotify") { return "ic_spotify" }
+        if value.contains("soundcloud") || value.contains("sound_cloud") { return "ic_soundcloud" }
+        if value.contains("yandex") { return "ic_yandex_music" }
+        if value.contains("telegram") { return "telegram" }
+        return nil
+    }
+
+    var body: some View {
+        Group {
+            if let assetName,
+               let url = Bundle.main.url(forResource: assetName, withExtension: "png"),
+               let image = UIImage(contentsOfFile: url.path) {
+                Image(uiImage: image.withRenderingMode(.alwaysOriginal))
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+            } else {
+                Circle()
+                    .fill(Color.white.opacity(0.45))
+                    .overlay {
+                        Circle()
+                            .fill(Color.black.opacity(0.55))
+                            .padding(2)
+                    }
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
+struct APKVerifiedBadge: View {
+    var size: CGFloat = 10
+
+    var body: some View {
+        Group {
+            if let url = Bundle.main.url(forResource: "verified", withExtension: "png"),
+               let image = UIImage(contentsOfFile: url.path) {
+                Image(uiImage: image.withRenderingMode(.alwaysOriginal))
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+            } else {
+                Image(systemName: "checkmark.seal.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(Color(red: 73.0 / 255.0, green: 173.0 / 255.0, blue: 244.0 / 255.0))
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
+// Exact compact rows used by SearchScreen in Lane Android 1.4.7.
+// Artwork/avatars, spacings, platform icons and typography are matched to
+// TrackResultItem / ArtistResultItem / AlbumResultItem / PlaylistResultItem.
+struct APKSearchTrackRow: View {
+    let track: TrackCandidate
+    let onTap: () -> Void
+    var onMore: (() -> Void)? = nil
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: onTap) {
+                HStack(spacing: 0) {
+                    APKRemoteImage(url: track.coverURL, cornerRadius: 5)
+                        .frame(width: 52, height: 52)
+
+                    Spacer().frame(width: 16)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(track.title)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+
+                        HStack(spacing: 5) {
+                            APKPlatformIcon(platform: track.platform, size: 10)
+                            Text("Song • \(track.subtitle)")
+                                .font(.system(size: 12, weight: .regular))
+                                .foregroundStyle(Color.white.opacity(0.70))
+                                .lineLimit(1)
+                                .padding(.trailing, 10)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                onMore?()
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .frame(width: 44, height: 52)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+}
+
+struct APKSearchArtistRow: View {
+    let artist: LaneArtist
+
+    var body: some View {
+        NavigationLink {
+            APKArtistDetailScreen(seed: artist)
+        } label: {
+            HStack(spacing: 0) {
+                APKRemoteImage(url: artist.avatarUrl, circle: true)
+                    .frame(width: 50, height: 50)
+
+                Spacer().frame(width: 16)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        if artist.verified == true {
+                            APKVerifiedBadge(size: 10)
+                        }
+
+                        Text(artist.name ?? "Artist")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
+
+                    HStack(spacing: 5) {
+                        APKPlatformIcon(platform: artist.platform, size: 10)
+                        Text("Artist")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.white.opacity(0.70))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.60))
+                    .frame(width: 34, height: 50)
+            }
+            .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct APKSearchAlbumRow: View {
+    let album: LaneAlbum
+
+    var body: some View {
+        HStack(spacing: 0) {
+            APKRemoteImage(url: album.coverUrl, cornerRadius: 5)
+                .frame(width: 52, height: 52)
+
+            Spacer().frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(album.name ?? "Album")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+
+                HStack(spacing: 5) {
+                    APKPlatformIcon(platform: album.platform, size: 10)
+                    Text("Album • \(album.artistsDisplayedName ?? "")")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.white.opacity(0.70))
+                        .lineLimit(1)
+                        .padding(.trailing, 10)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.60))
+                .frame(width: 34, height: 52)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct APKSearchPlaylistRow: View {
+    let playlist: LanePlaylist
+
+    var body: some View {
+        HStack(spacing: 0) {
+            APKRemoteImage(url: playlist.playlistImageUrl, cornerRadius: 5)
+                .frame(width: 52, height: 52)
+
+            Spacer().frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(playlist.playlistName ?? "Playlist")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+
+                HStack(spacing: 5) {
+                    APKPlatformIcon(platform: playlist.platform, size: 10)
+                    Text("Playlist")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.white.opacity(0.70))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.60))
+                .frame(width: 34, height: 52)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 struct APKFavoritePlaylistCard: View {
     let trackCount: Int
 
@@ -287,9 +515,7 @@ struct APKArtistCardRow: View {
                             .lineLimit(1)
 
                         if artist.verified == true {
-                            Image(systemName: "checkmark.seal.fill")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.blue)
+                            APKVerifiedBadge(size: 10)
                         }
                     }
 
@@ -387,8 +613,7 @@ struct APKArtistDetailScreen: View {
                                 Text(value.name ?? "Artist")
                                     .font(.system(size: 28, weight: .bold))
                                 if value.verified == true {
-                                    Image(systemName: "checkmark.seal.fill")
-                                        .foregroundStyle(.blue)
+                                    APKVerifiedBadge(size: 12)
                                 }
                             }
 
