@@ -71,18 +71,22 @@ struct APKLaneWordmark: View {
         Group {
             if let url = Bundle.main.url(forResource: "lane", withExtension: "png"),
                let image = UIImage(contentsOfFile: url.path) {
+                // APK source res/2m.png is 2187×464. Preserve the original
+                // 4.713:1 aspect instead of clipping it in a fixed container.
                 Image(uiImage: image.withRenderingMode(.alwaysOriginal))
                     .resizable()
                     .interpolation(.high)
+                    .antialiased(true)
                     .scaledToFit()
+                    .frame(width: 94.3, height: 20, alignment: .leading)
             } else {
                 Text("LANE")
                     .font(.system(size: 20, weight: .black, design: .rounded))
                     .tracking(-0.5)
+                    .fixedSize()
             }
         }
-        .frame(width: 104, height: 22, alignment: .leading)
-        .clipped()
+        .frame(height: 20, alignment: .leading)
         .accessibilityLabel("Lane")
     }
 }
