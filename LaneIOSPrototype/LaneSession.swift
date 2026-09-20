@@ -73,6 +73,9 @@ final class LaneSession: ObservableObject {
     @Published var playbackPosition: Double = 0
     @Published var playbackDuration: Double = 0
     @Published var playerError = ""
+    @Published var trackStats: TrackStatsDTO?
+    @Published var shuffleEnabled = false
+    @Published var repeatMode = 0 // 0 = off, 1 = all, 2 = one
 
     private var player: AVPlayer?
     private var playerItemStatusObserver: NSKeyValueObservation?
@@ -626,6 +629,7 @@ final class LaneSession: ObservableObject {
             do {
                 await configureAPI()
                 let stats = try await LaneAPI.shared.trackStats(token: token, trackId: id)
+                trackStats = stats
                 output = "Likes: \(stats.likesCount)\nComments: \(stats.commentsCount)"
             } catch {
                 output = error.localizedDescription
@@ -675,6 +679,8 @@ final class LaneSession: ObservableObject {
         playerError = ""
         playbackPosition = 0
         playbackDuration = parseDuration(track.duration) ?? 0
+        trackStats = nil
+        loadTrackStats(track)
 
         if let index = queue.firstIndex(of: track) {
             currentIndex = index
@@ -927,8 +933,21 @@ final class LaneSession: ObservableObject {
 
     func next() {
         guard !queue.isEmpty else { return }
-        let nextIndex = min((currentIndex ?? -1) + 1, queue.count - 1)
-        guard nextIndex != currentIndex else { return }
+
+        if repeatMode == 2, let currentTrack {
+            requestStream(for: currentTrack)
+            return
+        }
+
+        let current = currentIndex ?? -1
+        var nextIndex = current + 1
+
+        if nextIndex >= queue.count {
+            guard repeatMode == 1 else { return }
+            nextIndex = 0
+        }
+
+        guard nextIndex >= 0, nextIndex < queue.count else { return }
         currentIndex = nextIndex
         requestStream(for: queue[nextIndex])
     }
@@ -939,6 +958,21 @@ final class LaneSession: ObservableObject {
         guard previousIndex != currentIndex else { return }
         currentIndex = previousIndex
         requestStream(for: queue[previousIndex])
+    }
+
+    func toggleShuffle() {
+        shuffleEnabled.toggle()
+        if shuffleEnabled, !queue.isEmpty {
+            let current = currentTrack
+            queue.shuffle()
+            if let current, let index = queue.firstIndex(of: current) {
+                currentIndex = index
+            }
+        }
+    }
+
+    func cycleRepeatMode() {
+        repeatMode = (repeatMode + 1) % 3
     }
 
     func addToQueue(_ track: TrackCandidate) {
