@@ -1358,6 +1358,7 @@ struct APKFullPlayerView: View {
 
     @State private var showQueue = false
     @State private var showComments = false
+    @State private var showLyrics = false
     @State private var draggingProgress = false
     @State private var draggedValue: Double = 0
 
@@ -1411,35 +1412,65 @@ struct APKFullPlayerView: View {
 
                             Spacer(minLength: 12)
 
-                            APKRemoteImage(url: track.coverURL, cornerRadius: 14)
-                                .aspectRatio(1, contentMode: .fit)
-                                .frame(maxWidth: min(proxy.size.width - 32, 430))
-                                .shadow(color: .black.opacity(0.35), radius: 22, y: 12)
-                                .padding(.horizontal, 8)
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(track.title)
-                                    .font(.system(size: 21, weight: .bold))
-                                    .lineLimit(1)
-
-                                HStack(spacing: 7) {
-                                    if let avatars = track.artistAvatars, !avatars.isEmpty {
-                                        HStack(spacing: -5) {
-                                            ForEach(Array(avatars.prefix(3).enumerated()), id: \.offset) { _, avatar in
-                                                APKRemoteImage(url: avatar, circle: true)
-                                                    .frame(width: 20, height: 20)
-                                                    .overlay(Circle().stroke(Color.black.opacity(0.5), lineWidth: 1))
-                                            }
-                                        }
-                                    }
-
-                                    Text(track.subtitle)
-                                        .font(.system(size: 15))
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                            Group {
+                                if showLyrics {
+                                    lyricsPanel(track)
+                                        .frame(
+                                            width: min(proxy.size.width - 32, 430),
+                                            height: min(proxy.size.width - 32, 430)
+                                        )
+                                } else {
+                                    APKRemoteImage(url: track.coverURL, cornerRadius: 14)
+                                        .aspectRatio(1, contentMode: .fit)
+                                        .frame(maxWidth: min(proxy.size.width - 32, 430))
+                                        .shadow(color: .black.opacity(0.35), radius: 22, y: 12)
                                 }
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 8)
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+
+                            HStack(alignment: .center, spacing: 12) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(track.title)
+                                        .font(.system(size: 21, weight: .bold))
+                                        .lineLimit(1)
+
+                                    HStack(spacing: 7) {
+                                        if let avatars = track.artistAvatars, !avatars.isEmpty {
+                                            HStack(spacing: -5) {
+                                                ForEach(Array(avatars.prefix(3).enumerated()), id: \.offset) { _, avatar in
+                                                    APKRemoteImage(url: avatar, circle: true)
+                                                        .frame(width: 20, height: 20)
+                                                        .overlay(Circle().stroke(Color.black.opacity(0.5), lineWidth: 1))
+                                                }
+                                            }
+                                        }
+
+                                        Text(track.subtitle)
+                                            .font(.system(size: 15))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.22)) {
+                                        showLyrics.toggle()
+                                    }
+                                    if showLyrics, session.currentLyrics == nil {
+                                        session.loadLyrics(track)
+                                    }
+                                } label: {
+                                    APKTemplateIcon(
+                                        name: "text",
+                                        size: 24,
+                                        color: showLyrics ? apkPink : .white
+                                    )
+                                    .frame(width: 40, height: 40)
+                                }
+                                .buttonStyle(.plain)
+                            }
                             .padding(.horizontal, 24)
                             .padding(.top, 18)
 
@@ -1522,6 +1553,98 @@ struct APKFullPlayerView: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func lyricsPanel(_ track: TrackCandidate) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.black.opacity(0.30))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                }
+
+            if let lyrics = session.currentLyrics, !lyrics.lines.isEmpty {
+                ScrollViewReader { reader in
+                    ScrollView(.vertical, showsIndicators: false) {
+                        LazyVStack(alignment: .leading, spacing: 16) {
+                            ForEach(Array(lyrics.lines.enumerated()), id: \.element.id) { index, line in
+                                let active = index == activeLyricsIndex(in: lyrics)
+
+                                Button {
+                                    let seconds = Double(line.startMilliseconds) / 1000.0
+                                    session.seek(to: seconds)
+                                } label: {
+                                    Text(line.words.isEmpty ? "♪" : line.words)
+                                        .font(.system(size: active ? 21 : 17, weight: active ? .bold : .semibold))
+                                        .foregroundStyle(active ? Color.white : Color.white.opacity(0.43))
+                                        .multilineTextAlignment(.leading)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .scaleEffect(active ? 1.02 : 1.0, anchor: .leading)
+                                }
+                                .buttonStyle(.plain)
+                                .id(line.id)
+                            }
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 26)
+                    }
+                    .onChange(of: activeLyricsIndex(in: lyrics)) { index in
+                        guard lyrics.lines.indices.contains(index) else { return }
+                        withAnimation(.easeOut(duration: 0.30)) {
+                            reader.scrollTo(lyrics.lines[index].id, anchor: .center)
+                        }
+                    }
+                }
+            } else if !session.lyricsError.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "text.quote")
+                        .font(.system(size: 30))
+                        .foregroundStyle(.secondary)
+
+                    Text("Lyrics unavailable")
+                        .font(.headline)
+
+                    Text(session.lyricsError)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(4)
+                }
+                .padding(24)
+            } else {
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .tint(.white)
+                    Text("Loading lyrics…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .onAppear {
+                    if session.currentLyrics == nil {
+                        session.loadLyrics(track)
+                    }
+                }
+            }
+        }
+    }
+
+    private func activeLyricsIndex(in lyrics: LaneTrackLyrics) -> Int {
+        guard !lyrics.lines.isEmpty else { return 0 }
+
+        let currentMs = Int64(max(0, session.playbackPosition * 1000))
+        var result = 0
+
+        for (index, line) in lyrics.lines.enumerated() {
+            if line.startMilliseconds <= currentMs {
+                result = index
+            } else {
+                break
+            }
+        }
+
+        return result
     }
 
     private func progress(_ track: TrackCandidate) -> some View {
@@ -1682,49 +1805,6 @@ struct APKFullPlayerView: View {
         .buttonStyle(.plain)
     }
 
-    private func secondaryControls(_ track: TrackCandidate) -> some View {
-        HStack {
-            Button {
-                session.toggleShuffle()
-            } label: {
-                APKTemplateIcon(
-                    name: "shuffle",
-                    size: 22,
-                    color: session.shuffleEnabled ? apkPink : .white
-                )
-            }
-
-            Spacer()
-
-            Button {
-                session.cycleRepeatMode()
-            } label: {
-                APKTemplateIcon(
-                    name: session.repeatMode == 2 ? "repeat_1" : "repeat",
-                    size: 22,
-                    color: session.repeatMode == 0 ? .white : apkPink
-                )
-            }
-
-            Spacer()
-
-            Button {
-                session.output = "Track effects"
-            } label: {
-                APKTemplateIcon(name: "ic_track_effect", size: 22, color: .white)
-            }
-
-            Spacer()
-
-            Button {
-                session.loadLyrics(track)
-            } label: {
-                APKTemplateIcon(name: "text", size: 22, color: .white)
-            }
-        }
-        .font(.system(size: 22, weight: .medium))
-        .buttonStyle(.plain)
-    }
 
     private func actionCount(
         asset: String,
