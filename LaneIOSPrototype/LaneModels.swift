@@ -27,6 +27,26 @@ struct TrackStatsDTO: Decodable {
     let commentsCount: Int64
 }
 
+
+struct LaneTrackLyricsLine: Decodable, Hashable, Identifiable {
+    let startTimeMs: String
+    let words: String
+
+    var id: String { "\(startTimeMs)|\(words)" }
+
+    var startMilliseconds: Int64 {
+        Int64(startTimeMs) ?? 0
+    }
+}
+
+struct LaneTrackLyrics: Decodable, Hashable {
+    let trackId: String
+    let lines: [LaneTrackLyricsLine]
+    let syncType: String
+    let provider: String
+    let language: String
+}
+
 struct LaneCombinedSearchResponse: Decodable {
     let results: [LaneSearchResultItem]
     let searchToken: String?
