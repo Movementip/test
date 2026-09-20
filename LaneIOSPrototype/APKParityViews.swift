@@ -829,7 +829,7 @@ struct APKFullPlayerView: View {
             Spacer()
 
             Button { session.previous() } label: {
-                Image(systemName: "backward.end.fill")
+                APKTemplateIcon(name: "skip_backward", size: 32, color: .white)
             }
 
             Spacer()
@@ -858,7 +858,7 @@ struct APKFullPlayerView: View {
             Spacer()
 
             Button { session.next() } label: {
-                Image(systemName: "forward.end.fill")
+                APKTemplateIcon(name: "skip_forward", size: 32, color: .white)
             }
 
             Spacer()
