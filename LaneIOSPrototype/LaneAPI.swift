@@ -591,6 +591,20 @@ actor LaneAPI {
         try await decoded([LaneArtist].self, path: "/user/artists", token: token)
     }
 
+    // Exact UserApi endpoint recovered from Lane Android 1.4.7:
+    // POST /user/tracks?prefetch=<bool> with {"trackIds":[...]}.
+    func tracksByIds(token: String, ids: [String], prefetch: Bool = false) async throws -> [TrackData] {
+        guard !ids.isEmpty else { return [] }
+        return try await decoded(
+            [TrackData].self,
+            path: "/user/tracks",
+            method: "POST",
+            token: token,
+            query: [.init(name: "prefetch", value: prefetch ? "true" : "false")],
+            json: ["trackIds": ids]
+        )
+    }
+
     func recentRaw(token: String) async throws -> APIResult {
         try await request(path: "/user/recent", token: token)
     }
