@@ -204,21 +204,18 @@ private struct HomeHeader: View {
     @EnvironmentObject private var session: LaneSession
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 0) {
             NavigationLink {
                 ProfileScreen()
             } label: {
-                AvatarView(url: session.account?.avatarUrl, size: 42)
+                AvatarView(url: session.account?.avatarUrl, size: 36)
             }
+            .buttonStyle(.plain)
 
-            VStack(alignment: .leading, spacing: 3) {
-                APKLaneWordmark()
-                if let name = session.account?.displayedName, !name.isEmpty {
-                    Text(name)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            Spacer()
+                .frame(width: 20)
+
+            APKLaneWordmark()
 
             Spacer()
 
@@ -226,26 +223,25 @@ private struct HomeHeader: View {
                 NavigationLink {
                     NotificationsScreen()
                 } label: {
-                    Image(systemName: "bell.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .frame(width: 40, height: 40)
-                        .background(laneCard, in: Circle())
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "bell")
+                            .font(.system(size: 19, weight: .medium))
+                            .foregroundStyle(.white)
+                            .frame(width: 36, height: 36)
+
+                        if !session.notificationCards.isEmpty {
+                            Circle()
+                                .fill(apkPink)
+                                .frame(width: 8, height: 8)
+                                .offset(x: -4, y: 5)
+                        }
+                    }
                 }
                 .buttonStyle(.plain)
             }
-
-            NavigationLink {
-                ProfileScreen()
-            } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 17, weight: .semibold))
-                    .frame(width: 40, height: 40)
-                    .background(laneCard, in: Circle())
-            }
-            .buttonStyle(.plain)
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 10)
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
     }
 }
 
@@ -964,20 +960,38 @@ private struct PlaylistRow: View {
     let playlist: LanePlaylist
 
     var body: some View {
-        HStack(spacing: 12) {
-            ArtworkView(url: playlist.playlistImageUrl, size: 54, radius: 11)
-            VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 16) {
+            ArtworkView(url: playlist.playlistImageUrl, size: 64, radius: 5)
+
+            VStack(alignment: .leading, spacing: 5) {
                 Text(playlist.playlistName ?? "Playlist")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                Text(playlist.playlistDescription?.isEmpty == false ? playlist.playlistDescription! : "\(playlist.tracksCount ?? playlist.playlistTracks?.count ?? 0) tracks")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
                     .lineLimit(1)
+
+                Text(
+                    playlist.playlistDescription?.isEmpty == false
+                        ? playlist.playlistDescription!
+                        : "\(playlist.tracksCount ?? playlist.playlistTracks?.count ?? 0) tracks"
+                )
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
-            Spacer()
+
+            Spacer(minLength: 6)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.secondary.opacity(0.65))
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+        }
     }
 }
 
