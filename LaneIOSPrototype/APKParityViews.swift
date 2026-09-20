@@ -661,8 +661,7 @@ struct APKAlbumDetailScreen: View {
                             play(shuffled: false)
                         } label: {
                             HStack(spacing: 8) {
-                                Image(systemName: "play.fill")
-                                    .font(.system(size: 16, weight: .bold))
+                                APKTemplateIcon(name: "baseline_play_arrow_24", size: 20, color: .black)
                                 Text("Play")
                                     .font(.system(size: 15, weight: .bold))
                             }
@@ -677,9 +676,7 @@ struct APKAlbumDetailScreen: View {
                         Button {
                             play(shuffled: true)
                         } label: {
-                            Image(systemName: "shuffle")
-                                .font(.system(size: 20, weight: .semibold))
-                                .foregroundStyle(.white)
+                            APKTemplateIcon(name: "shuffle", size: 22, color: .white)
                                 .frame(width: 48, height: 48)
                                 .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                         }
@@ -748,7 +745,11 @@ struct APKAlbumDetailScreen: View {
         .task {
             let detail = await session.fetchAlbumDetail(seed)
             album = detail
-            tracks = await session.resolveTracksByIDs(detail.tracks ?? [], prefetch: false)
+            tracks = await session.resolveTracksByIDs(
+                detail.tracks ?? [],
+                prefetch: false,
+                refID: detail.id.map { "album:\($0)" }
+            )
             loading = false
         }
         .fullScreenCover(isPresented: $showPlayer) {
@@ -909,11 +910,14 @@ struct APKArtistDetailScreen: View {
                             Button {
                                 play(topTracks, shuffled: false)
                             } label: {
-                                Label("Play", systemImage: "play.fill")
-                                    .font(.system(size: 15, weight: .bold))
-                                    .foregroundStyle(.black)
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 46)
+                                HStack(spacing: 7) {
+                                    APKTemplateIcon(name: "baseline_play_arrow_24", size: 20, color: .black)
+                                    Text("Play")
+                                        .font(.system(size: 15, weight: .bold))
+                                }
+                                .foregroundStyle(.black)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 46)
                                     .background(apkPink, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                             }
                             .buttonStyle(.plain)
@@ -921,9 +925,7 @@ struct APKArtistDetailScreen: View {
                             Button {
                                 play(topTracks, shuffled: true)
                             } label: {
-                                Image(systemName: "shuffle")
-                                    .font(.system(size: 19, weight: .semibold))
-                                    .foregroundStyle(.white)
+                                APKTemplateIcon(name: "shuffle", size: 21, color: .white)
                                     .frame(width: 46, height: 46)
                                     .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                             }
@@ -1028,8 +1030,17 @@ struct APKArtistDetailScreen: View {
             let detail = await session.fetchArtistDetail(seed)
             artist = detail
 
-            topTracks = await session.resolveTracksByIDs(detail.topTracks ?? [], prefetch: false)
-            recentTracks = await session.resolveTracksByIDs(detail.recentTracks ?? [], prefetch: false)
+            let artistContext = detail.id.map { "artist:\($0)" }
+            topTracks = await session.resolveTracksByIDs(
+                detail.topTracks ?? [],
+                prefetch: false,
+                refID: artistContext
+            )
+            recentTracks = await session.resolveTracksByIDs(
+                detail.recentTracks ?? [],
+                prefetch: false,
+                refID: artistContext
+            )
 
             loading = false
         }
