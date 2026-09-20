@@ -1308,6 +1308,8 @@ private struct TelegramLoginScreen: View {
     @State private var polling = false
     @State private var message = ""
     @State private var botUsername = "lane_music_bot"
+    @State private var showDeviceIDEditor = false
+    @State private var editedAuthId = ""
 
     var body: some View {
         VStack(spacing: 24) {
@@ -1369,11 +1371,48 @@ private struct TelegramLoginScreen: View {
 
             Spacer()
 
-            Text("Authentication ID: \(authId)")
-                .font(.caption2.monospaced())
-                .foregroundStyle(.tertiary)
-                .textSelection(.enabled)
-                .padding(.bottom, 4)
+            VStack(spacing: 8) {
+                Text("Authentication ID: \(authId)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
+
+                Button(showDeviceIDEditor ? "Hide Android ID tools" : "Use ID from logged-in Android") {
+                    editedAuthId = authId
+                    showDeviceIDEditor.toggle()
+                }
+                .font(.caption)
+
+                if showDeviceIDEditor {
+                    HStack(spacing: 8) {
+                        TextField("16-char Android ID", text: $editedAuthId)
+                            .font(.caption.monospaced())
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .textFieldStyle(.roundedBorder)
+
+                        Button("Save") {
+                            if session.setTelegramAuthID(editedAuthId) {
+                                authId = session.persistentTelegramAuthID()
+                                editedAuthId = authId
+                                message = "Authentication ID saved. Start Telegram authorization again with this ID."
+                            } else {
+                                message = session.output
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(.horizontal, 24)
+
+                    Button("Generate new ID") {
+                        authId = session.generateNewTelegramAuthID()
+                        editedAuthId = authId
+                        message = "Generated a new Authentication ID. Start Telegram authorization again."
+                    }
+                    .font(.caption)
+                }
+            }
+            .padding(.bottom, 4)
 
             if session.backendMode == .custom {
                 Text("Custom backend: \(session.baseURL)")
@@ -1398,6 +1437,7 @@ private struct TelegramLoginScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             authId = session.persistentTelegramAuthID()
+            editedAuthId = authId
             Task {
                 await loadLoginConfiguration()
             }
