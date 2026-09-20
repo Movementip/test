@@ -63,30 +63,32 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            TabView(selection: $selectedTab) {
-                HomeScreen(showPlayer: $showPlayer)
-                    .tag(0)
-                    .tabItem { Label("Home", systemImage: "house.fill") }
-
-                SearchScreen(showPlayer: $showPlayer)
-                    .tag(1)
-                    .tabItem { Label("Search", systemImage: "magnifyingglass") }
-
-                LibraryScreen(showPlayer: $showPlayer)
-                    .tag(2)
-                    .tabItem { Label("Library", systemImage: "square.stack.fill") }
+            Group {
+                switch selectedTab {
+                case 1:
+                    SearchScreen(showPlayer: $showPlayer)
+                case 2:
+                    LibraryScreen(showPlayer: $showPlayer)
+                default:
+                    HomeScreen(showPlayer: $showPlayer)
+                }
             }
-            .tint(lanePink)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.bottom, 67)
 
-            if session.currentTrack != nil {
-                MiniPlayerView(showPlayer: $showPlayer)
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 50)
+            VStack(spacing: 0) {
+                if session.currentTrack != nil {
+                    MiniPlayerView(showPlayer: $showPlayer)
+                        .padding(.horizontal, 8)
+                        .padding(.bottom, 6)
+                }
+
+                LaneBottomBar(selection: $selectedTab)
             }
         }
         .background(laneBackground.ignoresSafeArea())
         .preferredColorScheme(.dark)
-        .sheet(isPresented: $showPlayer) {
+        .fullScreenCover(isPresented: $showPlayer) {
             APKFullPlayerView()
                 .environmentObject(session)
         }
@@ -95,6 +97,51 @@ struct ContentView: View {
                 await session.refreshAfterLogin()
             }
         }
+    }
+}
+
+private struct LaneBottomBar: View {
+    @Binding var selection: Int
+
+    var body: some View {
+        HStack {
+            bottomButton(index: 0, title: "Home", icon: "house.fill")
+            Spacer()
+            bottomButton(index: 1, title: "Search", icon: "magnifyingglass")
+            Spacer()
+            bottomButton(index: 2, title: "Library", icon: "square.stack.fill")
+        }
+        .padding(.horizontal, 46)
+        .padding(.top, 9)
+        .padding(.bottom, 5)
+        .frame(height: 67)
+        .background(
+            Color(red: 27.0 / 255.0, green: 27.0 / 255.0, blue: 27.0 / 255.0)
+                .ignoresSafeArea(edges: .bottom)
+        )
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.white.opacity(0.055))
+                .frame(height: 1)
+        }
+    }
+
+    private func bottomButton(index: Int, title: String, icon: String) -> some View {
+        Button {
+            selection = index
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: icon)
+                    .font(.system(size: 23, weight: .medium))
+                    .frame(height: 27)
+
+                Text(title)
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundStyle(selection == index ? lanePink : Color.white.opacity(0.48))
+            .frame(minWidth: 58)
+        }
+        .buttonStyle(.plain)
     }
 }
 
