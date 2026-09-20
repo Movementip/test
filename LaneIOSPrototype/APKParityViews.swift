@@ -716,10 +716,6 @@ struct APKFullPlayerView: View {
                                 .padding(.horizontal, 24)
                                 .padding(.top, 12)
 
-                            secondaryControls(track)
-                                .padding(.horizontal, 34)
-                                .padding(.top, 18)
-
                             if !session.playerError.isEmpty {
                                 Text(session.playerError)
                                     .font(.caption)
@@ -820,10 +816,13 @@ struct APKFullPlayerView: View {
     private func playbackControls(_ track: TrackCandidate) -> some View {
         HStack {
             Button {
-                session.toggleFavorite(track)
+                session.toggleShuffle()
             } label: {
-                Image(systemName: session.isFavorite(track) ? "heart.fill" : "heart")
-                    .foregroundStyle(session.isFavorite(track) ? apkPink : .white)
+                APKTemplateIcon(
+                    name: "shuffle",
+                    size: 24,
+                    color: session.shuffleEnabled ? apkPink : .white
+                )
             }
 
             Spacer()
@@ -848,7 +847,7 @@ struct APKFullPlayerView: View {
                     } else {
                         APKTemplateIcon(
                             name: session.isPlaying ? "baseline_pause_24" : "baseline_play_arrow_24",
-                            size: 31,
+                            size: 34,
                             color: .black
                         )
                     }
@@ -864,16 +863,23 @@ struct APKFullPlayerView: View {
             Spacer()
 
             Button {
-                showQueue = true
+                session.cycleRepeatMode()
             } label: {
-                Image(systemName: "list.bullet")
+                APKTemplateIcon(
+                    name: session.repeatMode == 2 ? "repeat_1" : "repeat",
+                    size: 24,
+                    color: session.repeatMode == 0 ? .white : apkPink
+                )
             }
         }
-        .font(.system(size: 22, weight: .semibold))
         .buttonStyle(.plain)
         .padding(.horizontal, 16)
         .padding(.vertical, 17)
-        .background(Color(red: 17/255, green: 17/255, blue: 17/255).opacity(0.92), in: RoundedRectangle(cornerRadius: 32, style: .continuous))
+        .background(
+            Color(red: 17.0 / 255.0, green: 17.0 / 255.0, blue: 17.0 / 255.0)
+                .opacity(0.20),
+            in: RoundedRectangle(cornerRadius: 32, style: .continuous)
+        )
         .overlay {
             RoundedRectangle(cornerRadius: 32, style: .continuous)
                 .stroke(Color.white.opacity(0.10), lineWidth: 1)
@@ -926,7 +932,11 @@ struct APKFullPlayerView: View {
         .frame(height: 40)
         .padding(.horizontal, 24)
         .padding(.vertical, 12)
-        .background(Color(red: 17/255, green: 17/255, blue: 17/255).opacity(0.92), in: RoundedRectangle(cornerRadius: 27, style: .continuous))
+        .background(
+            Color(red: 17.0 / 255.0, green: 17.0 / 255.0, blue: 17.0 / 255.0)
+                .opacity(0.20),
+            in: RoundedRectangle(cornerRadius: 27, style: .continuous)
+        )
         .overlay {
             RoundedRectangle(cornerRadius: 27, style: .continuous)
                 .stroke(Color.white.opacity(0.10), lineWidth: 1)
@@ -985,17 +995,22 @@ struct APKFullPlayerView: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 7) {
+            HStack(spacing: 6) {
                 APKTemplateIcon(
                     name: asset,
                     size: 22,
-                    color: active ? apkPink : .white
+                    color: active ? Color(red: 233.0 / 255.0, green: 30.0 / 255.0, blue: 99.0 / 255.0) : .white
                 )
                 Text(value)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 14, weight: .medium))
                     .monospacedDigit()
             }
-            .foregroundStyle(active ? apkPink : .white)
+            .scaleEffect(active ? 1.2 : 1.0)
+            .foregroundStyle(
+                active
+                    ? Color(red: 233.0 / 255.0, green: 30.0 / 255.0, blue: 99.0 / 255.0)
+                    : .white
+            )
         }
         .buttonStyle(.plain)
     }
