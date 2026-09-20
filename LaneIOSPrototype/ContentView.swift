@@ -1281,101 +1281,288 @@ private struct TrackInfoScreen: View {
 private struct ProfileScreen: View {
     @EnvironmentObject private var session: LaneSession
     @State private var showEditProfile = false
+    @State private var showPlayer = false
+
+    private var profileName: String {
+        session.publicProfile?.displayedName ??
+        session.account?.displayedName ??
+        (session.isGuest ? "Lane user" : "Profile")
+    }
+
+    private var profileUsername: String? {
+        session.publicProfile?.userName ?? session.account?.userName
+    }
+
+    private var profileAvatar: String? {
+        session.publicProfile?.avatarUrl ?? session.account?.avatarUrl
+    }
+
+    private var profileHeader: String? {
+        session.publicProfile?.headerUrl ?? session.account?.headerUrl
+    }
+
+    private var profileStatus: String? {
+        session.publicProfile?.statusText ?? session.account?.statusText
+    }
 
     var body: some View {
-        List {
-            Section {
-                HStack(spacing: 16) {
-                    AvatarView(url: session.account?.avatarUrl, size: 72)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(session.account?.displayedName ?? (session.isGuest ? "Lane user" : "Profile"))
-                            .font(.title3.bold())
-                        if let username = session.account?.userName, !username.isEmpty {
+        ScrollView {
+            VStack(spacing: 0) {
+                ZStack(alignment: .bottom) {
+                    AsyncImage(url: URL(string: profileHeader ?? "")) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image
+                                .resizable()
+                                .scaledToFill()
+                        default:
+                            ZStack {
+                                LinearGradient(
+                                    colors: [
+                                        lanePink.opacity(0.38),
+                                        Color.purple.opacity(0.20),
+                                        laneBackground
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+
+                                BundlePNG(name: "lane_lines_banner", contentMode: .fill)
+                                    .opacity(0.40)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 250)
+                    .clipped()
+                    .overlay {
+                        LinearGradient(
+                            colors: [.clear, laneBackground.opacity(0.35), laneBackground],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    }
+
+                    VStack(spacing: 10) {
+                        AvatarView(url: profileAvatar, size: 96)
+                            .overlay(Circle().stroke(laneBackground, lineWidth: 4))
+
+                        HStack(spacing: 6) {
+                            Text(profileName)
+                                .font(.system(size: 25, weight: .bold))
+                                .lineLimit(1)
+
+                            if session.publicProfile?.equippedBadgeId != nil {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .font(.system(size: 14))
+                                    .foregroundStyle(.blue)
+                            }
+                        }
+
+                        if let username = profileUsername, !username.isEmpty {
                             Text("@\(username)")
-                                .foregroundStyle(.secondary)
+                                .font(.system(size: 14))
+                                .foregroundStyle(Color.white.opacity(0.58))
                         }
-                        if let statusText = session.account?.statusText, !statusText.isEmpty {
-                            Text(statusText)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+
+                        if let status = profileStatus, !status.isEmpty {
+                            Text(status)
+                                .font(.system(size: 14))
+                                .foregroundStyle(Color.white.opacity(0.74))
+                                .multilineTextAlignment(.center)
+                                .lineLimit(3)
+                                .padding(.horizontal, 28)
                         }
                     }
-                }
-                .padding(.vertical, 6)
-            }
-
-            if session.isGuest {
-                Section {
-                    NavigationLink {
-                        TelegramLoginScreen()
-                    } label: {
-                        Label("Sign in with Telegram", systemImage: "paperplane.fill")
-                            .foregroundStyle(.blue)
-                    }
-                }
-            } else {
-                Section {
-                    Button("Edit Profile") {
-                        showEditProfile = true
-                    }
-                    NavigationLink {
-                        FriendsScreen()
-                    } label: {
-                        Label("Friends", systemImage: "person.2.fill")
-                    }
-                    NavigationLink {
-                        NotificationsScreen()
-                    } label: {
-                        Label("Notifications", systemImage: "bell.fill")
-                    }
+                    .padding(.bottom, 6)
                 }
 
-                Section("Social") {
-                    LabeledContent("Followers", value: "\(session.publicProfile?.followersCount ?? 0)")
-                    LabeledContent("Following", value: "\(session.publicProfile?.followingCount ?? 0)")
-                    if let laneId = session.account?.laneId {
-                        LabeledContent("Lane ID", value: laneId)
-                    }
-                }
-            }
+                if session.isGuest {
+                    TelegramLoginCard()
+                        .padding(.top, 18)
+                } else {
+                    VStack(spacing: 18) {
+                        HStack(spacing: 8) {
+                            profileStat(
+                                value: session.publicProfile?.followersCount ?? 0,
+                                title: "Followers"
+                            )
 
-            Section("Audio quality") {
-                Picker("Streaming", selection: $session.streamQuality) {
-                    ForEach(AudioQualityChoice.allCases) { quality in
-                        Text("\(quality.title) · \(quality.detail)")
-                            .tag(quality.rawValue)
-                    }
-                }
-                .onChange(of: session.streamQuality) { _ in
-                    session.persist()
-                }
-            }
+                            Rectangle()
+                                .fill(Color.white.opacity(0.12))
+                                .frame(width: 1, height: 28)
 
-            Section("Lane") {
-                NavigationLink {
-                    TelegramImportScreen()
-                } label: {
-                    Label("Import music", systemImage: "square.and.arrow.down")
-                }
+                            profileStat(
+                                value: session.publicProfile?.followingCount ?? 0,
+                                title: "Following"
+                            )
+                        }
+                        .padding(.top, 8)
 
-                NavigationLink {
-                    DiagnosticsScreen()
-                } label: {
-                    Label("Advanced / API", systemImage: "wrench.and.screwdriver")
-                }
-            }
+                        HStack(spacing: 10) {
+                            Button {
+                                showEditProfile = true
+                            } label: {
+                                Label("Edit profile", systemImage: "pencil")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(.black)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 44)
+                                    .background(lanePink, in: RoundedRectangle(cornerRadius: 13))
+                            }
+                            .buttonStyle(.plain)
 
-            if !session.isGuest {
-                Section {
-                    Button("Log out", role: .destructive) {
-                        session.clearAccount()
+                            NavigationLink {
+                                FriendsScreen()
+                            } label: {
+                                Image(systemName: "person.2.fill")
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 44, height: 44)
+                                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 13))
+                            }
+                            .buttonStyle(.plain)
+
+                            NavigationLink {
+                                NotificationsScreen()
+                            } label: {
+                                Image(systemName: "bell.fill")
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 44, height: 44)
+                                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 13))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 16)
+
+                        if let statusTrack = session.publicProfile?.statusTrack {
+                            let track = TrackCandidate(statusTrack)
+                            Button {
+                                session.requestStream(for: track)
+                                showPlayer = true
+                            } label: {
+                                HStack(spacing: 12) {
+                                    ArtworkView(url: track.coverURL, size: 58, radius: 8)
+
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Status track")
+                                            .font(.system(size: 11, weight: .medium))
+                                            .foregroundStyle(Color.white.opacity(0.50))
+
+                                        Text(track.title)
+                                            .font(.system(size: 15, weight: .bold))
+                                            .foregroundStyle(.white)
+                                            .lineLimit(1)
+
+                                        Text(track.subtitle)
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(Color.white.opacity(0.58))
+                                            .lineLimit(1)
+                                    }
+
+                                    Spacer()
+
+                                    Image(systemName: "play.fill")
+                                        .foregroundStyle(.white)
+                                }
+                                .padding(10)
+                                .background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 14))
+                                .padding(.horizontal, 16)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        if let playlists = session.publicProfile?.publicPlaylists, !playlists.isEmpty {
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    Text("Public playlists")
+                                        .font(.system(size: 20, weight: .bold))
+                                    Spacer()
+                                    Text("\(playlists.count)")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal, 16)
+
+                                ForEach(Array(playlists.prefix(6).enumerated()), id: \.offset) { _, playlist in
+                                    NavigationLink {
+                                        PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
+                                    } label: {
+                                        PlaylistRow(playlist: playlist)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+
+                        VStack(spacing: 0) {
+                            profileMenuRow(
+                                icon: "waveform",
+                                title: "Audio quality",
+                                subtitle: AudioQualityChoice(rawValue: session.streamQuality)?.detail ?? session.streamQuality
+                            )
+
+                            Divider().padding(.leading, 58)
+
+                            NavigationLink {
+                                TelegramImportScreen()
+                            } label: {
+                                profileMenuRow(
+                                    icon: "square.and.arrow.down",
+                                    title: "Import music",
+                                    subtitle: "Transfer tracks to Lane"
+                                )
+                            }
+                            .buttonStyle(.plain)
+
+                            Divider().padding(.leading, 58)
+
+                            NavigationLink {
+                                DiagnosticsScreen()
+                            } label: {
+                                profileMenuRow(
+                                    icon: "gearshape.fill",
+                                    title: "Settings",
+                                    subtitle: "Playback and API settings"
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 16))
+                        .padding(.horizontal, 16)
+
+                        Picker("Streaming quality", selection: $session.streamQuality) {
+                            ForEach(AudioQualityChoice.allCases) { quality in
+                                Text("\(quality.title) · \(quality.detail)")
+                                    .tag(quality.rawValue)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .padding(.horizontal, 16)
+                        .onChange(of: session.streamQuality) { _ in
+                            session.persist()
+                        }
+
+                        Button(role: .destructive) {
+                            session.clearAccount()
+                        } label: {
+                            Text("Log out")
+                                .font(.system(size: 15, weight: .semibold))
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 44)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.red.opacity(0.85))
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 24)
                     }
                 }
             }
         }
-        .scrollContentBackground(.hidden)
-        .background(laneBackground)
+        .background(laneBackground.ignoresSafeArea())
         .navigationTitle("Profile")
+        .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             if !session.isGuest {
                 session.refreshAccount()
@@ -1385,6 +1572,48 @@ private struct ProfileScreen: View {
             EditProfileSheet()
                 .environmentObject(session)
         }
+        .fullScreenCover(isPresented: $showPlayer) {
+            APKFullPlayerView()
+                .environmentObject(session)
+        }
+    }
+
+    private func profileStat(value: Int64, title: String) -> some View {
+        VStack(spacing: 2) {
+            Text("\(value)")
+                .font(.system(size: 18, weight: .bold))
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+        .frame(minWidth: 82)
+    }
+
+    private func profileMenuRow(icon: String, title: String, subtitle: String) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: icon)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(lanePink)
+                .frame(width: 32, height: 32)
+                .background(lanePink.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 58)
     }
 }
 
