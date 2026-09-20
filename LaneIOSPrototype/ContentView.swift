@@ -1398,7 +1398,7 @@ private struct TelegramLoginScreen: View {
                 message = "Authorization successful."
                 polling = false
             } catch {
-                message = "Token is not available yet. If the bot already confirmed authorization, wait a few seconds and tap Check authorization now."
+                message = error.localizedDescription
             }
         }
     }
