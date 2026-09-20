@@ -86,7 +86,30 @@ final class LaneSession: ObservableObject {
         }
     }
 
-    func resolveTracksByIDs(_ ids: [String], prefetch: Bool = false) async -> [TrackCandidate] {
+    private func applyingRefID(_ refID: String?, to tracks: [TrackCandidate]) -> [TrackCandidate] {
+        guard let refID, !refID.isEmpty else { return tracks }
+
+        return tracks.map { track in
+            TrackCandidate(
+                id: track.id,
+                title: track.title,
+                subtitle: track.subtitle,
+                trackID: track.trackID,
+                refID: refID,
+                platform: track.platform,
+                coverURL: track.coverURL,
+                duration: track.duration,
+                genre: track.genre,
+                artistAvatars: track.artistAvatars
+            )
+        }
+    }
+
+    func resolveTracksByIDs(
+        _ ids: [String],
+        prefetch: Bool = false,
+        refID: String? = nil
+    ) async -> [TrackCandidate] {
         let clean = ids.filter { !$0.isEmpty }
         guard !clean.isEmpty, !isGuest else { return [] }
 
@@ -97,7 +120,7 @@ final class LaneSession: ObservableObject {
                 ids: clean,
                 prefetch: prefetch
             )
-            return tracks.map { TrackCandidate($0) }
+            return applyingRefID(refID, to: tracks.map { TrackCandidate($0) })
         } catch {
             output = "Track resolve error: \(error.localizedDescription)"
 
@@ -105,25 +128,30 @@ final class LaneSession: ObservableObject {
             // an empty detail page if the network resolver is unavailable.
             let local = history + searchTracks + queue + homeTracks + recentTracks
             var seen = Set<String>()
-            return clean.compactMap { id in
+            let fallback = clean.compactMap { id in
                 local.first(where: { $0.trackID == id })
             }.filter { seen.insert($0.id).inserted }
+
+            return applyingRefID(refID, to: fallback)
         }
     }
 
     func fetchAlbumTracks(_ album: LaneAlbum) async -> [TrackCandidate] {
         let detail = await fetchAlbumDetail(album)
-        return await resolveTracksByIDs(detail.tracks ?? [], prefetch: false)
+        let context = detail.id.map { "album:\($0)" }
+        return await resolveTracksByIDs(detail.tracks ?? [], prefetch: false, refID: context)
     }
 
     func fetchArtistTopTracks(_ artist: LaneArtist) async -> [TrackCandidate] {
         let detail = await fetchArtistDetail(artist)
-        return await resolveTracksByIDs(detail.topTracks ?? [], prefetch: false)
+        let context = detail.id.map { "artist:\($0)" }
+        return await resolveTracksByIDs(detail.topTracks ?? [], prefetch: false, refID: context)
     }
 
     func fetchArtistRecentTracks(_ artist: LaneArtist) async -> [TrackCandidate] {
         let detail = await fetchArtistDetail(artist)
-        return await resolveTracksByIDs(detail.recentTracks ?? [], prefetch: false)
+        let context = detail.id.map { "artist:\($0)" }
+        return await resolveTracksByIDs(detail.recentTracks ?? [], prefetch: false, refID: context)
     }
 
     // MARK: Social
