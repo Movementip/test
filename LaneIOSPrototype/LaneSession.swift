@@ -153,6 +153,7 @@ final class LaneSession: ObservableObject {
     private var playerTimeControlObserver: NSKeyValueObservation?
     private var periodicTimeObserver: Any?
     private var playerRetriedWithCompatibilityHeaders = false
+    private var playerRetriedWithLocalDownload = false
 
     var isGuest: Bool {
         token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -891,6 +892,7 @@ final class LaneSession: ObservableObject {
         busy = true
         isBuffering = true
         playerRetriedWithCompatibilityHeaders = false
+        playerRetriedWithLocalDownload = false
 
         Task {
             defer { busy = false }
@@ -1039,6 +1041,14 @@ final class LaneSession: ObservableObject {
                         }
                     }
 
+                    if useCompatibilityHeaders,
+                       !self.playerRetriedWithLocalDownload,
+                       !self.streamURL.isEmpty {
+                        self.playerRetriedWithLocalDownload = true
+                        self.downloadStreamAndPlayLocally(self.streamURL)
+                        return
+                    }
+
                     self.isBuffering = false
                     self.isPlaying = false
                     self.playerError = detail
@@ -1095,6 +1105,23 @@ final class LaneSession: ObservableObject {
 
         newPlayer.play()
 
+        // AVPlayer can remain in waitingToPlayAtSpecifiedRate indefinitely for
+        // some signed CDN URLs without ever transitioning to .failed. Android
+        // Media3 retries the source; mirror that behavior here.
+        Task { [weak self, weak newPlayer] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard let self, let newPlayer, self.player === newPlayer else { return }
+            guard self.isBuffering, self.playbackPosition < 0.25, !self.streamURL.isEmpty else { return }
+
+            if !useCompatibilityHeaders && !self.playerRetriedWithCompatibilityHeaders {
+                self.playerRetriedWithCompatibilityHeaders = true
+                try? self.play(urlString: self.streamURL, useCompatibilityHeaders: true)
+            } else if useCompatibilityHeaders && !self.playerRetriedWithLocalDownload {
+                self.playerRetriedWithLocalDownload = true
+                self.downloadStreamAndPlayLocally(self.streamURL)
+            }
+        }
+
         if let currentTrack {
             history.removeAll { $0.id == currentTrack.id }
             history.insert(currentTrack, at: 0)
@@ -1105,6 +1132,125 @@ final class LaneSession: ObservableObject {
         }
 
         updateNowPlaying()
+    }
+
+    private func downloadStreamAndPlayLocally(_ urlString: String) {
+        guard let url = normalizedStreamURL(urlString) else { return }
+
+        // HLS playlists need AVPlayer's segment loader and cannot be converted
+        // into a single local audio file by this fallback.
+        if url.pathExtension.lowercased() == "m3u8" {
+            isBuffering = false
+            isPlaying = false
+            playerError = "The HLS stream could not be opened by AVPlayer."
+            output = "Playback error: \(playerError)"
+            return
+        }
+
+        isBuffering = true
+        output = "Lane is preparing the audio stream…"
+
+        Task {
+            do {
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 30
+                request.setValue("LaneMusic/1.0 (Android; Mobile)", forHTTPHeaderField: "User-Agent")
+                request.setValue("*/*", forHTTPHeaderField: "Accept")
+                request.setValue(
+                    Locale.current.language.languageCode?.identifier ?? "en",
+                    forHTTPHeaderField: "Accept-Language"
+                )
+
+                let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+
+                if let http = response as? HTTPURLResponse,
+                   !(200..<300).contains(http.statusCode) {
+                    throw NSError(
+                        domain: "LanePlayer",
+                        code: http.statusCode,
+                        userInfo: [NSLocalizedDescriptionKey: "Audio CDN returned HTTP \(http.statusCode)"]
+                    )
+                }
+
+                let ext: String = {
+                    if !url.pathExtension.isEmpty { return url.pathExtension }
+                    switch response.mimeType?.lowercased() {
+                    case "audio/mpeg": return "mp3"
+                    case "audio/mp4", "audio/x-m4a": return "m4a"
+                    case "audio/aac": return "aac"
+                    case "audio/ogg": return "ogg"
+                    default: return "bin"
+                    }
+                }()
+
+                let destination = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("lane_stream_\(UUID().uuidString)")
+                    .appendingPathExtension(ext)
+
+                try? FileManager.default.removeItem(at: destination)
+                try FileManager.default.moveItem(at: temporaryURL, to: destination)
+
+                teardownPlayerObservers()
+
+                let item = AVPlayerItem(url: destination)
+                let localPlayer = AVPlayer(playerItem: item)
+                localPlayer.automaticallyWaitsToMinimizeStalling = false
+                player = localPlayer
+
+                playerItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        switch item.status {
+                        case .readyToPlay:
+                            self.playerError = ""
+                            self.isBuffering = false
+                            if item.duration.seconds.isFinite && item.duration.seconds > 0 {
+                                self.playbackDuration = item.duration.seconds
+                            }
+                            self.player?.play()
+                        case .failed:
+                            self.isBuffering = false
+                            self.isPlaying = false
+                            let detail = item.error?.localizedDescription ?? "Unable to decode Lane audio"
+                            self.playerError = detail
+                            self.output = "Playback error: \(detail)"
+                        case .unknown:
+                            self.isBuffering = true
+                        @unknown default:
+                            break
+                        }
+                    }
+                }
+
+                playerTimeControlObserver = localPlayer.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.isPlaying = player.timeControlStatus == .playing
+                        self.isBuffering = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+                        self.updatePlaybackState(self.isPlaying)
+                    }
+                }
+
+                periodicTimeObserver = localPlayer.addPeriodicTimeObserver(
+                    forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
+                    queue: .main
+                ) { [weak self] time in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        if time.seconds.isFinite {
+                            self.playbackPosition = max(0, time.seconds)
+                        }
+                    }
+                }
+
+                localPlayer.play()
+            } catch {
+                isBuffering = false
+                isPlaying = false
+                playerError = error.localizedDescription
+                output = "Playback error: \(error.localizedDescription)"
+            }
+        }
     }
 
     func seek(to seconds: Double) {
@@ -1141,13 +1287,20 @@ final class LaneSession: ObservableObject {
     }
 
     func resume() {
-        player?.play()
-        isPlaying = true
-        updatePlaybackState(true)
+        if let player {
+            player.play()
+            isBuffering = player.timeControlStatus != .playing
+        } else if let currentTrack {
+            requestStream(for: currentTrack)
+        }
     }
 
     func togglePlayback() {
-        isPlaying ? pause() : resume()
+        if isPlaying {
+            pause()
+        } else {
+            resume()
+        }
     }
 
     func stop() {
