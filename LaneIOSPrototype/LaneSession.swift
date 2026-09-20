@@ -130,6 +130,33 @@ final class LaneSession: ObservableObject {
         return generated
     }
 
+    @discardableResult
+    func setTelegramAuthID(_ value: String) -> Bool {
+        let clean = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        guard clean.range(of: "^[0-9a-f]{16}$", options: .regularExpression) != nil else {
+            output = "Android ID must contain exactly 16 hexadecimal characters."
+            return false
+        }
+
+        KeychainStore.save(clean, account: "telegramAuthId")
+        output = "Authentication ID updated."
+        return true
+    }
+
+    func generateNewTelegramAuthID() -> String {
+        let generated = String(
+            UUID().uuidString
+                .replacingOccurrences(of: "-", with: "")
+                .lowercased()
+                .prefix(16)
+        )
+        KeychainStore.save(generated, account: "telegramAuthId")
+        return generated
+    }
+
     func refreshAfterLogin() async {
         await configureAPI()
         await loadAccount()
