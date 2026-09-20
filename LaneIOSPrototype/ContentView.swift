@@ -1480,14 +1480,34 @@ private struct TelegramLoginScreen: View {
                 botUsername = "lane_music_bot"
             }
 
-            guard let url = URL(string: "https://t.me/\(botUsername)?start=auth\(id)") else {
-                polling = false
-                message = "Could not create Telegram link."
-                return
+            let payload = "auth\(id)"
+            let command = "/start \(payload)"
+
+            await MainActor.run {
+                UIPasteboard.general.string = command
+                message = "Telegram command copied: \(command)\nIf Telegram does not send it automatically, paste this exact command to @\(botUsername)."
             }
 
-            openURL(url)
-            message = "Confirm authorization in Telegram. Lane is checking for your token…"
+            let tgURL = URL(string: "tg://resolve?domain=\(botUsername)&start=\(payload)")
+            let webURL = URL(string: "https://t.me/\(botUsername)?start=\(payload)")
+
+            if let tgURL {
+                await MainActor.run {
+                    UIApplication.shared.open(tgURL, options: [:]) { opened in
+                        if !opened, let webURL {
+                            UIApplication.shared.open(webURL)
+                        }
+                    }
+                }
+            } else if let webURL {
+                await MainActor.run {
+                    UIApplication.shared.open(webURL)
+                }
+            } else {
+                polling = false
+                message = "Could not create Telegram authorization link."
+                return
+            }
 
             do {
                 let response = try await LaneAPI.shared.pollAuth(authId: id)
