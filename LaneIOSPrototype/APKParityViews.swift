@@ -701,6 +701,9 @@ struct APKCommentsScreen: View {
 
     let track: TrackCandidate
     @State private var text = ""
+    @State private var replyingTo: LaneTrackCommentDTO?
+    @State private var replyParent: LaneTrackCommentDTO?
+    @State private var expandedReplies: Set<String> = []
 
     var body: some View {
         NavigationStack {
@@ -780,9 +783,34 @@ struct APKCommentsScreen: View {
                                             }
                                             .buttonStyle(.plain)
 
+                                            Button("Reply") {
+                                                replyParent = comment
+                                                replyingTo = comment
+                                            }
+                                            .foregroundStyle(.secondary)
+
                                             if (comment.repliesCount ?? 0) > 0 {
-                                                Label("\(comment.repliesCount ?? 0)", systemImage: "arrowshape.turn.up.left")
-                                                    .foregroundStyle(.secondary)
+                                                Button {
+                                                    if expandedReplies.contains(comment.id) {
+                                                        expandedReplies.remove(comment.id)
+                                                    } else {
+                                                        expandedReplies.insert(comment.id)
+                                                        session.loadReplies(for: comment)
+                                                    }
+                                                } label: {
+                                                    HStack(spacing: 4) {
+                                                        if session.loadingReplyIDs.contains(comment.id) {
+                                                            ProgressView()
+                                                                .controlSize(.mini)
+                                                        }
+                                                        Text(
+                                                            expandedReplies.contains(comment.id)
+                                                                ? "Hide replies"
+                                                                : "Show \(comment.repliesCount ?? 0) replies"
+                                                        )
+                                                    }
+                                                }
+                                                .foregroundStyle(.secondary)
                                             }
                                         }
                                         .font(.caption)
@@ -791,6 +819,67 @@ struct APKCommentsScreen: View {
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 12)
 
+                                if expandedReplies.contains(comment.id),
+                                   let replies = session.commentReplies[comment.id] {
+                                    VStack(spacing: 0) {
+                                        ForEach(replies) { reply in
+                                            HStack(alignment: .top, spacing: 9) {
+                                                APKRemoteImage(url: reply.userAvatar, circle: true)
+                                                    .frame(width: 30, height: 30)
+
+                                                VStack(alignment: .leading, spacing: 5) {
+                                                    HStack(spacing: 5) {
+                                                        Text(reply.userName ?? "Lane user")
+                                                            .font(.system(size: 12, weight: .bold))
+
+                                                        if let replyName = reply.replyToUserName,
+                                                           !replyName.isEmpty {
+                                                            Text("→ @\(replyName)")
+                                                                .font(.system(size: 11))
+                                                                .foregroundStyle(.secondary)
+                                                        }
+
+                                                        Spacer()
+
+                                                        if let timestamp = reply.timestamp {
+                                                            Text(Self.relative(timestamp))
+                                                                .font(.caption2)
+                                                                .foregroundStyle(.tertiary)
+                                                        }
+                                                    }
+
+                                                    Text(reply.text ?? "")
+                                                        .font(.system(size: 13))
+                                                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                                                    HStack(spacing: 14) {
+                                                        Button {
+                                                            session.toggleReplyLike(reply, parentComment: comment)
+                                                        } label: {
+                                                            Label(
+                                                                "\(reply.likesCount ?? 0)",
+                                                                systemImage: reply.isLiked == true ? "heart.fill" : "heart"
+                                                            )
+                                                            .foregroundStyle(reply.isLiked == true ? apkPink : .secondary)
+                                                        }
+                                                        .buttonStyle(.plain)
+
+                                                        Button("Reply") {
+                                                            replyParent = comment
+                                                            replyingTo = reply
+                                                        }
+                                                        .foregroundStyle(.secondary)
+                                                    }
+                                                    .font(.caption)
+                                                }
+                                            }
+                                            .padding(.leading, 66)
+                                            .padding(.trailing, 16)
+                                            .padding(.vertical, 8)
+                                        }
+                                    }
+                                }
+
                                 Divider()
                                     .padding(.leading, 67)
                             }
@@ -798,27 +887,60 @@ struct APKCommentsScreen: View {
                     }
                 }
 
-                HStack(spacing: 10) {
-                    TextField("Write a comment…", text: $text, axis: .vertical)
+                VStack(spacing: 0) {
+                    if let replyingTo {
+                        HStack {
+                            Text("Replying to @\(replyingTo.userName ?? "user")")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button {
+                                self.replyingTo = nil
+                                replyParent = nil
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.caption.weight(.bold))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.top, 9)
+                    }
+
+                    HStack(spacing: 10) {
+                        TextField(
+                            replyingTo == nil ? "Write a comment…" : "Write a reply…",
+                            text: $text,
+                            axis: .vertical
+                        )
                         .lineLimit(1...4)
                         .padding(.horizontal, 13)
                         .padding(.vertical, 10)
                         .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18))
 
-                    Button {
-                        let outgoing = text
-                        text = ""
-                        session.sendComment(outgoing, for: track)
-                    } label: {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(.black)
-                            .frame(width: 38, height: 38)
-                            .background(apkPink, in: Circle())
+                        Button {
+                            let outgoing = text
+                            text = ""
+
+                            if let replyingTo, let replyParent {
+                                session.sendReply(outgoing, to: replyParent, replyTo: replyingTo)
+                                expandedReplies.insert(replyParent.id)
+                                self.replyingTo = nil
+                                self.replyParent = nil
+                            } else {
+                                session.sendComment(outgoing, for: track)
+                            }
+                        } label: {
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(.black)
+                                .frame(width: 38, height: 38)
+                                .background(apkPink, in: Circle())
+                        }
+                        .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
-                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .padding(12)
                 }
-                .padding(12)
                 .background(.ultraThinMaterial)
             }
             .background(apkBackground)
