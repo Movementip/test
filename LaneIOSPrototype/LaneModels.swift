@@ -207,6 +207,45 @@ struct PaginatedResult<T: Decodable>: Decodable {
     let page: Int?
     let pageSize: Int?
     let totalPages: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case items
+        case content
+        case data
+        case results
+        case totalItems
+        case total
+        case page
+        case pageSize
+        case size
+        case totalPages
+        case pages
+    }
+
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+
+        items =
+            (try? box.decode([T].self, forKey: .items)) ??
+            (try? box.decode([T].self, forKey: .content)) ??
+            (try? box.decode([T].self, forKey: .data)) ??
+            (try? box.decode([T].self, forKey: .results)) ??
+            []
+
+        totalItems =
+            (try? box.decode(Int64.self, forKey: .totalItems)) ??
+            (try? box.decode(Int64.self, forKey: .total))
+
+        page = try? box.decode(Int.self, forKey: .page)
+
+        pageSize =
+            (try? box.decode(Int.self, forKey: .pageSize)) ??
+            (try? box.decode(Int.self, forKey: .size))
+
+        totalPages =
+            (try? box.decode(Int.self, forKey: .totalPages)) ??
+            (try? box.decode(Int.self, forKey: .pages))
+    }
 }
 
 struct LaneTrackCommentDTO: Decodable, Identifiable {
@@ -224,6 +263,68 @@ struct LaneTrackCommentDTO: Decodable, Identifiable {
     let userEquippedBadgeImageUrl: String?
     let replyToUserId: String?
     let replyToUserName: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case userName
+        case userAvatar
+        case userId
+        case text
+        case likesCount
+        case repliesCount
+        case isLiked
+        case attachment
+        case timestamp
+        case parentId
+        case userEquippedBadgeImageUrl
+        case replyToUserId
+        case replyToUserName
+    }
+
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+
+        if let string = try? box.decode(String.self, forKey: .id) {
+            id = string
+        } else if let number = try? box.decode(Int64.self, forKey: .id) {
+            id = String(number)
+        } else {
+            id = UUID().uuidString
+        }
+
+        userName = try? box.decodeIfPresent(String.self, forKey: .userName)
+        userAvatar = try? box.decodeIfPresent(String.self, forKey: .userAvatar)
+
+        if let string = try? box.decodeIfPresent(String.self, forKey: .userId) {
+            userId = string
+        } else if let number = try? box.decodeIfPresent(Int64.self, forKey: .userId) {
+            userId = number.map(String.init)
+        } else {
+            userId = nil
+        }
+
+        text = try? box.decodeIfPresent(String.self, forKey: .text)
+
+        likesCount =
+            (try? box.decodeIfPresent(Int64.self, forKey: .likesCount)) ??
+            (try? box.decodeIfPresent(Int.self, forKey: .likesCount)).map { $0.map(Int64.init) } ?? nil
+
+        repliesCount =
+            (try? box.decodeIfPresent(Int64.self, forKey: .repliesCount)) ??
+            (try? box.decodeIfPresent(Int.self, forKey: .repliesCount)).map { $0.map(Int64.init) } ?? nil
+
+        isLiked = try? box.decodeIfPresent(Bool.self, forKey: .isLiked)
+        attachment = try? box.decodeIfPresent(String.self, forKey: .attachment)
+
+        timestamp =
+            (try? box.decodeIfPresent(Int64.self, forKey: .timestamp)) ??
+            (try? box.decodeIfPresent(Int.self, forKey: .timestamp)).map { $0.map(Int64.init) } ?? nil
+
+        parentId = try? box.decodeIfPresent(String.self, forKey: .parentId)
+        userEquippedBadgeImageUrl = try? box.decodeIfPresent(String.self, forKey: .userEquippedBadgeImageUrl)
+        replyToUserId = try? box.decodeIfPresent(String.self, forKey: .replyToUserId)
+        replyToUserName = try? box.decodeIfPresent(String.self, forKey: .replyToUserName)
+    }
 }
 
 // MARK: - iOS UI models
