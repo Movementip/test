@@ -333,6 +333,12 @@ actor LaneAPI {
 
                 if (200..<400).contains(http.statusCode) {
                     base = targetBase
+                    if signingConfiguration.mode == .official {
+                        UserDefaults.standard.set(
+                            targetBase.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+                            forKey: "lane.base"
+                        )
+                    }
                 }
 
                 return result
