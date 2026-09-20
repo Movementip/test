@@ -105,11 +105,11 @@ private struct LaneBottomBar: View {
 
     var body: some View {
         HStack {
-            bottomButton(index: 0, title: "Home", icon: "house.fill")
+            bottomButton(index: 0, title: "Home", asset: "bottom_main_unselected")
             Spacer()
-            bottomButton(index: 1, title: "Search", icon: "magnifyingglass")
+            bottomButton(index: 1, title: "Search", asset: "bottom_search")
             Spacer()
-            bottomButton(index: 2, title: "Library", icon: "square.stack.fill")
+            bottomButton(index: 2, title: "Library", asset: "bottom_library")
         }
         .padding(.horizontal, 46)
         .padding(.top, 9)
@@ -126,19 +126,21 @@ private struct LaneBottomBar: View {
         }
     }
 
-    private func bottomButton(index: Int, title: String, icon: String) -> some View {
-        Button {
+    private func bottomButton(index: Int, title: String, asset: String) -> some View {
+        let active = selection == index
+        let tint = active ? lanePink : Color.white.opacity(0.48)
+
+        return Button {
             selection = index
         } label: {
             VStack(spacing: 3) {
-                Image(systemName: icon)
-                    .font(.system(size: 23, weight: .medium))
+                APKTemplateIcon(name: asset, size: 26, color: tint)
                     .frame(height: 27)
 
                 Text(title)
                     .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(tint)
             }
-            .foregroundStyle(selection == index ? lanePink : Color.white.opacity(0.48))
             .frame(minWidth: 58)
         }
         .buttonStyle(.plain)
