@@ -295,30 +295,42 @@ struct LaneTrackCommentDTO: Decodable, Identifiable {
         userName = try? box.decodeIfPresent(String.self, forKey: .userName)
         userAvatar = try? box.decodeIfPresent(String.self, forKey: .userAvatar)
 
-        if let string = try? box.decodeIfPresent(String.self, forKey: .userId) {
+        if let string = try? box.decode(String.self, forKey: .userId) {
             userId = string
-        } else if let number = try? box.decodeIfPresent(Int64.self, forKey: .userId) {
-            userId = number.map(String.init)
+        } else if let number = try? box.decode(Int64.self, forKey: .userId) {
+            userId = String(number)
         } else {
             userId = nil
         }
 
         text = try? box.decodeIfPresent(String.self, forKey: .text)
 
-        likesCount =
-            (try? box.decodeIfPresent(Int64.self, forKey: .likesCount)) ??
-            (try? box.decodeIfPresent(Int.self, forKey: .likesCount)).map { $0.map(Int64.init) } ?? nil
+        if let value = try? box.decode(Int64.self, forKey: .likesCount) {
+            likesCount = value
+        } else if let value = try? box.decode(Int.self, forKey: .likesCount) {
+            likesCount = Int64(value)
+        } else {
+            likesCount = nil
+        }
 
-        repliesCount =
-            (try? box.decodeIfPresent(Int64.self, forKey: .repliesCount)) ??
-            (try? box.decodeIfPresent(Int.self, forKey: .repliesCount)).map { $0.map(Int64.init) } ?? nil
+        if let value = try? box.decode(Int64.self, forKey: .repliesCount) {
+            repliesCount = value
+        } else if let value = try? box.decode(Int.self, forKey: .repliesCount) {
+            repliesCount = Int64(value)
+        } else {
+            repliesCount = nil
+        }
 
         isLiked = try? box.decodeIfPresent(Bool.self, forKey: .isLiked)
         attachment = try? box.decodeIfPresent(String.self, forKey: .attachment)
 
-        timestamp =
-            (try? box.decodeIfPresent(Int64.self, forKey: .timestamp)) ??
-            (try? box.decodeIfPresent(Int.self, forKey: .timestamp)).map { $0.map(Int64.init) } ?? nil
+        if let value = try? box.decode(Int64.self, forKey: .timestamp) {
+            timestamp = value
+        } else if let value = try? box.decode(Int.self, forKey: .timestamp) {
+            timestamp = Int64(value)
+        } else {
+            timestamp = nil
+        }
 
         parentId = try? box.decodeIfPresent(String.self, forKey: .parentId)
         userEquippedBadgeImageUrl = try? box.decodeIfPresent(String.self, forKey: .userEquippedBadgeImageUrl)
