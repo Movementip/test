@@ -1019,12 +1019,12 @@ final class LaneSession: ObservableObject {
 
         teardownPlayerObservers()
 
-        try AVAudioSession.sharedInstance().setCategory(
-            .playback,
-            mode: .default,
-            options: [.allowAirPlay, .allowBluetoothA2DP]
-        )
-        try AVAudioSession.sharedInstance().setActive(true)
+        // .allowBluetoothA2DP is implicit for AVAudioSession.Category.playback on
+        // current iOS. Passing category-incompatible options can throw OSStatus -50
+        // before AVPlayer even receives the Lane stream URL.
+        let audioSession = AVAudioSession.sharedInstance()
+        try audioSession.setCategory(.playback, mode: .default, options: [])
+        try audioSession.setActive(true)
 
         // Android Lane's Media3 data source is a plain
         // DefaultHttpDataSource.Factory. Start with an ordinary URL request.
