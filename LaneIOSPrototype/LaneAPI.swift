@@ -180,20 +180,20 @@ actor LaneAPI {
             token: token,
             query: [
                 .init(name: "q", value: query),
-                .init(name: "platform", value: "all"),
+                .init(name: "platform", value: "android"),
                 .init(name: "ver", value: "1.0")
             ]
         )
     }
 
-    func searchRaw(token: String, query: String) async throws -> APIResult {
+    func searchRaw(token: String, query: String, version: String?) async throws -> APIResult {
         try await request(
             path: "/platforms/search",
             token: token,
             query: [
                 .init(name: "q", value: query),
-                .init(name: "platform", value: "all"),
-                .init(name: "ver", value: "1.0")
+                .init(name: "platform", value: "android"),
+                .init(name: "ver", value: version)
             ]
         )
     }
