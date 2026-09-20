@@ -86,6 +86,46 @@ final class LaneSession: ObservableObject {
         }
     }
 
+    func resolveTracksByIDs(_ ids: [String], prefetch: Bool = false) async -> [TrackCandidate] {
+        let clean = ids.filter { !$0.isEmpty }
+        guard !clean.isEmpty, !isGuest else { return [] }
+
+        do {
+            await configureAPI()
+            let tracks = try await LaneAPI.shared.tracksByIds(
+                token: token,
+                ids: clean,
+                prefetch: prefetch
+            )
+            return tracks.map { TrackCandidate($0) }
+        } catch {
+            output = "Track resolve error: \(error.localizedDescription)"
+
+            // Preserve whatever is already present locally instead of showing
+            // an empty detail page if the network resolver is unavailable.
+            let local = history + searchTracks + queue + homeTracks + recentTracks
+            var seen = Set<String>()
+            return clean.compactMap { id in
+                local.first(where: { $0.trackID == id })
+            }.filter { seen.insert($0.id).inserted }
+        }
+    }
+
+    func fetchAlbumTracks(_ album: LaneAlbum) async -> [TrackCandidate] {
+        let detail = await fetchAlbumDetail(album)
+        return await resolveTracksByIDs(detail.tracks ?? [], prefetch: false)
+    }
+
+    func fetchArtistTopTracks(_ artist: LaneArtist) async -> [TrackCandidate] {
+        let detail = await fetchArtistDetail(artist)
+        return await resolveTracksByIDs(detail.topTracks ?? [], prefetch: false)
+    }
+
+    func fetchArtistRecentTracks(_ artist: LaneArtist) async -> [TrackCandidate] {
+        let detail = await fetchArtistDetail(artist)
+        return await resolveTracksByIDs(detail.recentTracks ?? [], prefetch: false)
+    }
+
     // MARK: Social
     @Published var friends: [UserInfoDTO] = []
     @Published var userSearchResults: [UserInfoDTO] = []
