@@ -101,11 +101,11 @@ struct BNITLaneRequestSigner: LaneRequestSigner {
         let clientMeta = Self.customBase64(try Self.randomBytes(count: 24))
         let traceID = Self.traceID(from: try Self.randomBytes(count: 16))
 
-        // Do not opt into Lane's encrypted "red" response transport on iOS.
-        // X-Accept-Red is a response-format capability flag, not part of the
-        // request signature itself. Keeping it absent lets URLSession receive
-        // normal JSON bodies while preserving the required signature tokens.
-        signed.setValue(nil, forHTTPHeaderField: "X-Accept-Red")
+        // BNITInterceptor in Lane Android 1.4.7 always advertises this
+        // capability. LaneAPI decrypts/decompresses the matching X-Core-Red
+        // response before JSON decoding, so keep the wire format identical to
+        // the official Android client.
+        signed.setValue("1", forHTTPHeaderField: "X-Accept-Red")
         signed.setValue(coreToken, forHTTPHeaderField: "X-Core-Token")
         signed.setValue(clientMeta, forHTTPHeaderField: "X-Client-Meta")
         signed.setValue(traceID, forHTTPHeaderField: "X-Request-Trace-Id")

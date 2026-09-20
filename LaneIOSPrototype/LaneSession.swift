@@ -200,7 +200,6 @@ final class LaneSession: ObservableObject {
     private var periodicTimeObserver: Any?
     private var playerRetriedWithCompatibilityHeaders = false
     private var playerRetriedWithLocalDownload = false
-    private var playerRetriedWithDownloadEndpoint = false
     private var playbackRequestID = UUID()
     private var streamResolveTask: Task<Void, Never>?
     private var playbackWatchdogTask: Task<Void, Never>?
@@ -1155,31 +1154,60 @@ final class LaneSession: ObservableObject {
     private func resolvedStream(
         trackID: String,
         refID: String?,
-        quality: String,
-        retryWithoutRefOnPremium: Bool = false
+        quality: String
     ) async throws -> TrackStreamingResult {
+        // ResolvingMediaSource in the Android APK resolves normal playback
+        // only through /track/stream with the MediaItem context as refId.
+        // It retries that same operation; /track/download belongs exclusively
+        // to the explicit offline-download flow and must not replace the real
+        // playback error with an unrelated 401.
+        var lastError: Error = LaneAPIError.emptyResponse
+        for attempt in 0..<3 {
+            do {
+                return try await LaneAPI.shared.stream(
+                    token: token,
+                    trackId: trackID,
+                    refId: refID,
+                    quality: quality
+                )
+            } catch {
+                lastError = error
+                guard attempt < 2 else { break }
+                try Task.checkCancellation()
+                try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_000_000_000)
+            }
+        }
+        throw lastError
+    }
+
+    private func resolvedPlaybackStream(
+        trackID: String,
+        refID: String?,
+        preferredQuality: String
+    ) async throws -> (result: TrackStreamingResult, quality: String) {
         do {
-            return try await LaneAPI.shared.stream(
-                token: token,
-                trackId: trackID,
-                refId: refID,
-                quality: quality
+            let result = try await resolvedStream(
+                trackID: trackID,
+                refID: refID,
+                quality: preferredQuality
             )
+            return (result, preferredQuality)
         } catch {
-            // Preserve the entitlement error so requestStream can first move
-            // HIGH/ULTRA down to BASIC. Retrying the same paid quality without
-            // refId could replace it with a different backend error and prevent
-            // the legitimate BASIC fallback from ever running.
-            if isPremiumRequired(error), !retryWithoutRefOnPremium {
+            // The Android client sends the selected tier. If an obsolete
+            // HIGH/ULTRA preference now maps to a retired paid tier, BASIC is
+            // the only legitimate compatibility retry. Keep the original
+            // /track/stream endpoint and refId intact.
+            guard isPremiumRequired(error),
+                  preferredQuality != AudioQualityChoice.basic.rawValue else {
                 throw error
             }
-            guard refID != nil else { throw error }
-            return try await LaneAPI.shared.stream(
-                token: token,
-                trackId: trackID,
-                refId: nil,
-                quality: quality
+
+            let result = try await resolvedStream(
+                trackID: trackID,
+                refID: refID,
+                quality: AudioQualityChoice.basic.rawValue
             )
+            return (result, AudioQualityChoice.basic.rawValue)
         }
     }
 
@@ -1257,7 +1285,6 @@ final class LaneSession: ObservableObject {
         isBuffering = true
         playerRetriedWithCompatibilityHeaders = false
         playerRetriedWithLocalDownload = false
-        playerRetriedWithDownloadEndpoint = false
 
         playbackWatchdogTask = Task { [weak self] in
             do {
@@ -1294,60 +1321,13 @@ final class LaneSession: ObservableObject {
                 guard self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
 
-                var requestedQuality = self.streamQuality
-                var result: TrackStreamingResult
-                do {
-                    do {
-                        result = try await self.resolvedStream(
-                            trackID: trackID,
-                            refID: track.refID,
-                            quality: requestedQuality,
-                            retryWithoutRefOnPremium: requestedQuality == AudioQualityChoice.basic.rawValue
-                        )
-                    } catch {
-                        try Task.checkCancellation()
-                        guard self.playbackRequestID == requestID,
-                              self.currentTrack?.id == track.id else { return }
-
-                        if self.isPremiumRequired(error), requestedQuality != AudioQualityChoice.basic.rawValue {
-                            requestedQuality = AudioQualityChoice.basic.rawValue
-                            result = try await self.resolvedStream(
-                                trackID: trackID,
-                                refID: track.refID,
-                                quality: requestedQuality,
-                                retryWithoutRefOnPremium: true
-                            )
-                        } else {
-                            throw error
-                        }
-                    }
-                } catch {
-                    try Task.checkCancellation()
-                    guard self.playbackRequestID == requestID,
-                          self.currentTrack?.id == track.id else { return }
-
-                    // streamQuality is nullable in the Android Retrofit
-                    // contract. Older working clients let the server choose its
-                    // default; try that exact supported shape before falling
-                    // back to Android's official download resolver in BASIC.
-                    do {
-                        result = try await LaneAPI.shared.stream(
-                            token: self.token,
-                            trackId: trackID,
-                            refId: nil,
-                            quality: nil
-                        )
-                        requestedQuality = AudioQualityChoice.basic.rawValue
-                    } catch {
-                        try Task.checkCancellation()
-                        result = try await LaneAPI.shared.downloadURL(
-                            token: self.token,
-                            trackId: trackID,
-                            quality: AudioQualityChoice.basic.rawValue
-                        )
-                        requestedQuality = AudioQualityChoice.basic.rawValue
-                    }
-                }
+                let resolved = try await self.resolvedPlaybackStream(
+                    trackID: trackID,
+                    refID: track.refID,
+                    preferredQuality: self.streamQuality
+                )
+                var requestedQuality = resolved.quality
+                var result = resolved.result
 
                 try Task.checkCancellation()
                 guard self.playbackRequestID == requestID,
@@ -1530,9 +1510,11 @@ final class LaneSession: ObservableObject {
                     }
 
                     if useCompatibilityHeaders,
-                       !self.playerRetriedWithDownloadEndpoint {
-                        self.playerRetriedWithDownloadEndpoint = true
-                        self.resolveDownloadEndpointAndPlay(
+                       !self.playerRetriedWithLocalDownload,
+                       !self.streamURL.isEmpty {
+                        self.playerRetriedWithLocalDownload = true
+                        self.downloadCompatibilityAudio(
+                            self.streamURL,
                             requestID: requestID,
                             track: track
                         )
@@ -1622,12 +1604,14 @@ final class LaneSession: ObservableObject {
                     requestID: requestID,
                     track: track
                 )
-            } else if useCompatibilityHeaders && !self.playerRetriedWithDownloadEndpoint {
-                // If the direct CDN route stalls without VPN, ask Lane for the
-                // download-compatible endpoint before spending 30s downloading
-                // the same stalled stream URL.
-                self.playerRetriedWithDownloadEndpoint = true
-                self.resolveDownloadEndpointAndPlay(
+            } else if useCompatibilityHeaders && !self.playerRetriedWithLocalDownload {
+                // Keep using the URL returned by /track/stream. Downloading
+                // that same response to a local file helps AVFoundation with
+                // servers whose content metadata Media3 accepts more readily,
+                // without switching normal playback to /track/download.
+                self.playerRetriedWithLocalDownload = true
+                self.downloadCompatibilityAudio(
+                    self.streamURL,
                     requestID: requestID,
                     track: track
                 )
@@ -1730,15 +1714,6 @@ final class LaneSession: ObservableObject {
                             guard self.playbackRequestID == requestID,
                                   self.currentTrack?.id == track.id else { return }
 
-                            if !self.playerRetriedWithDownloadEndpoint {
-                                self.playerRetriedWithDownloadEndpoint = true
-                                self.resolveDownloadEndpointAndPlay(
-                                    requestID: requestID,
-                                    track: track
-                                )
-                                return
-                            }
-
                             self.isBuffering = false
                             self.isPlaying = false
                             self.playerError = "The track is temporarily unavailable."
@@ -1784,74 +1759,6 @@ final class LaneSession: ObservableObject {
         }
     }
 
-
-    private func resolveDownloadEndpointAndPlay(
-        requestID: UUID,
-        track: TrackCandidate
-    ) {
-        guard playbackRequestID == requestID,
-              currentTrack?.id == track.id,
-              let trackID = track.trackID,
-              !trackID.isEmpty else {
-            isBuffering = false
-            isPlaying = false
-            playerError = "Lane track ID is unavailable for compatibility playback."
-            output = "Playback error: \(playerError)"
-            return
-        }
-
-        isBuffering = true
-        output = "Trying Lane download-compatible audio…"
-
-        Task {
-            do {
-                await configureAPI()
-
-                let resolved = try await LaneAPI.shared.downloadURL(
-                    token: token,
-                    trackId: trackID,
-                    quality: streamQuality
-                )
-
-                guard self.playbackRequestID == requestID,
-                      self.currentTrack?.id == track.id else { return }
-
-                let raw = resolved.url.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !raw.isEmpty else {
-                    throw NSError(
-                        domain: "LanePlayer",
-                        code: 4,
-                        userInfo: [NSLocalizedDescriptionKey: "Lane download endpoint returned an empty URL"]
-                    )
-                }
-
-                // DownloadWorker in Android treats .m3u8 specially. For online
-                // playback AVPlayer can consume HLS directly, so try it as-is.
-                if raw.lowercased().contains(".m3u8") {
-                    try play(
-                        urlString: raw,
-                        useCompatibilityHeaders: true,
-                        requestID: requestID,
-                        track: track
-                    )
-                    return
-                }
-
-                downloadCompatibilityAudio(
-                    raw,
-                    requestID: requestID,
-                    track: track
-                )
-            } catch {
-                guard self.playbackRequestID == requestID,
-                      self.currentTrack?.id == track.id else { return }
-                isBuffering = false
-                isPlaying = false
-                playerError = userFacingPlaybackError(error)
-                output = "Playback error: \(error.localizedDescription)"
-            }
-        }
-    }
 
     private func downloadCompatibilityAudio(
         _ urlString: String,
