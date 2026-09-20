@@ -74,7 +74,7 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.bottom, 67)
+            .padding(.bottom, 60)
 
             VStack(spacing: 0) {
                 if session.currentTrack != nil {
@@ -103,47 +103,54 @@ struct ContentView: View {
 private struct LaneBottomBar: View {
     @Binding var selection: Int
 
+    private let selectedColor = Color.white
+    private let unselectedColor = Color(red: 102.0 / 255.0, green: 102.0 / 255.0, blue: 102.0 / 255.0)
+
     var body: some View {
-        HStack {
-            bottomButton(index: 0, title: "Home", asset: selection == 0 ? "bottom_main" : "bottom_main_unselected")
-            Spacer()
-            bottomButton(index: 1, title: "Search", asset: "bottom_search")
-            Spacer()
-            bottomButton(index: 2, title: "Library", asset: "bottom_library")
+        HStack(spacing: 64) {
+            bottomButton(
+                index: 0,
+                asset: selection == 0 ? "bottom_main" : "bottom_main_unselected",
+                size: 23
+            )
+            bottomButton(index: 1, asset: "bottom_search", size: 23)
+            bottomButton(index: 2, asset: "bottom_library", size: 28)
         }
-        .padding(.horizontal, 46)
-        .padding(.top, 9)
-        .padding(.bottom, 5)
-        .frame(height: 67)
+        .frame(maxWidth: .infinity)
+        .frame(height: 48)
+        .padding(.bottom, 12)
         .background(
-            Color(red: 27.0 / 255.0, green: 27.0 / 255.0, blue: 27.0 / 255.0)
+            Color(red: 21.0 / 255.0, green: 21.0 / 255.0, blue: 21.0 / 255.0)
+                .clipShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
                 .ignoresSafeArea(edges: .bottom)
         )
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color.white.opacity(0.055))
-                .frame(height: 1)
+        .overlay {
+            RoundedRectangle(cornerRadius: 36, style: .continuous)
+                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+                .padding(.bottom, 12)
         }
+        .shadow(color: .black.opacity(0.30), radius: 8, y: 2)
     }
 
-    private func bottomButton(index: Int, title: String, asset: String) -> some View {
+    private func bottomButton(index: Int, asset: String, size: CGFloat) -> some View {
         let active = selection == index
-        let tint = active ? lanePink : Color.white.opacity(0.48)
 
         return Button {
-            selection = index
-        } label: {
-            VStack(spacing: 3) {
-                APKTemplateIcon(name: asset, size: 26, color: tint)
-                    .frame(height: 27)
-
-                Text(title)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(tint)
+            withAnimation(.spring(response: 0.20, dampingFraction: 0.50)) {
+                selection = index
             }
-            .frame(minWidth: 58)
+        } label: {
+            APKTemplateIcon(
+                name: asset,
+                size: size,
+                color: active ? selectedColor : unselectedColor
+            )
+            .scaleEffect(active ? 1.10 : 1.0)
+            .frame(width: 48, height: 48)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(index == 0 ? "Home" : index == 1 ? "Search" : "Library")
     }
 }
 
