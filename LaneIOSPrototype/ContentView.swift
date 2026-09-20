@@ -451,18 +451,38 @@ private struct LibraryScreen: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     LibraryHeader(showCreatePlaylist: $showCreatePlaylist)
+                        .padding(.bottom, 10)
 
                     if session.isGuest {
                         TelegramLoginCard()
+                            .padding(.top, 8)
                     } else {
-                        NavigationLink {
-                            FavoriteTracksScreen(showPlayer: $showPlayer)
-                        } label: {
-                            APKFavoritePlaylistCard(trackCount: session.favorites.count)
+                        // Android Lane 1.4.7: top bar -> filter chips -> import card ->
+                        // divider -> filtered library rows.
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(LibraryFilter.allCases) { item in
+                                    Button {
+                                        filter = item
+                                    } label: {
+                                        Text(item.rawValue)
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .padding(.horizontal, 14)
+                                            .frame(height: 36)
+                                            .background(
+                                                filter == item ? lanePink : Color.white.opacity(0.08),
+                                                in: Capsule()
+                                            )
+                                            .foregroundStyle(filter == item ? .black : .white)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, 16)
                         }
-                        .buttonStyle(.plain)
+                        .padding(.bottom, 14)
 
                         NavigationLink {
                             TelegramImportScreen()
@@ -472,28 +492,16 @@ private struct LibraryScreen: View {
                         }
                         .buttonStyle(.plain)
 
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 8) {
-                                ForEach(LibraryFilter.allCases) { item in
-                                    Button {
-                                        filter = item
-                                    } label: {
-                                        Text(item.rawValue)
-                                            .font(.subheadline.weight(.semibold))
-                                            .padding(.horizontal, 14)
-                                            .padding(.vertical, 8)
-                                            .background(filter == item ? lanePink : Color.white.opacity(0.08), in: Capsule())
-                                            .foregroundStyle(filter == item ? .black : .white)
-                                    }
-                                }
-                            }
-                            .padding(.horizontal, 16)
-                        }
+                        Color.white.opacity(0.14)
+                            .frame(height: 1)
+                            .padding(.horizontal, 10)
+                            .padding(.top, 20)
+                            .padding(.bottom, 20)
 
                         libraryContents
                     }
                 }
-                .padding(.bottom, session.currentTrack == nil ? 30 : 92)
+                .padding(.bottom, session.currentTrack == nil ? 28 : 92)
             }
             .background(laneBackground)
             .refreshable {
@@ -511,25 +519,30 @@ private struct LibraryScreen: View {
     @ViewBuilder
     private var libraryContents: some View {
         if filter == .all || filter == .playlists {
-            if !session.serverPlaylists.isEmpty {
-                LibrarySectionTitle(title: "Playlists", count: session.serverPlaylists.count)
-                VStack(spacing: 2) {
-                    ForEach(Array(session.serverPlaylists.enumerated()), id: \.offset) { _, playlist in
-                        NavigationLink {
-                            PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
-                        } label: {
-                            PlaylistRow(playlist: playlist)
-                        }
-                        .buttonStyle(.plain)
-                    }
+            VStack(spacing: 2) {
+                NavigationLink {
+                    FavoriteTracksScreen(showPlayer: $showPlayer)
+                } label: {
+                    APKFavoritePlaylistCard(trackCount: session.favorites.count)
                 }
-                .padding(.horizontal, 8)
+                .buttonStyle(.plain)
+
+                ForEach(Array(session.serverPlaylists.enumerated()), id: \.offset) { _, playlist in
+                    NavigationLink {
+                        PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
+                    } label: {
+                        PlaylistRow(playlist: playlist)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
 
         if filter == .all || filter == .albums {
             if !session.serverAlbums.isEmpty {
                 LibrarySectionTitle(title: "Albums", count: session.serverAlbums.count)
+                    .padding(.top, 10)
+
                 VStack(spacing: 2) {
                     ForEach(Array(session.serverAlbums.enumerated()), id: \.offset) { _, album in
                         AlbumRow(album: album)
@@ -542,6 +555,8 @@ private struct LibraryScreen: View {
         if filter == .all || filter == .artists {
             if !session.serverArtists.isEmpty {
                 LibrarySectionTitle(title: "Artists", count: session.serverArtists.count)
+                    .padding(.top, 10)
+
                 VStack(spacing: 2) {
                     ForEach(Array(session.serverArtists.enumerated()), id: \.offset) { _, artist in
                         ArtistRow(artist: artist)
@@ -553,6 +568,8 @@ private struct LibraryScreen: View {
 
         if filter == .all && !session.recentTracks.isEmpty {
             LibrarySectionTitle(title: "Recently played", count: session.recentTracks.count)
+                .padding(.top, 10)
+
             VStack(spacing: 2) {
                 ForEach(session.recentTracks.prefix(12)) { track in
                     TrackRow(track: track, showPlayer: $showPlayer)
@@ -564,7 +581,8 @@ private struct LibraryScreen: View {
         if session.serverPlaylists.isEmpty &&
             session.serverAlbums.isEmpty &&
             session.serverArtists.isEmpty &&
-            session.recentTracks.isEmpty {
+            session.recentTracks.isEmpty &&
+            session.favorites.isEmpty {
             EmptyLaneView(
                 icon: "square.stack",
                 title: "Your Library",
