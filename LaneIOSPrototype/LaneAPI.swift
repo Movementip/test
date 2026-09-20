@@ -77,12 +77,26 @@ actor LaneAPI {
         signingConfiguration = value
     }
 
-    private func officialRegionalBases() -> [URL] {
+    private func officialRegionalBases(preferCurrent: Bool = false) -> [URL] {
         let primary = URL(string: "https://laneapi.com")!
         let russian = URL(string: "https://ru.laneapi.com")!
         let officialHosts = Set([primary.host, russian.host].compactMap { $0 })
         let timezonePreferred = isRussianLaneTimezone(TimeZone.current.identifier) ? russian : primary
-        var candidates: [URL] = [timezonePreferred]
+        var candidates: [URL] = []
+
+        func appendOnce(_ candidate: URL) {
+            guard !candidates.contains(where: { $0.host == candidate.host }) else { return }
+            candidates.append(candidate)
+        }
+
+        // prepareRegionalHost probes the timezone region first. Once that probe
+        // succeeds, ordinary reads should keep using the verified host first;
+        // otherwise every request can pay a full timeout on a stale edge.
+        if preferCurrent {
+            appendOnce(base)
+        }
+
+        appendOnce(timezonePreferred)
 
         // Android selects ru.laneapi.com first in Russian time zones. A host
         // remembered while a VPN was active must not outrank that regional
@@ -90,14 +104,12 @@ actor LaneAPI {
         if let saved = UserDefaults.standard.string(forKey: lastWorkingRegionalBaseKey),
            let savedURL = URL(string: saved),
            let host = savedURL.host,
-           officialHosts.contains(host),
-           !candidates.contains(where: { $0.host == savedURL.host }) {
-            candidates.append(savedURL)
+           officialHosts.contains(host) {
+            appendOnce(savedURL)
         }
 
-        for candidate in [base, primary, russian] where
-            !candidates.contains(where: { $0.host == candidate.host }) {
-            candidates.append(candidate)
+        for candidate in [base, primary, russian] {
+            appendOnce(candidate)
         }
 
         return candidates
@@ -366,7 +378,7 @@ actor LaneAPI {
         if signingConfiguration.mode == .official, canFailOverRegionalHost {
             // Re-evaluate region ordering for every safe read so switching VPN
             // state does not leave the app pinned to a stale global endpoint.
-            candidates = officialRegionalBases()
+            candidates = officialRegionalBases(preferCurrent: true)
         } else {
             candidates = [base]
         }
@@ -384,7 +396,7 @@ actor LaneAPI {
             "/track/download"
         ]
         let requestTimeout: TimeInterval = canFailOverRegionalHost
-            ? (normalizedPath == "/user/import/preview" ? 45 : (longReadPaths.contains(normalizedPath) ? 20 : 12))
+            ? (normalizedPath == "/user/import/preview" ? 45 : (normalizedPath == "/track/stream" ? 10 : (longReadPaths.contains(normalizedPath) ? 20 : 12)))
             : 30
 
         for round in 0..<retryRounds {

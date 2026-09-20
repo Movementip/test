@@ -2622,13 +2622,13 @@ private struct ImportTracksScreen: View {
             }
         }
         .toolbar(.hidden, for: .navigationBar)
-        .alert("Lane Premium", isPresented: $showImportLimitAlert) {
+        .alert("Import limit", isPresented: $showImportLimitAlert) {
             Button("Import first 15 tracks") {
                 performImport(Array(importTrackIDs.prefix(15)))
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("As in Lane for Android, a standard account can import up to 15 tracks at a time. Premium is required to import all \(importTrackIDs.count) tracks.")
+            Text("Lane currently accepts up to 15 tracks in one import for this account. You can import the first 15 tracks now.")
         }
     }
 
@@ -3109,7 +3109,7 @@ private struct ImportTracksScreen: View {
             return "Lane could not resolve the tracks in this playlist. Please try again."
         }
         if detail.localizedCaseInsensitiveContains("PREMIUM_REQUIRED") {
-            return "Lane Premium is required to import the entire playlist. Try the first 15 tracks."
+            return "Lane refused the full playlist import. Try the first 15 tracks."
         }
         return "Import failed. Check the source link and try again."
     }

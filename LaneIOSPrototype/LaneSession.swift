@@ -1080,7 +1080,8 @@ final class LaneSession: ObservableObject {
     private func resolvedStream(
         trackID: String,
         refID: String?,
-        quality: String
+        quality: String,
+        retryWithoutRefOnPremium: Bool = false
     ) async throws -> TrackStreamingResult {
         do {
             return try await LaneAPI.shared.stream(
@@ -1094,7 +1095,7 @@ final class LaneSession: ObservableObject {
             // HIGH/ULTRA down to BASIC. Retrying the same paid quality without
             // refId could replace it with a different backend error and prevent
             // the legitimate BASIC fallback from ever running.
-            if isPremiumRequired(error) {
+            if isPremiumRequired(error), !retryWithoutRefOnPremium {
                 throw error
             }
             guard refID != nil else { throw error }
@@ -1114,7 +1115,7 @@ final class LaneSession: ObservableObject {
     private func userFacingPlaybackError(_ error: Error) -> String {
         let detail = error.localizedDescription
         if isPremiumRequired(error) {
-            return "Lane requires Premium for this stream."
+            return "The audio stream is unavailable. Try again or choose another track."
         }
         if detail.localizedCaseInsensitiveContains("timed out") ||
             detail.localizedCaseInsensitiveContains("HTTP 5") ||
@@ -1185,7 +1186,8 @@ final class LaneSession: ObservableObject {
                     result = try await self.resolvedStream(
                         trackID: trackID,
                         refID: track.refID,
-                        quality: requestedQuality
+                        quality: requestedQuality,
+                        retryWithoutRefOnPremium: requestedQuality == AudioQualityChoice.basic.rawValue
                     )
                 } catch {
                     try Task.checkCancellation()
@@ -1197,7 +1199,8 @@ final class LaneSession: ObservableObject {
                         result = try await self.resolvedStream(
                             trackID: trackID,
                             refID: track.refID,
-                            quality: requestedQuality
+                            quality: requestedQuality,
+                            retryWithoutRefOnPremium: true
                         )
                     } else {
                         throw error
