@@ -1038,35 +1038,34 @@ private struct PlaylistRow: View {
         HStack(spacing: 16) {
             ArtworkView(url: playlist.playlistImageUrl, size: 64, radius: 5)
 
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(playlist.playlistName ?? "Playlist")
                     .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
 
-                Text(
-                    playlist.playlistDescription?.isEmpty == false
-                        ? playlist.playlistDescription!
-                        : "\(playlist.tracksCount ?? playlist.playlistTracks?.count ?? 0) tracks"
-                )
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+                let count = playlist.tracksCount ?? playlist.playlistTracks?.count ?? 0
+                Text(count == 1 ? "1 track" : "\(count) tracks")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.58))
+                    .lineLimit(1)
             }
 
-            Spacer(minLength: 6)
-
-            Image(systemName: "chevron.right")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.secondary.opacity(0.65))
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Color(red: 29.0 / 255.0, green: 29.0 / 255.0, blue: 29.0 / 255.0),
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.07), lineWidth: 1)
-        }
     }
 }
 
