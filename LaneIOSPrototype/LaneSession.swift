@@ -73,12 +73,18 @@ final class LaneSession: ObservableObject {
         UserDefaults.standard.set(streamQuality, forKey: "lane.quality")
     }
 
-    func acceptLaneToken(_ value: String) {
+    func acceptLaneToken(_ value: String, serverBaseURL: String? = nil) {
         let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
+
+        if let serverBaseURL, !serverBaseURL.isEmpty {
+            baseURL = serverBaseURL
+        }
+
         token = clean
         persist()
         output = "Telegram authorization completed."
+
         Task {
             await refreshAfterLogin()
         }
