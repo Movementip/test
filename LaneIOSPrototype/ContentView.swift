@@ -1,148 +1,2074 @@
 import SwiftUI
 
-private let accent = Color(red: 0.55, green: 0.31, blue: 0.98)
+private let lanePink = Color(red: 1.0, green: 130.0 / 255.0, blue: 132.0 / 255.0)
+private let laneBackground = Color(red: 14.0 / 255.0, green: 14.0 / 255.0, blue: 14.0 / 255.0)
+private let laneCard = Color.white.opacity(0.07)
 
 struct ContentView: View {
-    @EnvironmentObject var session: LaneSession
+    @EnvironmentObject private var session: LaneSession
+    @State private var selectedTab = 0
+    @State private var showPlayer = false
 
     var body: some View {
-        TabView {
-            HomeView()
-                .tabItem { Label("Home", systemImage: "house.fill") }
+        ZStack(alignment: .bottom) {
+            TabView(selection: $selectedTab) {
+                HomeScreen(showPlayer: $showPlayer)
+                    .tag(0)
+                    .tabItem { Label("Home", systemImage: "house.fill") }
 
-            SearchView()
-                .tabItem { Label("Search", systemImage: "magnifyingglass") }
+                SearchScreen(showPlayer: $showPlayer)
+                    .tag(1)
+                    .tabItem { Label("Search", systemImage: "magnifyingglass") }
 
-            ProfileView()
-                .tabItem { Label("Profile", systemImage: "person.crop.circle") }
+                LibraryScreen(showPlayer: $showPlayer)
+                    .tag(2)
+                    .tabItem { Label("Library", systemImage: "square.stack.fill") }
+            }
+            .tint(lanePink)
+
+            if session.currentTrack != nil {
+                MiniPlayerView(showPlayer: $showPlayer)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 50)
+            }
         }
-        .tint(accent)
+        .background(laneBackground.ignoresSafeArea())
+        .preferredColorScheme(.dark)
+        .sheet(isPresented: $showPlayer) {
+            FullPlayerView()
+                .environmentObject(session)
+        }
+        .task {
+            if !session.isGuest && session.homeTracks.isEmpty {
+                await session.refreshAfterLogin()
+            }
+        }
     }
 }
 
-struct HomeView: View {
-    @EnvironmentObject var session: LaneSession
+// MARK: - Home
+
+private struct HomeScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @Binding var showPlayer: Bool
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 18) {
-                Image(systemName: "waveform.circle.fill")
-                    .font(.system(size: 72))
-                    .foregroundStyle(accent)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 24) {
+                    HomeHeader()
 
-                Text("Lane")
-                    .font(.largeTitle.bold())
-
-                Text(session.isGuest ? "Sign in with Telegram to use the Lane backend." : "Ready to play")
-                    .foregroundStyle(.secondary)
-
-                if let track = session.currentTrack {
-                    VStack {
-                        Text(track.title).font(.headline)
-                        Text(track.subtitle).foregroundStyle(.secondary)
-                        Button(session.isPlaying ? "Pause" : "Play") {
-                            session.togglePlayback()
+                    if session.isGuest {
+                        TelegramLoginCard()
+                    } else {
+                        if session.busy && session.homeTracks.isEmpty {
+                            HStack {
+                                Spacer()
+                                ProgressView()
+                                    .tint(lanePink)
+                                Spacer()
+                            }
+                            .padding(.vertical, 24)
                         }
-                        .buttonStyle(.borderedProminent)
+
+                        if !session.homeTracks.isEmpty {
+                            TrackSection(
+                                title: "For you",
+                                subtitle: "Picked for your listening",
+                                tracks: Array(session.homeTracks.prefix(12)),
+                                showPlayer: $showPlayer
+                            )
+                        }
+
+                        if !session.recentTracks.isEmpty {
+                            TrackSection(
+                                title: "Recently played",
+                                subtitle: nil,
+                                tracks: Array(session.recentTracks.prefix(10)),
+                                showPlayer: $showPlayer
+                            )
+                        }
+
+                        if !session.serverPlaylists.isEmpty {
+                            CardShelf(
+                                title: "Your playlists",
+                                cards: session.serverPlaylists.map {
+                                    LaneCardItem(
+                                        id: $0.playlistId ?? UUID().uuidString,
+                                        title: $0.playlistName ?? "Playlist",
+                                        subtitle: $0.playlistDescription ?? "\($0.tracksCount ?? 0) tracks",
+                                        imageURL: $0.playlistImageUrl,
+                                        kind: "playlist",
+                                        backendID: $0.playlistId,
+                                        platform: $0.platform
+                                    )
+                                }
+                            )
+                        }
+
+                        NavigationLink {
+                            WaveScreen()
+                        } label: {
+                            FeatureBanner(
+                                icon: "waveform.path.ecg",
+                                title: "Wave",
+                                subtitle: "Keep listening from a track you love"
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        NavigationLink {
+                            TelegramImportScreen()
+                        } label: {
+                            FeatureBanner(
+                                icon: "paperplane.fill",
+                                title: "Import from Telegram",
+                                subtitle: "Bring your music into Lane"
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
+                }
+                .padding(.bottom, session.currentTrack == nil ? 24 : 92)
+            }
+            .background(laneBackground)
+            .refreshable {
+                if !session.isGuest {
+                    await session.refreshAfterLogin()
+                }
+            }
+            .toolbar(.hidden, for: .navigationBar)
+        }
+    }
+}
+
+private struct HomeHeader: View {
+    @EnvironmentObject private var session: LaneSession
+
+    var body: some View {
+        HStack(spacing: 14) {
+            NavigationLink {
+                ProfileScreen()
+            } label: {
+                AvatarView(url: session.account?.avatarUrl, size: 42)
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Lane")
+                    .font(.system(size: 26, weight: .black, design: .rounded))
+                if let name = session.account?.displayedName, !name.isEmpty {
+                    Text(name)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+
+            if !session.isGuest {
+                NavigationLink {
+                    NotificationsScreen()
+                } label: {
+                    Image(systemName: "bell.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 40, height: 40)
+                        .background(laneCard, in: Circle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            NavigationLink {
+                ProfileScreen()
+            } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 40, height: 40)
+                    .background(laneCard, in: Circle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 10)
+    }
+}
+
+private struct TelegramLoginCard: View {
+    var body: some View {
+        NavigationLink {
+            TelegramLoginScreen()
+        } label: {
+            HStack(spacing: 16) {
+                ZStack {
+                    Circle()
+                        .fill(Color.blue.opacity(0.22))
+                        .frame(width: 52, height: 52)
+                    Image(systemName: "paperplane.fill")
+                        .font(.system(size: 24))
+                        .foregroundStyle(.blue)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Sign in to Lane")
+                        .font(.headline)
+                    Text("Continue with Telegram to restore your library, friends and playlists.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
                 }
 
                 Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.secondary)
             }
-            .padding()
-            .navigationTitle("Home")
+            .padding(16)
+            .background(laneCard, in: RoundedRectangle(cornerRadius: 22))
+            .padding(.horizontal, 16)
         }
+        .buttonStyle(.plain)
     }
 }
 
-struct SearchView: View {
-    @EnvironmentObject var session: LaneSession
+// MARK: - Search
+
+private struct SearchScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @Binding var showPlayer: Bool
+
     @State private var query = ""
+    @State private var selectedFilter: SearchFilter = .all
 
     var body: some View {
         NavigationStack {
-            VStack {
-                HStack {
-                    TextField("Search music", text: $query)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { session.search(query) }
+            VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Search")
+                        .font(.system(size: 31, weight: .bold))
+                        .padding(.horizontal, 18)
 
-                    Button("Search") {
-                        session.search(query)
-                    }
-                }
-                .padding()
+                    HStack(spacing: 10) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
 
-                if session.busy {
-                    ProgressView()
-                }
+                        TextField("Tracks, artists, albums…", text: $query)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .submitLabel(.search)
+                            .onSubmit { session.search(query) }
 
-                List(session.tracks) { track in
-                    Button {
-                        session.requestStream(for: track)
-                    } label: {
-                        HStack {
-                            AsyncImage(url: URL(string: track.coverURL ?? "")) { image in
-                                image
-                                    .resizable()
-                                    .scaledToFill()
-                            } placeholder: {
-                                Color.secondary.opacity(0.15)
-                            }
-                            .frame(width: 52, height: 52)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-
-                            VStack(alignment: .leading) {
-                                Text(track.title).foregroundStyle(.primary)
-                                Text(track.subtitle)
-                                    .font(.caption)
+                        if !query.isEmpty {
+                            Button {
+                                query = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
                                     .foregroundStyle(.secondary)
                             }
                         }
                     }
+                    .padding(.horizontal, 14)
+                    .frame(height: 48)
+                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 15))
+                    .padding(.horizontal, 16)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(SearchFilter.allCases) { filter in
+                                Button {
+                                    selectedFilter = filter
+                                } label: {
+                                    Text(filter.rawValue)
+                                        .font(.subheadline.weight(.semibold))
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 8)
+                                        .background(
+                                            selectedFilter == filter ? lanePink : Color.white.opacity(0.08),
+                                            in: Capsule()
+                                        )
+                                        .foregroundStyle(selectedFilter == filter ? Color.black : Color.white)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                }
+                .padding(.vertical, 10)
+
+                if session.busy && session.searchTracks.isEmpty {
+                    Spacer()
+                    ProgressView()
+                        .tint(lanePink)
+                    Spacer()
+                } else if hasSearchResults {
+                    searchResults
+                } else {
+                    Spacer()
+                    EmptyLaneView(
+                        icon: "magnifyingglass",
+                        title: query.isEmpty ? "What are we looking for today?" : "Nothing found",
+                        subtitle: query.isEmpty ? "A track, artist, or album?" : "Try a different search."
+                    )
+                    Spacer()
                 }
             }
-            .navigationTitle("Search")
+            .background(laneBackground)
+            .toolbar(.hidden, for: .navigationBar)
+        }
+    }
+
+    private var hasSearchResults: Bool {
+        !session.searchTracks.isEmpty ||
+        !session.searchArtists.isEmpty ||
+        !session.searchAlbums.isEmpty ||
+        !session.searchPlaylists.isEmpty
+    }
+
+    @ViewBuilder
+    private var searchResults: some View {
+        List {
+            if selectedFilter == .all || selectedFilter == .tracks {
+                if !session.searchTracks.isEmpty {
+                    Section("Tracks") {
+                        ForEach(session.searchTracks) { track in
+                            TrackRow(track: track, showPlayer: $showPlayer)
+                        }
+                    }
+                }
+            }
+
+            if selectedFilter == .all || selectedFilter == .artists {
+                if !session.searchArtists.isEmpty {
+                    Section("Artists") {
+                        ForEach(Array(session.searchArtists.enumerated()), id: \.offset) { _, artist in
+                            ArtistRow(artist: artist)
+                        }
+                    }
+                }
+            }
+
+            if selectedFilter == .all || selectedFilter == .albums {
+                if !session.searchAlbums.isEmpty {
+                    Section("Albums") {
+                        ForEach(Array(session.searchAlbums.enumerated()), id: \.offset) { _, album in
+                            AlbumRow(album: album)
+                        }
+                    }
+                }
+            }
+
+            if selectedFilter == .all || selectedFilter == .playlists {
+                if !session.searchPlaylists.isEmpty {
+                    Section("Playlists") {
+                        ForEach(Array(session.searchPlaylists.enumerated()), id: \.offset) { _, playlist in
+                            NavigationLink {
+                                PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
+                            } label: {
+                                PlaylistRow(playlist: playlist)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+    }
+}
+
+// MARK: - Library
+
+private enum LibraryFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case playlists = "Playlists"
+    case albums = "Albums"
+    case artists = "Artists"
+
+    var id: String { rawValue }
+}
+
+private struct LibraryScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @Binding var showPlayer: Bool
+
+    @State private var filter: LibraryFilter = .all
+    @State private var showCreatePlaylist = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    LibraryHeader(showCreatePlaylist: $showCreatePlaylist)
+
+                    if session.isGuest {
+                        TelegramLoginCard()
+                    } else {
+                        HStack(spacing: 12) {
+                            NavigationLink {
+                                FavoriteTracksScreen(showPlayer: $showPlayer)
+                            } label: {
+                                LibraryFeatureCard(
+                                    icon: "heart.fill",
+                                    title: "Liked tracks",
+                                    subtitle: "\(session.favorites.count) saved",
+                                    gradient: [lanePink, .red]
+                                )
+                            }
+
+                            NavigationLink {
+                                DownloadsScreen(showPlayer: $showPlayer)
+                            } label: {
+                                LibraryFeatureCard(
+                                    icon: "arrow.down.circle.fill",
+                                    title: "Downloads",
+                                    subtitle: "\(session.downloadedTrackIDs.count) offline",
+                                    gradient: [.blue, .indigo]
+                                )
+                            }
+                        }
+                        .padding(.horizontal, 16)
+
+                        NavigationLink {
+                            TelegramImportScreen()
+                        } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: "square.and.arrow.down.fill")
+                                    .font(.title2)
+                                    .foregroundStyle(lanePink)
+                                    .frame(width: 46, height: 46)
+                                    .background(lanePink.opacity(0.14), in: RoundedRectangle(cornerRadius: 14))
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Import tracks")
+                                        .font(.headline)
+                                    Text("Spotify, SoundCloud, Yandex or Telegram")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(14)
+                            .background(laneCard, in: RoundedRectangle(cornerRadius: 18))
+                            .padding(.horizontal, 16)
+                        }
+                        .buttonStyle(.plain)
+
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(LibraryFilter.allCases) { item in
+                                    Button {
+                                        filter = item
+                                    } label: {
+                                        Text(item.rawValue)
+                                            .font(.subheadline.weight(.semibold))
+                                            .padding(.horizontal, 14)
+                                            .padding(.vertical, 8)
+                                            .background(filter == item ? lanePink : Color.white.opacity(0.08), in: Capsule())
+                                            .foregroundStyle(filter == item ? .black : .white)
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                        }
+
+                        libraryContents
+                    }
+                }
+                .padding(.bottom, session.currentTrack == nil ? 30 : 92)
+            }
+            .background(laneBackground)
+            .refreshable {
+                if !session.isGuest {
+                    session.refreshLibrary()
+                }
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $showCreatePlaylist) {
+                CreatePlaylistSheet()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var libraryContents: some View {
+        if filter == .all || filter == .playlists {
+            if !session.serverPlaylists.isEmpty {
+                LibrarySectionTitle(title: "Playlists", count: session.serverPlaylists.count)
+                VStack(spacing: 2) {
+                    ForEach(Array(session.serverPlaylists.enumerated()), id: \.offset) { _, playlist in
+                        NavigationLink {
+                            PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
+                        } label: {
+                            PlaylistRow(playlist: playlist)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 8)
+            }
+        }
+
+        if filter == .all || filter == .albums {
+            if !session.serverAlbums.isEmpty {
+                LibrarySectionTitle(title: "Albums", count: session.serverAlbums.count)
+                VStack(spacing: 2) {
+                    ForEach(Array(session.serverAlbums.enumerated()), id: \.offset) { _, album in
+                        AlbumRow(album: album)
+                    }
+                }
+                .padding(.horizontal, 8)
+            }
+        }
+
+        if filter == .all || filter == .artists {
+            if !session.serverArtists.isEmpty {
+                LibrarySectionTitle(title: "Artists", count: session.serverArtists.count)
+                VStack(spacing: 2) {
+                    ForEach(Array(session.serverArtists.enumerated()), id: \.offset) { _, artist in
+                        ArtistRow(artist: artist)
+                    }
+                }
+                .padding(.horizontal, 8)
+            }
+        }
+
+        if filter == .all && !session.recentTracks.isEmpty {
+            LibrarySectionTitle(title: "Recently played", count: session.recentTracks.count)
+            VStack(spacing: 2) {
+                ForEach(session.recentTracks.prefix(12)) { track in
+                    TrackRow(track: track, showPlayer: $showPlayer)
+                }
+            }
+            .padding(.horizontal, 8)
+        }
+
+        if session.serverPlaylists.isEmpty &&
+            session.serverAlbums.isEmpty &&
+            session.serverArtists.isEmpty &&
+            session.recentTracks.isEmpty {
+            EmptyLaneView(
+                icon: "square.stack",
+                title: "Your Library",
+                subtitle: "Saved music and playlists will appear here."
+            )
+            .padding(.top, 30)
         }
     }
 }
 
-struct ProfileView: View {
-    @EnvironmentObject var session: LaneSession
-    @State private var token = ""
+private struct LibraryHeader: View {
+    @EnvironmentObject private var session: LaneSession
+    @Binding var showCreatePlaylist: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            NavigationLink {
+                ProfileScreen()
+            } label: {
+                AvatarView(url: session.account?.avatarUrl, size: 40)
+            }
+
+            Text("Library")
+                .font(.system(size: 29, weight: .bold))
+
+            Spacer()
+
+            NavigationLink {
+                SearchProxyScreen()
+            } label: {
+                Image(systemName: "magnifyingglass")
+                    .frame(width: 40, height: 40)
+                    .background(laneCard, in: Circle())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                showCreatePlaylist = true
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 17, weight: .bold))
+                    .frame(width: 40, height: 40)
+                    .background(laneCard, in: Circle())
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 10)
+    }
+}
+
+// MARK: - Player
+
+private struct MiniPlayerView: View {
+    @EnvironmentObject private var session: LaneSession
+    @Binding var showPlayer: Bool
+
+    var body: some View {
+        if let track = session.currentTrack {
+            HStack(spacing: 11) {
+                ArtworkView(url: track.coverURL, size: 44, radius: 10)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(track.title)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Text(track.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Button {
+                    session.toggleFavoriteCurrent()
+                } label: {
+                    Image(systemName: session.isFavorite(track) ? "heart.fill" : "heart")
+                        .foregroundStyle(session.isFavorite(track) ? lanePink : .white)
+                }
+
+                Button {
+                    session.togglePlayback()
+                } label: {
+                    Image(systemName: session.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.title3)
+                        .frame(width: 34, height: 34)
+                }
+            }
+            .padding(8)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+            .contentShape(Rectangle())
+            .onTapGesture { showPlayer = true }
+        }
+    }
+}
+
+private struct FullPlayerView: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
+    @State private var showQueue = false
+    @State private var showComments = false
+    @State private var showTrackInfo = false
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                laneBackground.ignoresSafeArea()
+
+                if let track = session.currentTrack {
+                    VStack(spacing: 24) {
+                        Capsule()
+                            .fill(Color.secondary.opacity(0.5))
+                            .frame(width: 42, height: 5)
+                            .padding(.top, 8)
+
+                        HStack {
+                            Button { dismiss() } label: {
+                                Image(systemName: "chevron.down")
+                                    .font(.headline)
+                                    .frame(width: 38, height: 38)
+                            }
+
+                            Spacer()
+                            Text("Now Playing")
+                                .font(.headline)
+                            Spacer()
+
+                            Menu {
+                                Button("Add to queue", systemImage: "text.badge.plus") {
+                                    session.addToQueue(track)
+                                }
+                                Button("Play next", systemImage: "text.insert") {
+                                    session.playNext(track)
+                                }
+                                Button("Download track", systemImage: "arrow.down.circle") {
+                                    session.downloadTrack(track)
+                                }
+                                Button("Track info", systemImage: "info.circle") {
+                                    showTrackInfo = true
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis")
+                                    .font(.headline)
+                                    .frame(width: 38, height: 38)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+
+                        ArtworkView(url: track.coverURL, size: 310, radius: 22)
+                            .shadow(color: .black.opacity(0.35), radius: 28, y: 18)
+
+                        VStack(spacing: 8) {
+                            Text(track.title)
+                                .font(.title2.bold())
+                                .lineLimit(2)
+                                .multilineTextAlignment(.center)
+
+                            Text(track.subtitle)
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+
+                            if let genre = track.genre, !genre.isEmpty {
+                                Text(genre)
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .padding(.horizontal, 28)
+
+                        HStack(spacing: 40) {
+                            Button {
+                                session.toggleFavoriteCurrent()
+                            } label: {
+                                Image(systemName: session.isFavorite(track) ? "heart.fill" : "heart")
+                                    .font(.title2)
+                                    .foregroundStyle(session.isFavorite(track) ? lanePink : .white)
+                            }
+
+                            Button { session.previous() } label: {
+                                Image(systemName: "backward.fill")
+                                    .font(.title2)
+                            }
+
+                            Button {
+                                session.togglePlayback()
+                            } label: {
+                                Image(systemName: session.isPlaying ? "pause.fill" : "play.fill")
+                                    .font(.system(size: 27, weight: .bold))
+                                    .foregroundStyle(.black)
+                                    .frame(width: 68, height: 68)
+                                    .background(Color.white, in: Circle())
+                            }
+
+                            Button { session.next() } label: {
+                                Image(systemName: "forward.fill")
+                                    .font(.title2)
+                            }
+
+                            Button {
+                                showQueue = true
+                            } label: {
+                                Image(systemName: "list.bullet")
+                                    .font(.title2)
+                            }
+                        }
+                        .buttonStyle(.plain)
+
+                        HStack(spacing: 28) {
+                            PlayerAction(icon: "text.quote", title: "Lyrics") {
+                                session.loadLyrics(track)
+                            }
+                            PlayerAction(icon: "bubble.left.and.bubble.right.fill", title: "Comments") {
+                                session.loadComments(for: track)
+                                showComments = true
+                            }
+                            PlayerAction(icon: "waveform", title: "Wave") {
+                                session.loadRecommendations(track)
+                            }
+                            PlayerAction(
+                                icon: session.isDownloaded(track) ? "checkmark.circle.fill" : "arrow.down.circle",
+                                title: session.isDownloaded(track) ? "Saved" : "Download"
+                            ) {
+                                session.downloadTrack(track)
+                            }
+                        }
+
+                        Spacer(minLength: 8)
+                    }
+                } else {
+                    EmptyLaneView(icon: "music.note", title: "Nothing is playing", subtitle: "Pick a track to start listening.")
+                }
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $showQueue) {
+                QueueScreen()
+                    .environmentObject(session)
+            }
+            .sheet(isPresented: $showComments) {
+                if let track = session.currentTrack {
+                    CommentsScreen(track: track)
+                        .environmentObject(session)
+                }
+            }
+            .sheet(isPresented: $showTrackInfo) {
+                if let track = session.currentTrack {
+                    TrackInfoScreen(track: track)
+                        .environmentObject(session)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+private struct PlayerAction: View {
+    let icon: String
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 20, weight: .semibold))
+                Text(title)
+                    .font(.caption2)
+            }
+            .foregroundStyle(.white)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct QueueScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(session.queue.enumerated()), id: \.element.id) { index, track in
+                    Button {
+                        session.currentIndex = index
+                        session.requestStream(for: track)
+                    } label: {
+                        HStack {
+                            ArtworkView(url: track.coverURL, size: 44, radius: 8)
+                            VStack(alignment: .leading) {
+                                Text(track.title)
+                                    .foregroundStyle(.primary)
+                                Text(track.subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if index == session.currentIndex {
+                                Image(systemName: "waveform")
+                                    .foregroundStyle(lanePink)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Queue")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Rows and details
+
+private struct TrackRow: View {
+    @EnvironmentObject private var session: LaneSession
+    let track: TrackCandidate
+    @Binding var showPlayer: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button {
+                session.requestStream(for: track)
+            } label: {
+                HStack(spacing: 12) {
+                    ArtworkView(url: track.coverURL, size: 52, radius: 10)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(track.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+
+                        Text(track.subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            Menu {
+                Button("Play next", systemImage: "text.insert") {
+                    session.playNext(track)
+                }
+                Button("Add to queue", systemImage: "text.badge.plus") {
+                    session.addToQueue(track)
+                }
+                Button(session.isFavorite(track) ? "Remove from liked" : "Like", systemImage: session.isFavorite(track) ? "heart.slash" : "heart") {
+                    session.toggleFavorite(track)
+                }
+                Button("Download track", systemImage: "arrow.down.circle") {
+                    session.downloadTrack(track)
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 38, height: 38)
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            session.requestStream(for: track)
+            showPlayer = true
+        }
+    }
+}
+
+private struct ArtistRow: View {
+    let artist: LaneArtist
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ArtworkView(url: artist.avatarUrl, size: 52, radius: 26)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    Text(artist.name ?? "Artist")
+                        .font(.subheadline.weight(.semibold))
+                    if artist.verified == true {
+                        Image(systemName: "checkmark.seal.fill")
+                            .foregroundStyle(.blue)
+                            .font(.caption)
+                    }
+                }
+                Text(artist.description ?? artist.platform ?? "Artist")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct AlbumRow: View {
+    let album: LaneAlbum
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ArtworkView(url: album.coverUrl, size: 52, radius: 10)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(album.name ?? "Album")
+                    .font(.subheadline.weight(.semibold))
+                Text([album.artistsDisplayedName, album.year].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " • "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct PlaylistRow: View {
+    let playlist: LanePlaylist
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ArtworkView(url: playlist.playlistImageUrl, size: 54, radius: 11)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(playlist.playlistName ?? "Playlist")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(playlist.playlistDescription?.isEmpty == false ? playlist.playlistDescription! : "\(playlist.tracksCount ?? playlist.playlistTracks?.count ?? 0) tracks")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct PlaylistDetailScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    let playlist: LanePlaylist
+    @Binding var showPlayer: Bool
+
+    @State private var tracks: [TrackCandidate] = []
+    @State private var loading = true
+    @State private var confirmDelete = false
+
+    var body: some View {
+        List {
+            Section {
+                VStack(spacing: 12) {
+                    ArtworkView(url: playlist.playlistImageUrl, size: 210, radius: 20)
+                    Text(playlist.playlistName ?? "Playlist")
+                        .font(.title2.bold())
+                        .multilineTextAlignment(.center)
+                    if let description = playlist.playlistDescription, !description.isEmpty {
+                        Text(description)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+
+                    HStack(spacing: 12) {
+                        Button {
+                            if let first = tracks.first {
+                                session.queue = tracks
+                                session.currentIndex = 0
+                                session.requestStream(for: first)
+                                showPlayer = true
+                            }
+                        } label: {
+                            Label("Play", systemImage: "play.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(lanePink)
+
+                        Menu {
+                            Button("Delete playlist", systemImage: "trash", role: .destructive) {
+                                confirmDelete = true
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .frame(width: 42, height: 42)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .listRowBackground(Color.clear)
+            }
+
+            if loading {
+                HStack {
+                    Spacer()
+                    ProgressView()
+                    Spacer()
+                }
+                .listRowBackground(Color.clear)
+            } else {
+                ForEach(tracks) { track in
+                    TrackRow(track: track, showPlayer: $showPlayer)
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(laneBackground)
+        .navigationTitle("Playlist")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            session.loadPlaylistTracks(playlist) { loaded in
+                tracks = loaded
+                loading = false
+            }
+        }
+        .alert("Delete playlist?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive) {
+                session.deleteServerPlaylist(playlist)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This action cannot be undone.")
+        }
+    }
+}
+
+private struct TrackInfoScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    let track: TrackCandidate
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Telegram / Lane token") {
-                    SecureField("Bearer token", text: $token)
-
-                    Button("Save token") {
-                        session.saveToken(token)
-                    }
-
-                    if !session.isGuest {
-                        Button("Log out", role: .destructive) {
-                            session.logout()
+                Section {
+                    HStack(spacing: 14) {
+                        ArtworkView(url: track.coverURL, size: 70, radius: 12)
+                        VStack(alignment: .leading) {
+                            Text(track.title).font(.headline)
+                            Text(track.subtitle).foregroundStyle(.secondary)
                         }
                     }
                 }
 
-                Section("Build") {
-                    Text("Lane iOS cloud build")
-                        .foregroundStyle(.secondary)
+                Section("Track") {
+                    LabeledContent("Platform", value: track.platform.isEmpty ? "Lane" : track.platform)
+                    if let duration = track.duration, !duration.isEmpty {
+                        LabeledContent("Duration", value: duration)
+                    }
+                    if let genre = track.genre, !genre.isEmpty {
+                        LabeledContent("Genre", value: genre)
+                    }
+                    if let id = track.trackID {
+                        LabeledContent("ID", value: id)
+                    }
                 }
 
-                if !session.message.isEmpty {
-                    Section("Status") {
-                        Text(session.message)
+                Section("Actions") {
+                    Button("Track stats") { session.loadTrackStats(track) }
+                    Button("Lyrics") { session.loadLyrics(track) }
+                    Button("Recommendations") { session.loadRecommendations(track) }
+                }
+
+                if !session.output.isEmpty {
+                    Section("Lane response") {
+                        Text(session.output)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
                     }
                 }
             }
-            .navigationTitle("Profile")
-            .onAppear {
-                token = session.token
+            .navigationTitle("Track info")
+        }
+    }
+}
+
+// MARK: - Profile / login / social
+
+private struct ProfileScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @State private var showEditProfile = false
+
+    var body: some View {
+        List {
+            Section {
+                HStack(spacing: 16) {
+                    AvatarView(url: session.account?.avatarUrl, size: 72)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(session.account?.displayedName ?? (session.isGuest ? "Lane user" : "Profile"))
+                            .font(.title3.bold())
+                        if let username = session.account?.userName, !username.isEmpty {
+                            Text("@\(username)")
+                                .foregroundStyle(.secondary)
+                        }
+                        if let statusText = session.account?.statusText, !statusText.isEmpty {
+                            Text(statusText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+
+            if session.isGuest {
+                Section {
+                    NavigationLink {
+                        TelegramLoginScreen()
+                    } label: {
+                        Label("Sign in with Telegram", systemImage: "paperplane.fill")
+                            .foregroundStyle(.blue)
+                    }
+                }
+            } else {
+                Section {
+                    Button("Edit Profile") {
+                        showEditProfile = true
+                    }
+                    NavigationLink {
+                        FriendsScreen()
+                    } label: {
+                        Label("Friends", systemImage: "person.2.fill")
+                    }
+                    NavigationLink {
+                        NotificationsScreen()
+                    } label: {
+                        Label("Notifications", systemImage: "bell.fill")
+                    }
+                }
+
+                Section("Social") {
+                    LabeledContent("Followers", value: "\(session.publicProfile?.followersCount ?? 0)")
+                    LabeledContent("Following", value: "\(session.publicProfile?.followingCount ?? 0)")
+                    if let laneId = session.account?.laneId {
+                        LabeledContent("Lane ID", value: laneId)
+                    }
+                }
+            }
+
+            Section("Audio quality") {
+                Picker("Streaming", selection: $session.streamQuality) {
+                    ForEach(AudioQualityChoice.allCases) { quality in
+                        Text("\(quality.title) · \(quality.detail)")
+                            .tag(quality.rawValue)
+                    }
+                }
+                .onChange(of: session.streamQuality) { _ in
+                    session.persist()
+                }
+            }
+
+            Section("Lane") {
+                NavigationLink {
+                    TelegramImportScreen()
+                } label: {
+                    Label("Import music", systemImage: "square.and.arrow.down")
+                }
+
+                NavigationLink {
+                    DiagnosticsScreen()
+                } label: {
+                    Label("Advanced / API", systemImage: "wrench.and.screwdriver")
+                }
+            }
+
+            if !session.isGuest {
+                Section {
+                    Button("Log out", role: .destructive) {
+                        session.clearAccount()
+                    }
+                }
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(laneBackground)
+        .navigationTitle("Profile")
+        .onAppear {
+            if !session.isGuest {
+                session.refreshAccount()
+            }
+        }
+        .sheet(isPresented: $showEditProfile) {
+            EditProfileSheet()
+                .environmentObject(session)
+        }
+    }
+}
+
+private struct TelegramLoginScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.openURL) private var openURL
+
+    @State private var authId = ""
+    @State private var polling = false
+    @State private var message = ""
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            ZStack {
+                Circle()
+                    .fill(Color.blue.opacity(0.18))
+                    .frame(width: 116, height: 116)
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.blue)
+            }
+
+            VStack(spacing: 8) {
+                Text("Sign in with Telegram")
+                    .font(.title.bold())
+                Text("Lane will open @lane_music_bot. Confirm the authorization there, then return to this app.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, 28)
+
+            Button {
+                beginTelegramLogin()
+            } label: {
+                HStack {
+                    if polling {
+                        ProgressView()
+                            .tint(.white)
+                    } else {
+                        Image(systemName: "paperplane.fill")
+                    }
+                    Text(polling ? "Waiting for Telegram…" : "Continue with Telegram")
+                        .font(.headline)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 52)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .padding(.horizontal, 24)
+            .disabled(polling)
+
+            if !message.isEmpty {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 30)
+            }
+
+            Spacer()
+
+            Text("Authentication ID: \(authId)")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.tertiary)
+                .textSelection(.enabled)
+                .padding(.bottom, 14)
+        }
+        .background(laneBackground.ignoresSafeArea())
+        .navigationTitle("Telegram")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            authId = session.persistentTelegramAuthID()
+        }
+    }
+
+    private func beginTelegramLogin() {
+        let id = session.persistentTelegramAuthID()
+        authId = id
+
+        guard let url = URL(string: "https://t.me/lane_music_bot?start=auth\(id)") else {
+            message = "Could not create Telegram link."
+            return
+        }
+
+        openURL(url)
+        polling = true
+        message = "Confirm authorization in Telegram. Lane is checking for your token…"
+
+        Task {
+            await LaneAPI.shared.setBase(session.baseURL)
+            do {
+                let response = try await LaneAPI.shared.pollAuth(authId: id)
+                session.acceptLaneToken(response.token)
+                message = "Authorization successful."
+            } catch {
+                message = error.localizedDescription
+            }
+            polling = false
+        }
+    }
+}
+
+private struct EditProfileSheet: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var name = ""
+    @State private var username = ""
+    @State private var statusText = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Profile") {
+                    TextField("Name", text: $name)
+                    TextField("Username", text: $username)
+                        .textInputAutocapitalization(.never)
+                    TextField("About me", text: $statusText, axis: .vertical)
+                }
+            }
+            .navigationTitle("Edit Profile")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        session.saveProfile(name: name, username: username, statusText: statusText)
+                        dismiss()
+                    }
+                }
+            }
+            .onAppear {
+                name = session.account?.displayedName ?? ""
+                username = session.account?.userName ?? ""
+                statusText = session.account?.statusText ?? ""
+            }
+        }
+    }
+}
+
+private struct FriendsScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @State private var query = ""
+
+    var body: some View {
+        List {
+            Section {
+                HStack {
+                    TextField("Search users", text: $query)
+                        .textInputAutocapitalization(.never)
+                        .onSubmit { session.searchUsers(query) }
+                    Button("Search") { session.searchUsers(query) }
+                }
+            }
+
+            if !session.userSearchResults.isEmpty {
+                Section("Search results") {
+                    ForEach(Array(session.userSearchResults.enumerated()), id: \.offset) { _, user in
+                        UserRow(user: user)
+                    }
+                }
+            }
+
+            Section("Friends") {
+                if session.friends.isEmpty {
+                    Text("No friends yet")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(session.friends.enumerated()), id: \.offset) { _, user in
+                        UserRow(user: user)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Friends")
+        .onAppear {
+            session.refreshFriends()
+        }
+    }
+}
+
+private struct UserRow: View {
+    @EnvironmentObject private var session: LaneSession
+    let user: UserInfoDTO
+
+    var body: some View {
+        HStack(spacing: 12) {
+            AvatarView(url: user.avatarUrl, size: 46)
+            VStack(alignment: .leading) {
+                Text(user.displayedName ?? user.userName ?? "Lane user")
+                    .font(.subheadline.weight(.semibold))
+                if let username = user.userName, !username.isEmpty {
+                    Text("@\(username)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            if let laneId = user.laneId {
+                Button(user.isFollowing == true ? "Following" : "Follow") {
+                    session.setFollowing(user, follow: user.isFollowing != true)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .id(laneId)
+            }
+        }
+    }
+}
+
+private struct NotificationsScreen: View {
+    @EnvironmentObject private var session: LaneSession
+
+    var body: some View {
+        List {
+            if session.notificationCards.isEmpty {
+                EmptyLaneView(icon: "bell", title: "No notifications", subtitle: "Updates from Lane will appear here.")
+                    .listRowBackground(Color.clear)
+            } else {
+                ForEach(session.notificationCards) { card in
+                    HStack(spacing: 12) {
+                        ArtworkView(url: card.imageURL, size: 46, radius: 23)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(card.title)
+                                .font(.subheadline.weight(.semibold))
+                            Text(card.subtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Notifications")
+        .onAppear {
+            session.refreshNotifications()
+        }
+    }
+}
+
+private struct CommentsScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
+
+    let track: TrackCandidate
+    @State private var text = ""
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                List {
+                    if session.comments.isEmpty {
+                        Text("No comments yet")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(session.comments) { comment in
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 9) {
+                                    AvatarView(url: comment.userAvatar, size: 34)
+                                    VStack(alignment: .leading) {
+                                        Text(comment.userName ?? "Lane user")
+                                            .font(.subheadline.weight(.semibold))
+                                        if let timestamp = comment.timestamp {
+                                            Text(Date(timeIntervalSince1970: TimeInterval(timestamp > 10_000_000_000 ? timestamp / 1000 : timestamp)), style: .relative)
+                                                .font(.caption2)
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                    }
+                                }
+
+                                Text(comment.text ?? "")
+                                    .font(.body)
+
+                                Button {
+                                    session.toggleCommentLike(comment, for: track)
+                                } label: {
+                                    Label("\(comment.likesCount ?? 0)", systemImage: comment.isLiked == true ? "heart.fill" : "heart")
+                                        .font(.caption)
+                                        .foregroundStyle(comment.isLiked == true ? lanePink : .secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+                .listStyle(.plain)
+
+                HStack(spacing: 10) {
+                    TextField("Add a comment…", text: $text, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+
+                    Button {
+                        let outgoing = text
+                        text = ""
+                        session.sendComment(outgoing, for: track)
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.title)
+                            .foregroundStyle(lanePink)
+                    }
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .padding(12)
+                .background(.ultraThinMaterial)
+            }
+            .navigationTitle("Comments")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .onAppear {
+                session.loadComments(for: track)
+            }
+        }
+    }
+}
+
+// MARK: - Library auxiliary screens
+
+private struct FavoriteTracksScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @Binding var showPlayer: Bool
+
+    private var tracks: [TrackCandidate] {
+        let all = session.history + session.searchTracks + session.queue + session.homeTracks + session.recentTracks
+        var seen = Set<String>()
+        return all.filter {
+            session.isFavorite($0) && seen.insert($0.id).inserted
+        }
+    }
+
+    var body: some View {
+        List {
+            if tracks.isEmpty {
+                EmptyLaneView(icon: "heart", title: "Liked tracks", subtitle: "Tap the heart on a track to save it.")
+                    .listRowBackground(Color.clear)
+            } else {
+                ForEach(tracks) { track in
+                    TrackRow(track: track, showPlayer: $showPlayer)
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(laneBackground)
+        .navigationTitle("Liked tracks")
+    }
+}
+
+private struct DownloadsScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @Binding var showPlayer: Bool
+
+    private var downloaded: [TrackCandidate] {
+        let all = session.history + session.searchTracks + session.queue + session.homeTracks + session.recentTracks
+        var seen = Set<String>()
+        return all.filter {
+            session.isDownloaded($0) && seen.insert($0.id).inserted
+        }
+    }
+
+    var body: some View {
+        List {
+            if downloaded.isEmpty {
+                EmptyLaneView(icon: "arrow.down.circle", title: "Downloads", subtitle: "Save tracks to listen offline.")
+                    .listRowBackground(Color.clear)
+            } else {
+                ForEach(downloaded) { track in
+                    TrackRow(track: track, showPlayer: $showPlayer)
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(laneBackground)
+        .navigationTitle("Downloads")
+    }
+}
+
+private struct CreatePlaylistSheet: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var name = ""
+    @State private var description = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Playlist") {
+                    TextField("Name", text: $name)
+                    TextField("Description", text: $description, axis: .vertical)
+                }
+            }
+            .navigationTitle("Create playlist")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Create") {
+                        session.createServerPlaylist(name: name, description: description)
+                        dismiss()
+                    }
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+}
+
+private struct TelegramImportScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.openURL) private var openURL
+    @State private var response = ""
+    @State private var loading = false
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            Image(systemName: "paperplane.circle.fill")
+                .font(.system(size: 82))
+                .foregroundStyle(.blue)
+
+            Text("Import from Telegram")
+                .font(.title.bold())
+
+            Text("Lane can prepare an import session using the same backend as the Android app.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 28)
+
+            Button {
+                loading = true
+                Task {
+                    await LaneAPI.shared.setBase(session.baseURL)
+                    do {
+                        let result = try await LaneAPI.shared.telegramImportStart(token: session.token)
+                        response = result.pretty
+                    } catch {
+                        response = error.localizedDescription
+                    }
+                    loading = false
+                }
+            } label: {
+                Label(loading ? "Starting…" : "Start Telegram import", systemImage: "square.and.arrow.down")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(lanePink)
+            .disabled(session.isGuest || loading)
+            .padding(.horizontal, 24)
+
+            if !response.isEmpty {
+                ScrollView {
+                    Text(response)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 180)
+                .padding()
+            }
+
+            Spacer()
+        }
+        .background(laneBackground)
+        .navigationTitle("Import")
+    }
+}
+
+private struct WaveScreen: View {
+    @EnvironmentObject private var session: LaneSession
+
+    var body: some View {
+        VStack(spacing: 22) {
+            Spacer()
+            Image(systemName: "waveform.circle.fill")
+                .font(.system(size: 90))
+                .foregroundStyle(lanePink)
+            Text("Wave")
+                .font(.largeTitle.bold())
+            Text("Build a continuous queue from your current track using Lane recommendations.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 28)
+
+            if let current = session.currentTrack {
+                Button("Start wave from this song") {
+                    session.loadRecommendations(current)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(lanePink)
+            } else {
+                Text("Play a track first")
+                    .font(.subheadline)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
+        }
+        .background(laneBackground)
+        .navigationTitle("Wave")
+    }
+}
+
+private struct SearchProxyScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @State private var query = ""
+
+    var body: some View {
+        List {
+            Section {
+                HStack {
+                    TextField("Search", text: $query)
+                        .onSubmit { session.search(query) }
+                    Button("Search") { session.search(query) }
+                }
+            }
+
+            ForEach(session.searchTracks) { track in
+                Button {
+                    session.requestStream(for: track)
+                } label: {
+                    HStack {
+                        ArtworkView(url: track.coverURL, size: 46, radius: 9)
+                        VStack(alignment: .leading) {
+                            Text(track.title)
+                            Text(track.subtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Search")
+    }
+}
+
+// MARK: - Diagnostics
+
+private struct DiagnosticsScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @State private var path = "/time"
+    @State private var method = "GET"
+
+    var body: some View {
+        Form {
+            Section("Server") {
+                TextField("Base URL", text: $session.baseURL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .onSubmit { session.persist() }
+
+                Picker("Quality", selection: $session.streamQuality) {
+                    ForEach(AudioQualityChoice.allCases) { quality in
+                        Text(quality.rawValue)
+                            .tag(quality.rawValue)
+                    }
+                }
+                .onChange(of: session.streamQuality) { _ in session.persist() }
+            }
+
+            Section("Request") {
+                TextField("/endpoint", text: $path)
+                    .textInputAutocapitalization(.never)
+                Picker("Method", selection: $method) {
+                    Text("GET").tag("GET")
+                    Text("POST").tag("POST")
+                    Text("DELETE").tag("DELETE")
+                }
+                .pickerStyle(.segmented)
+
+                Button("Send request") {
+                    session.rawCall(path: path, method: method)
+                }
+            }
+
+            Section("Response") {
+                LabeledContent("HTTP", value: session.status == 0 ? "—" : "\(session.status)")
+                ScrollView(.horizontal) {
+                    Text(session.output)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                }
+                .frame(minHeight: 140)
+            }
+        }
+        .navigationTitle("Advanced / API")
+    }
+}
+
+// MARK: - Reusable components
+
+private struct TrackSection: View {
+    @EnvironmentObject private var session: LaneSession
+    let title: String
+    let subtitle: String?
+    let tracks: [TrackCandidate]
+    @Binding var showPlayer: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.title2.bold())
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 18)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 14) {
+                    ForEach(tracks) { track in
+                        Button {
+                            session.queue = tracks
+                            session.currentIndex = tracks.firstIndex(of: track)
+                            session.requestStream(for: track)
+                            showPlayer = true
+                        } label: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ArtworkView(url: track.coverURL, size: 148, radius: 15)
+                                Text(track.title)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                    .frame(width: 148, alignment: .leading)
+                                Text(track.subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .frame(width: 148, alignment: .leading)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 18)
+            }
+        }
+    }
+}
+
+private struct CardShelf: View {
+    let title: String
+    let cards: [LaneCardItem]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.title2.bold())
+                .padding(.horizontal, 18)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 14) {
+                    ForEach(cards) { card in
+                        VStack(alignment: .leading, spacing: 8) {
+                            ArtworkView(url: card.imageURL, size: 148, radius: 15)
+                            Text(card.title)
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(1)
+                            Text(card.subtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        .frame(width: 148, alignment: .leading)
+                    }
+                }
+                .padding(.horizontal, 18)
+            }
+        }
+    }
+}
+
+private struct FeatureBanner: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Image(systemName: icon)
+                .font(.system(size: 30, weight: .semibold))
+                .foregroundStyle(.black)
+                .frame(width: 58, height: 58)
+                .background(lanePink, in: RoundedRectangle(cornerRadius: 16))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+            Image(systemName: "chevron.right")
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .background(laneCard, in: RoundedRectangle(cornerRadius: 22))
+        .padding(.horizontal, 16)
+    }
+}
+
+private struct LibraryFeatureCard: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let gradient: [Color]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundStyle(.white)
+
+            Spacer()
+
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            Text(subtitle)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.75))
+        }
+        .padding(15)
+        .frame(maxWidth: .infinity, minHeight: 130, alignment: .leading)
+        .background(
+            LinearGradient(colors: gradient, startPoint: .topLeading, endPoint: .bottomTrailing),
+            in: RoundedRectangle(cornerRadius: 20)
+        )
+    }
+}
+
+private struct LibrarySectionTitle: View {
+    let title: String
+    let count: Int
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .font(.title3.bold())
+            Text("\(count)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 4)
+    }
+}
+
+private struct ArtworkView: View {
+    let url: String?
+    let size: CGFloat
+    let radius: CGFloat
+
+    var body: some View {
+        AsyncImage(url: URL(string: url ?? "")) { phase in
+            switch phase {
+            case .success(let image):
+                image
+                    .resizable()
+                    .scaledToFill()
+            default:
+                ZStack {
+                    LinearGradient(
+                        colors: [lanePink.opacity(0.75), Color.purple.opacity(0.45)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    Image(systemName: "music.note")
+                        .font(.system(size: max(15, size * 0.24), weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: radius))
+    }
+}
+
+private struct AvatarView: View {
+    let url: String?
+    let size: CGFloat
+
+    var body: some View {
+        AsyncImage(url: URL(string: url ?? "")) { phase in
+            switch phase {
+            case .success(let image):
+                image.resizable().scaledToFill()
+            default:
+                ZStack {
+                    Circle().fill(Color.white.opacity(0.10))
+                    Image(systemName: "person.fill")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+    }
+}
+
+private struct EmptyLaneView: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 42))
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.headline)
+            Text(subtitle)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(28)
     }
 }
