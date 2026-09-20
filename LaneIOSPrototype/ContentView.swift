@@ -897,14 +897,13 @@ private struct MiniPlayerView: View {
     private func updateMiniPlayerColor(from rawURL: String?) async {
         let fallback = UIColor(red: 0.12, green: 0.12, blue: 0.12, alpha: 1)
 
-        guard let rawURL,
-              let url = URL(string: rawURL) else {
+        guard let url = laneRoutedMediaURL(rawURL) else {
             cardColor = Color(uiColor: fallback)
             return
         }
 
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let data = try await AndroidNetworkTransport.imageData(from: url)
             guard let image = UIImage(data: data),
                   let sampled = Self.averageColor(of: image) else {
                 cardColor = Color(uiColor: fallback)
@@ -1683,27 +1682,20 @@ private struct ProfileScreen: View {
         ScrollView {
             VStack(spacing: 0) {
                 ZStack(alignment: .bottom) {
-                    AsyncImage(url: URL(string: profileHeader ?? "")) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .scaledToFill()
-                        default:
-                            ZStack {
-                                LinearGradient(
-                                    colors: [
-                                        lanePink.opacity(0.38),
-                                        Color.purple.opacity(0.20),
-                                        laneBackground
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
+                    LaneResilientImage(url: profileHeader) {
+                        ZStack {
+                            LinearGradient(
+                                colors: [
+                                    lanePink.opacity(0.38),
+                                    Color.purple.opacity(0.20),
+                                    laneBackground
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
 
-                                BundlePNG(name: "lane_lines_banner", contentMode: .fill)
-                                    .opacity(0.40)
-                            }
+                            BundlePNG(name: "lane_lines_banner", contentMode: .fill)
+                                .opacity(0.40)
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -3631,23 +3623,16 @@ private struct ArtworkView: View {
     let radius: CGFloat
 
     var body: some View {
-        AsyncImage(url: URL(string: url ?? "")) { phase in
-            switch phase {
-            case .success(let image):
-                image
-                    .resizable()
-                    .scaledToFill()
-            default:
-                ZStack {
-                    LinearGradient(
-                        colors: [lanePink.opacity(0.75), Color.purple.opacity(0.45)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    Image(systemName: "music.note")
-                        .font(.system(size: max(15, size * 0.24), weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.85))
-                }
+        LaneResilientImage(url: url) {
+            ZStack {
+                LinearGradient(
+                    colors: [lanePink.opacity(0.75), Color.purple.opacity(0.45)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                Image(systemName: "music.note")
+                    .font(.system(size: max(15, size * 0.24), weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.85))
             }
         }
         .frame(width: size, height: size)
@@ -3660,16 +3645,11 @@ private struct AvatarView: View {
     let size: CGFloat
 
     var body: some View {
-        AsyncImage(url: URL(string: url ?? "")) { phase in
-            switch phase {
-            case .success(let image):
-                image.resizable().scaledToFill()
-            default:
-                ZStack {
-                    Circle().fill(Color.white.opacity(0.10))
-                    Image(systemName: "person.fill")
-                        .foregroundStyle(.secondary)
-                }
+        LaneResilientImage(url: url) {
+            ZStack {
+                Circle().fill(Color.white.opacity(0.10))
+                Image(systemName: "person.fill")
+                    .foregroundStyle(.secondary)
             }
         }
         .frame(width: size, height: size)

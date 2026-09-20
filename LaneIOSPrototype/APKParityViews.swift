@@ -618,16 +618,11 @@ private struct APKRemoteImage: View {
     var circle = false
 
     var body: some View {
-        AsyncImage(url: URL(string: url ?? "")) { phase in
-            switch phase {
-            case .success(let image):
-                image.resizable().scaledToFill()
-            default:
-                ZStack {
-                    Color.white.opacity(0.07)
-                    Image(systemName: circle ? "person.fill" : "music.note")
-                        .foregroundStyle(.secondary)
-                }
+        LaneResilientImage(url: url) {
+            ZStack {
+                Color.white.opacity(0.07)
+                Image(systemName: circle ? "person.fill" : "music.note")
+                    .foregroundStyle(.secondary)
             }
         }
         .clipShape(circle ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)))
@@ -1562,17 +1557,13 @@ struct APKFullPlayerView: View {
             if let track = session.currentTrack {
                 GeometryReader { proxy in
                     ZStack {
-                        AsyncImage(url: URL(string: track.coverURL ?? "")) { phase in
-                            if case .success(let image) = phase {
-                                image
-                                    .resizable()
-                                    .scaledToFill()
-                                    .frame(width: proxy.size.width, height: proxy.size.height)
-                                    .blur(radius: 40)
-                                    .scaleEffect(1.25)
-                                    .opacity(0.42)
-                            }
+                        LaneResilientImage(url: track.coverURL) {
+                            Color.clear
                         }
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .blur(radius: 40)
+                        .scaleEffect(1.25)
+                        .opacity(0.42)
 
                         LinearGradient(
                             colors: [

@@ -131,14 +131,46 @@ actor LaneAPI {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("close", forHTTPHeaderField: "Connection")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw LaneAPIError.nonHTTP
-        }
+        let (data, http) = try await performOfficialRequest(request, directTimeout: 5)
         guard (200..<300).contains(http.statusCode) else {
             throw LaneAPIError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
         }
         return try JSONDecoder().decode(LaneServerTimeResponse.self, from: data)
+    }
+
+    /// URLSession is kept as the normal path. When the carrier's resolver or
+    /// route stalls, retry the same signed request through the APK-style fast
+    /// DNS transport without changing the host used for TLS verification.
+    private func performOfficialRequest(
+        _ request: URLRequest,
+        directTimeout: TimeInterval
+    ) async throws -> (Data, HTTPURLResponse) {
+        // This is the route Android 1.4 uses in Russian time zones. Going to
+        // the resolved RU edge first avoids the long system-DNS stall seen on
+        // affected mobile providers. TLS still validates ru.laneapi.com.
+        if request.url?.host == "ru.laneapi.com" {
+            if let direct = try? await AndroidNetworkTransport.data(
+                for: request,
+                timeout: directTimeout
+            ) {
+                return (direct.data, direct.response)
+            }
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw LaneAPIError.nonHTTP
+            }
+            return (data, http)
+        } catch {
+            guard signingConfiguration.mode == .official else { throw error }
+            let direct = try await AndroidNetworkTransport.data(
+                for: request,
+                timeout: directTimeout
+            )
+            return (direct.data, direct.response)
+        }
     }
 
     /// Chooses a reachable official region before the signed API requests begin.
@@ -424,11 +456,10 @@ actor LaneAPI {
                     var request = signed
                     request.timeoutInterval = requestTimeout
 
-                    let (rawData, response) = try await URLSession.shared.data(for: request)
-
-                    guard let http = response as? HTTPURLResponse else {
-                        throw LaneAPIError.nonHTTP
-                    }
+                    let (rawData, http) = try await performOfficialRequest(
+                        request,
+                        directTimeout: min(max(requestTimeout, 5), 12)
+                    )
 
                     let data = try decodeOfficialTransport(rawData, response: http)
                     let result = APIResult(
