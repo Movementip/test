@@ -231,7 +231,7 @@ private struct HomeHeader: View {
 
                         if !session.notificationCards.isEmpty {
                             Circle()
-                                .fill(apkPink)
+                                .fill(lanePink)
                                 .frame(width: 8, height: 8)
                                 .offset(x: -4, y: 5)
                         }
