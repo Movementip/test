@@ -82,19 +82,20 @@ actor LaneAPI {
         let russian = URL(string: "https://ru.laneapi.com")!
         let officialHosts = Set([primary.host, russian.host].compactMap { $0 })
         let timezonePreferred = isRussianLaneTimezone(TimeZone.current.identifier) ? russian : primary
-        var candidates: [URL] = []
+        var candidates: [URL] = [timezonePreferred]
 
-        // A host is preferred only after a successful Lane response. Merely
-        // having laneapi.com as the install default must not outrank the RU host
-        // selected for a Russian timezone.
+        // Android selects ru.laneapi.com first in Russian time zones. A host
+        // remembered while a VPN was active must not outrank that regional
+        // choice after the VPN is disabled.
         if let saved = UserDefaults.standard.string(forKey: lastWorkingRegionalBaseKey),
            let savedURL = URL(string: saved),
            let host = savedURL.host,
-           officialHosts.contains(host) {
+           officialHosts.contains(host),
+           !candidates.contains(where: { $0.host == savedURL.host }) {
             candidates.append(savedURL)
         }
 
-        for candidate in [timezonePreferred, base, primary, russian] where
+        for candidate in [base, primary, russian] where
             !candidates.contains(where: { $0.host == candidate.host }) {
             candidates.append(candidate)
         }
@@ -361,16 +362,13 @@ actor LaneAPI {
             (upperMethod == "GET" && !mutatingGETPaths.contains(normalizedPath)) ||
             (upperMethod == "POST" && readOnlyPOSTPaths.contains(normalizedPath))
 
-        var candidates: [URL] = [base]
+        let candidates: [URL]
         if signingConfiguration.mode == .official, canFailOverRegionalHost {
-            for candidate in [
-                URL(string: "https://laneapi.com")!,
-                URL(string: "https://ru.laneapi.com")!
-            ] {
-                if !candidates.contains(where: { $0.host == candidate.host }) {
-                    candidates.append(candidate)
-                }
-            }
+            // Re-evaluate region ordering for every safe read so switching VPN
+            // state does not leave the app pinned to a stale global endpoint.
+            candidates = officialRegionalBases()
+        } else {
+            candidates = [base]
         }
 
         var lastError: Error?
@@ -882,6 +880,8 @@ actor LaneAPI {
     }
 
     func addTracks(token: String, playlistId: String, trackIds: [String]) async throws -> APIResult {
+        // Android contract: playlistId is a query parameter and the body is the
+        // raw JSON string array (not a { trackIds: ... } wrapper).
         try await request(
             path: "/user/playlist/add-tracks",
             method: "POST",

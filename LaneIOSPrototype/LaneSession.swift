@@ -829,6 +829,8 @@ final class LaneSession: ObservableObject {
             playlistId: playlistID,
             trackIds: clean
         )
+        status = result.status
+        output = result.pretty
         guard (200..<300).contains(result.status) else {
             throw LaneAPIError.http(result.status, result.pretty)
         }

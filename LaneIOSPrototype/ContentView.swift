@@ -2580,6 +2580,7 @@ private struct ImportTracksScreen: View {
     @State private var targetPlaylistID = ""
     @State private var message = ""
     @State private var loading = false
+    @State private var showImportLimitAlert = false
 
     var body: some View {
         ZStack {
@@ -2622,6 +2623,14 @@ private struct ImportTracksScreen: View {
             }
         }
         .toolbar(.hidden, for: .navigationBar)
+        .alert("Lane Premium", isPresented: $showImportLimitAlert) {
+            Button("Import first 15 tracks") {
+                performImport(Array(importTrackIDs.prefix(15)))
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("As in Lane for Android, a standard account can import up to 15 tracks at a time. Premium is required to import all \(importTrackIDs.count) tracks.")
+        }
     }
 
     private var importTopBar: some View {
@@ -2948,7 +2957,7 @@ private struct ImportTracksScreen: View {
                 .pickerStyle(.menu)
 
                 APKPrimaryButton(
-                    title: loading ? "Importing…" : "Import to Lane",
+                    title: loading ? "Importing…" : importButtonTitle,
                     loading: loading,
                     enabled: !targetPlaylistID.isEmpty && !importTrackIDs.isEmpty,
                     action: importPreviewTracks
@@ -2973,6 +2982,13 @@ private struct ImportTracksScreen: View {
         if let ids = preview?.playlistTracksIds, !ids.isEmpty { return ids }
         if let tracks = preview?.playlistTracks { return tracks.compactMap(\.songId) }
         return previewTracks.compactMap(\.trackID)
+    }
+
+    private var importButtonTitle: String {
+        if !session.hasPremiumAccess, importTrackIDs.count > 15 {
+            return "Import first 15 tracks"
+        }
+        return "Import to Lane"
     }
 
     private func resetPreview() {
@@ -3055,15 +3071,27 @@ private struct ImportTracksScreen: View {
     }
 
     private func importPreviewTracks() {
-        let ids = importTrackIDs
+        if !session.hasPremiumAccess, importTrackIDs.count > 15 {
+            showImportLimitAlert = true
+            return
+        }
+        performImport(importTrackIDs)
+    }
+
+    private func performImport(_ ids: [String]) {
         loading = true
         message = ""
         Task {
             defer { loading = false }
             do {
                 try await session.importTracks(ids, into: targetPlaylistID)
-                message = "Imported \(ids.count) tracks to Lane."
+                if ids.count < importTrackIDs.count {
+                    message = "Imported the first \(ids.count) of \(importTrackIDs.count) tracks to Lane."
+                } else {
+                    message = "Imported \(ids.count) tracks to Lane."
+                }
             } catch {
+                session.output = "Import error: \(error.localizedDescription)"
                 message = friendlyImportError(error)
             }
         }
@@ -3080,6 +3108,9 @@ private struct ImportTracksScreen: View {
         }
         if detail.localizedCaseInsensitiveContains("INVALID_TRACK_IDS_BODY") {
             return "Lane could not resolve the tracks in this playlist. Please try again."
+        }
+        if detail.localizedCaseInsensitiveContains("PREMIUM_REQUIRED") {
+            return "Lane Premium is required to import the entire playlist. Try the first 15 tracks."
         }
         return "Import failed. Check the source link and try again."
     }
