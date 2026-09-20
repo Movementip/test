@@ -16,7 +16,23 @@ private struct BundlePNG: View {
                 .resizable()
                 .aspectRatio(contentMode: contentMode)
         } else {
-            Color.clear
+            ZStack {
+                Color.clear
+                switch name {
+                case "telegram":
+                    Image(systemName: "paperplane.fill").foregroundStyle(.blue)
+                case "lane_logo_3d_wave":
+                    Image(systemName: "waveform").foregroundStyle(lanePink)
+                case "lane_3d_logo_playlist":
+                    Image(systemName: "music.note.list").foregroundStyle(lanePink)
+                case "import_tracks_background_card":
+                    Image(systemName: "square.and.arrow.down.fill").foregroundStyle(lanePink)
+                case "lane_pro_banner":
+                    Image(systemName: "sparkles").foregroundStyle(lanePink)
+                default:
+                    Image(systemName: "music.note").foregroundStyle(.white)
+                }
+            }
         }
     }
 }
