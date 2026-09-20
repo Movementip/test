@@ -234,7 +234,7 @@ private struct HomeScreen: View {
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.bottom, session.currentTrack == nil ? 24 : 92)
+                .padding(.bottom, 22)
             }
             .background(laneBackground)
             .refreshable {
@@ -548,7 +548,7 @@ private struct LibraryScreen: View {
                         libraryContents
                     }
                 }
-                .padding(.bottom, session.currentTrack == nil ? 28 : 92)
+                .padding(.bottom, 22)
             }
             .background(laneBackground)
             .refreshable {
