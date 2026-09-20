@@ -435,62 +435,154 @@ private struct SearchScreen: View {
     }
 
     private var hasSearchResults: Bool {
+        !session.searchResultItems.isEmpty ||
         !session.searchTracks.isEmpty ||
         !session.searchArtists.isEmpty ||
         !session.searchAlbums.isEmpty ||
         !session.searchPlaylists.isEmpty
     }
 
+    private func candidate(for track: TrackData) -> TrackCandidate {
+        if let songId = track.songId,
+           let existing = session.searchTracks.first(where: { $0.trackID == songId }) {
+            return existing
+        }
+        return TrackCandidate(track)
+    }
+
+    private func platform(of item: LaneSearchResultItem) -> String {
+        (
+            item.platform ??
+            item.track?.platform ??
+            item.artist?.platform ??
+            item.album?.platform ??
+            item.playlist?.platform ??
+            ""
+        ).lowercased()
+    }
+
+    private func matchesPlatform(_ item: LaneSearchResultItem, _ name: String) -> Bool {
+        platform(of: item).contains(name.lowercased())
+    }
+
+    @ViewBuilder
+    private func mixedSearchRow(_ item: LaneSearchResultItem) -> some View {
+        if let track = item.track {
+            let value = candidate(for: track)
+            APKSearchTrackRow(
+                track: value,
+                onTap: {
+                    session.queue = session.searchTracks
+                    session.currentIndex = session.searchTracks.firstIndex(of: value)
+                    session.requestStream(for: value)
+                    showPlayer = true
+                },
+                onMore: {
+                    session.addToQueue(value)
+                }
+            )
+        } else if let artist = item.artist {
+            APKSearchArtistRow(artist: artist)
+        } else if let album = item.album {
+            APKSearchAlbumRow(album: album)
+        } else if let playlist = item.playlist {
+            NavigationLink {
+                PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
+            } label: {
+                APKSearchPlaylistRow(playlist: playlist)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
     @ViewBuilder
     private var searchResults: some View {
-        List {
-            if selectedFilter == .all || selectedFilter == .tracks {
-                if !session.searchTracks.isEmpty {
-                    Section("Tracks") {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                switch selectedFilter {
+                case .all:
+                    if !session.searchResultItems.isEmpty {
+                        ForEach(session.searchResultItems) { item in
+                            mixedSearchRow(item)
+                        }
+                    } else {
                         ForEach(session.searchTracks) { track in
-                            TrackRow(track: track, showPlayer: $showPlayer)
+                            APKSearchTrackRow(
+                                track: track,
+                                onTap: {
+                                    session.queue = session.searchTracks
+                                    session.currentIndex = session.searchTracks.firstIndex(of: track)
+                                    session.requestStream(for: track)
+                                    showPlayer = true
+                                },
+                                onMore: { session.addToQueue(track) }
+                            )
                         }
-                    }
-                }
-            }
 
-            if selectedFilter == .all || selectedFilter == .artists {
-                if !session.searchArtists.isEmpty {
-                    Section("Artists") {
                         ForEach(Array(session.searchArtists.enumerated()), id: \.offset) { _, artist in
-                            ArtistRow(artist: artist)
+                            APKSearchArtistRow(artist: artist)
                         }
-                    }
-                }
-            }
 
-            if selectedFilter == .all || selectedFilter == .albums {
-                if !session.searchAlbums.isEmpty {
-                    Section("Albums") {
                         ForEach(Array(session.searchAlbums.enumerated()), id: \.offset) { _, album in
-                            AlbumRow(album: album)
+                            APKSearchAlbumRow(album: album)
                         }
-                    }
-                }
-            }
 
-            if selectedFilter == .all || selectedFilter == .playlists {
-                if !session.searchPlaylists.isEmpty {
-                    Section("Playlists") {
                         ForEach(Array(session.searchPlaylists.enumerated()), id: \.offset) { _, playlist in
                             NavigationLink {
                                 PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
                             } label: {
-                                PlaylistRow(playlist: playlist)
+                                APKSearchPlaylistRow(playlist: playlist)
                             }
+                            .buttonStyle(.plain)
                         }
+                    }
+
+                case .spotify:
+                    ForEach(session.searchResultItems.filter { matchesPlatform($0, "spotify") }) { item in
+                        mixedSearchRow(item)
+                    }
+
+                case .soundcloud:
+                    ForEach(session.searchResultItems.filter { matchesPlatform($0, "soundcloud") }) { item in
+                        mixedSearchRow(item)
+                    }
+
+                case .tracks:
+                    ForEach(session.searchTracks) { track in
+                        APKSearchTrackRow(
+                            track: track,
+                            onTap: {
+                                session.queue = session.searchTracks
+                                session.currentIndex = session.searchTracks.firstIndex(of: track)
+                                session.requestStream(for: track)
+                                showPlayer = true
+                            },
+                            onMore: { session.addToQueue(track) }
+                        )
+                    }
+
+                case .playlists:
+                    ForEach(Array(session.searchPlaylists.enumerated()), id: \.offset) { _, playlist in
+                        NavigationLink {
+                            PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
+                        } label: {
+                            APKSearchPlaylistRow(playlist: playlist)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                case .albums:
+                    ForEach(Array(session.searchAlbums.enumerated()), id: \.offset) { _, album in
+                        APKSearchAlbumRow(album: album)
                     }
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.bottom, session.currentTrack == nil ? 24 : 90)
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
+        .background(laneBackground)
     }
+
 }
 
 // MARK: - Library
