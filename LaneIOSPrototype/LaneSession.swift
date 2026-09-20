@@ -7,8 +7,9 @@ final class LaneSession: ObservableObject {
     // MARK: Account / API
     @Published var token = KeychainStore.load(account: "bearer") ?? ""
     @Published var baseURL = UserDefaults.standard.string(forKey: "lane.base") ?? "https://laneapi.com"
-    // BASIC is available to every Lane account. HIGH and ULTRA require Premium.
-    @Published var streamQuality = UserDefaults.standard.string(forKey: "lane.quality") ?? AudioQualityChoice.basic.rawValue
+    // Keep the user's choice. If a particular stream rejects it, playback
+    // retries that request in BASIC without rewriting the saved preference.
+    @Published var streamQuality = UserDefaults.standard.string(forKey: "lane.quality") ?? AudioQualityChoice.high.rawValue
     @Published var backendMode = LaneBackendMode(rawValue: UserDefaults.standard.string(forKey: "lane.backendMode") ?? "official") ?? .official
     @Published var apiKeyHeader = UserDefaults.standard.string(forKey: "lane.apiKeyHeader") ?? "X-API-Key"
     @Published var apiKey = KeychainStore.load(account: "lane.customApiKey") ?? ""
@@ -201,7 +202,8 @@ final class LaneSession: ObservableObject {
     }
 
     var hasPremiumAccess: Bool {
-        account?.isAutoRenewalActive == true || (account?.premiumExpiresIn ?? 0) > 0
+        guard let expiresAt = account?.premiumExpiresIn else { return false }
+        return expiresAt > Int64(Date().timeIntervalSince1970 * 1000.0)
     }
 
     init() {
@@ -241,10 +243,6 @@ final class LaneSession: ObservableObject {
     }
 
     func persistStreamQualitySelection() {
-        if !hasPremiumAccess, streamQuality != AudioQualityChoice.basic.rawValue {
-            streamQuality = AudioQualityChoice.basic.rawValue
-            output = "High and Ultra audio quality require Lane Premium."
-        }
         persist()
     }
 
@@ -438,13 +436,6 @@ final class LaneSession: ObservableObject {
             let language = Locale.current.language.languageCode?.identifier ?? "en"
             let accountValue = try await LaneAPI.shared.account(token: token, deviceLanguage: language)
             account = accountValue
-
-            // Earlier prototype builds stored HIGH as the default and then got
-            // 403 PREMIUM_REQUIRED on every play for regular accounts.
-            if !hasPremiumAccess, streamQuality != AudioQualityChoice.basic.rawValue {
-                streamQuality = AudioQualityChoice.basic.rawValue
-                persist()
-            }
 
             if let laneId = accountValue.laneId, !laneId.isEmpty {
                 publicProfile = try? await LaneAPI.shared.userInfo(token: token, laneId: laneId)
@@ -1099,6 +1090,13 @@ final class LaneSession: ObservableObject {
                 quality: quality
             )
         } catch {
+            // Preserve the entitlement error so requestStream can first move
+            // HIGH/ULTRA down to BASIC. Retrying the same paid quality without
+            // refId could replace it with a different backend error and prevent
+            // the legitimate BASIC fallback from ever running.
+            if isPremiumRequired(error) {
+                throw error
+            }
             guard refID != nil else { throw error }
             return try await LaneAPI.shared.stream(
                 token: token,
@@ -1116,7 +1114,7 @@ final class LaneSession: ObservableObject {
     private func userFacingPlaybackError(_ error: Error) -> String {
         let detail = error.localizedDescription
         if isPremiumRequired(error) {
-            return "This quality requires Lane Premium. Basic quality is available."
+            return "Lane requires Premium for this stream."
         }
         if detail.localizedCaseInsensitiveContains("timed out") ||
             detail.localizedCaseInsensitiveContains("HTTP 5") ||
@@ -1196,8 +1194,6 @@ final class LaneSession: ObservableObject {
 
                     if self.isPremiumRequired(error), requestedQuality != AudioQualityChoice.basic.rawValue {
                         requestedQuality = AudioQualityChoice.basic.rawValue
-                        self.streamQuality = requestedQuality
-                        self.persist()
                         result = try await self.resolvedStream(
                             trackID: trackID,
                             refID: track.refID,

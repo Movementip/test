@@ -1843,9 +1843,8 @@ private struct ProfileScreen: View {
 
                         Picker("Streaming quality", selection: $session.streamQuality) {
                             ForEach(AudioQualityChoice.allCases) { quality in
-                                Text("\(quality.title) · \(quality.detail)\(!session.hasPremiumAccess && quality != .basic ? " · Premium" : "")")
+                                Text("\(quality.title) · \(quality.detail)")
                                     .tag(quality.rawValue)
-                                    .disabled(!session.hasPremiumAccess && quality != .basic)
                             }
                         }
                         .pickerStyle(.segmented)
@@ -3235,9 +3234,8 @@ private struct DiagnosticsScreen: View {
             Section("Playback") {
                 Picker("Quality", selection: $session.streamQuality) {
                     ForEach(AudioQualityChoice.allCases) { quality in
-                        Text("\(quality.rawValue)\(!session.hasPremiumAccess && quality != .basic ? " · Premium" : "")")
+                        Text(quality.rawValue)
                             .tag(quality.rawValue)
-                            .disabled(!session.hasPremiumAccess && quality != .basic)
                     }
                 }
                 .onChange(of: session.streamQuality) { _ in session.persistStreamQualitySelection() }
