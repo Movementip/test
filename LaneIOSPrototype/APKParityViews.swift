@@ -971,8 +971,11 @@ struct APKFullPlayerView: View {
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 7) {
-                Image(systemName: icon)
-                    .font(.system(size: 22, weight: .medium))
+                APKTemplateIcon(
+                    name: asset,
+                    size: 22,
+                    color: active ? apkPink : .white
+                )
                 Text(value)
                     .font(.system(size: 13, weight: .medium))
                     .monospacedDigit()
