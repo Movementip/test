@@ -840,7 +840,10 @@ struct APKArtistDetailScreen: View {
     let seed: LaneArtist
 
     @State private var artist: LaneArtist?
+    @State private var topTracks: [TrackCandidate] = []
+    @State private var recentTracks: [TrackCandidate] = []
     @State private var loading = true
+    @State private var showPlayer = false
 
     private var value: LaneArtist { artist ?? seed }
 
@@ -850,34 +853,41 @@ struct APKArtistDetailScreen: View {
                 ZStack(alignment: .bottomLeading) {
                     APKRemoteImage(url: value.headerUrl ?? value.avatarUrl, cornerRadius: 0)
                         .frame(maxWidth: .infinity)
-                        .frame(height: 250)
+                        .frame(height: 260)
                         .clipped()
                         .overlay {
                             LinearGradient(
-                                colors: [.clear, apkBackground.opacity(0.35), apkBackground],
+                                colors: [.clear, apkBackground.opacity(0.34), apkBackground],
                                 startPoint: .top,
                                 endPoint: .bottom
                             )
                         }
 
-                    HStack(alignment: .bottom, spacing: 16) {
+                    HStack(alignment: .bottom, spacing: 14) {
                         APKRemoteImage(url: value.avatarUrl, circle: true)
-                            .frame(width: 96, height: 96)
+                            .frame(width: 94, height: 94)
                             .overlay(Circle().stroke(apkBackground, lineWidth: 4))
 
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(spacing: 6) {
                                 Text(value.name ?? "Artist")
-                                    .font(.system(size: 28, weight: .bold))
+                                    .font(.system(size: 27, weight: .bold))
+                                    .lineLimit(2)
+
                                 if value.verified == true {
-                                    APKVerifiedBadge(size: 12)
+                                    APKVerifiedBadge(size: 13)
                                 }
                             }
 
-                            Text(value.platform ?? "")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                            HStack(spacing: 5) {
+                                APKPlatformIcon(platform: value.platform, size: 10)
+                                Text(value.platform?.capitalized ?? "Artist")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
+
+                        Spacer(minLength: 0)
                     }
                     .padding(.horizontal, 16)
                     .padding(.bottom, 12)
@@ -890,16 +900,70 @@ struct APKArtistDetailScreen: View {
                             .frame(maxWidth: .infinity)
                     }
 
+                    if !topTracks.isEmpty {
+                        HStack(spacing: 12) {
+                            Button {
+                                play(topTracks, shuffled: false)
+                            } label: {
+                                Label("Play", systemImage: "play.fill")
+                                    .font(.system(size: 15, weight: .bold))
+                                    .foregroundStyle(.black)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 46)
+                                    .background(apkPink, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                play(topTracks, shuffled: true)
+                            } label: {
+                                Image(systemName: "shuffle")
+                                    .font(.system(size: 19, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 46, height: 46)
+                                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
                     if let description = value.description, !description.isEmpty {
                         Text(description)
-                            .font(.system(size: 15))
+                            .font(.system(size: 14))
                             .foregroundStyle(.secondary)
+                    }
+
+                    if !topTracks.isEmpty {
+                        trackSection(title: "Music", tracks: topTracks)
+                    }
+
+                    if !recentTracks.isEmpty {
+                        trackSection(title: "Recent tracks", tracks: recentTracks)
+                    }
+
+                    if let albums = value.albums, !albums.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("Albums")
+                                    .font(.system(size: 20, weight: .bold))
+                                Spacer()
+                                if albums.count > 4 {
+                                    Text("Show all")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(Color.white.opacity(0.50))
+                                }
+                            }
+
+                            ForEach(Array(albums.prefix(6).enumerated()), id: \.offset) { _, album in
+                                APKAlbumCardRow(album: album)
+                            }
+                        }
                     }
 
                     if let biography = value.biography, !biography.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("About")
-                                .font(.title3.bold())
+                                .font(.system(size: 20, weight: .bold))
                             Text(biography)
                                 .font(.system(size: 14))
                                 .foregroundStyle(.secondary)
@@ -907,33 +971,44 @@ struct APKArtistDetailScreen: View {
                         }
                     }
 
-                    if let albums = value.albums, !albums.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Albums")
-                                .font(.title3.bold())
-
-                            ForEach(Array(albums.enumerated()), id: \.offset) { _, album in
-                                APKAlbumCardRow(album: album)
-                            }
-                        }
-                    }
-
                     if let related = value.relatedArtists, !related.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Related artists")
-                                .font(.title3.bold())
+                            HStack {
+                                Text("Related artists")
+                                    .font(.system(size: 20, weight: .bold))
+                                Spacer()
+                                if related.count > 5 {
+                                    Text("Show all")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(Color.white.opacity(0.50))
+                                }
+                            }
 
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 14) {
-                                    ForEach(Array(related.enumerated()), id: \.offset) { _, relatedArtist in
-                                        VStack(spacing: 8) {
-                                            APKRemoteImage(url: relatedArtist.avatarUrl, circle: true)
-                                                .frame(width: 92, height: 92)
-                                            Text(relatedArtist.name ?? "Artist")
-                                                .font(.system(size: 13, weight: .semibold))
-                                                .lineLimit(1)
-                                                .frame(width: 100)
+                                    ForEach(Array(related.prefix(10).enumerated()), id: \.offset) { _, relatedArtist in
+                                        NavigationLink {
+                                            APKArtistDetailScreen(
+                                                seed: LaneArtist(
+                                                    name: relatedArtist.name,
+                                                    id: relatedArtist.id,
+                                                    platform: relatedArtist.platform,
+                                                    avatarUrl: relatedArtist.avatarUrl
+                                                )
+                                            )
+                                        } label: {
+                                            VStack(spacing: 8) {
+                                                APKRemoteImage(url: relatedArtist.avatarUrl, circle: true)
+                                                    .frame(width: 88, height: 88)
+
+                                                Text(relatedArtist.name ?? "Artist")
+                                                    .font(.system(size: 13, weight: .semibold))
+                                                    .foregroundStyle(.white)
+                                                    .lineLimit(1)
+                                                    .frame(width: 96)
+                                            }
                                         }
+                                        .buttonStyle(.plain)
                                     }
                                 }
                             }
@@ -946,9 +1021,53 @@ struct APKArtistDetailScreen: View {
         .background(apkBackground.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            artist = await session.fetchArtistDetail(seed)
+            let detail = await session.fetchArtistDetail(seed)
+            artist = detail
+
+            topTracks = await session.resolveTracksByIDs(detail.topTracks ?? [], prefetch: false)
+            recentTracks = await session.resolveTracksByIDs(detail.recentTracks ?? [], prefetch: false)
+
             loading = false
         }
+        .fullScreenCover(isPresented: $showPlayer) {
+            APKFullPlayerView()
+                .environmentObject(session)
+        }
+    }
+
+    @ViewBuilder
+    private func trackSection(title: String, tracks: [TrackCandidate]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 20, weight: .bold))
+
+            VStack(spacing: 0) {
+                ForEach(Array(tracks.prefix(5).enumerated()), id: \.element.id) { index, track in
+                    APKAlbumTrackRow(
+                        index: index + 1,
+                        track: track,
+                        onTap: {
+                            session.queue = tracks
+                            session.currentIndex = index
+                            session.requestStream(for: track)
+                            showPlayer = true
+                        },
+                        onMore: {
+                            session.addToQueue(track)
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    private func play(_ tracks: [TrackCandidate], shuffled: Bool) {
+        guard !tracks.isEmpty else { return }
+        let list = shuffled ? tracks.shuffled() : tracks
+        session.queue = list
+        session.currentIndex = 0
+        session.requestStream(for: list[0])
+        showPlayer = true
     }
 }
 
