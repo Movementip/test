@@ -57,6 +57,7 @@ actor LaneAPI {
     private var serviceLDI = ""
     private var signingConfiguration = LaneSigningConfiguration.official
     private var timeOffsetMilliseconds: Int64 = 0
+    private let lastWorkingRegionalBaseKey = "lane.lastWorkingRegionalBase"
 
     func setBase(_ value: String) {
         if let url = URL(string: value) {
@@ -83,18 +84,29 @@ actor LaneAPI {
         let timezonePreferred = isRussianLaneTimezone(TimeZone.current.identifier) ? russian : primary
         var candidates: [URL] = []
 
-        // Keep a regional host which has already worked. This is particularly
-        // important on mobile networks where the other hostname may be filtered.
-        if let host = base.host, officialHosts.contains(host) {
-            candidates.append(base)
+        // A host is preferred only after a successful Lane response. Merely
+        // having laneapi.com as the install default must not outrank the RU host
+        // selected for a Russian timezone.
+        if let saved = UserDefaults.standard.string(forKey: lastWorkingRegionalBaseKey),
+           let savedURL = URL(string: saved),
+           let host = savedURL.host,
+           officialHosts.contains(host) {
+            candidates.append(savedURL)
         }
 
-        for candidate in [timezonePreferred, primary, russian] where
+        for candidate in [timezonePreferred, base, primary, russian] where
             !candidates.contains(where: { $0.host == candidate.host }) {
             candidates.append(candidate)
         }
 
         return candidates
+    }
+
+    private func rememberWorkingRegionalBase(_ candidate: URL) {
+        base = candidate
+        let resolved = currentBaseURL()
+        UserDefaults.standard.set(resolved, forKey: "lane.base")
+        UserDefaults.standard.set(resolved, forKey: lastWorkingRegionalBaseKey)
     }
 
     private func probeOfficialServer(_ candidate: URL) async throws -> LaneServerTimeResponse {
@@ -127,9 +139,8 @@ actor LaneAPI {
         for candidate in officialRegionalBases() {
             if let server = try? await probeOfficialServer(candidate) {
                 timeOffsetMilliseconds = server.timestamp - Int64(Date().timeIntervalSince1970 * 1000.0)
-                base = candidate
+                rememberWorkingRegionalBase(candidate)
                 let resolved = currentBaseURL()
-                UserDefaults.standard.set(resolved, forKey: "lane.base")
                 return resolved
             }
         }
@@ -161,8 +172,7 @@ actor LaneAPI {
             do {
                 let server = try await probeOfficialServer(candidate)
                 timeOffsetMilliseconds = server.timestamp - Int64(Date().timeIntervalSince1970 * 1000.0)
-                base = candidate
-                UserDefaults.standard.set(currentBaseURL(), forKey: "lane.base")
+                rememberWorkingRegionalBase(candidate)
                 return
             } catch {
                 lastError = error
@@ -396,12 +406,10 @@ actor LaneAPI {
                 }
 
                 if (200..<400).contains(http.statusCode) {
-                    base = targetBase
                     if signingConfiguration.mode == .official {
-                        UserDefaults.standard.set(
-                            targetBase.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
-                            forKey: "lane.base"
-                        )
+                        rememberWorkingRegionalBase(targetBase)
+                    } else {
+                        base = targetBase
                     }
                 }
 
