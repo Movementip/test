@@ -79,8 +79,8 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 if session.currentTrack != nil {
                     MiniPlayerView(showPlayer: $showPlayer)
-                        .padding(.horizontal, 8)
-                        .padding(.bottom, 6)
+                        .padding(.horizontal, 5)
+                        .padding(.bottom, 2)
                 }
 
                 LaneBottomBar(selection: $selectedTab)
@@ -769,43 +769,184 @@ private struct MiniPlayerView: View {
     @EnvironmentObject private var session: LaneSession
     @Binding var showPlayer: Bool
 
+    @State private var cardColor = Color(red: 0.12, green: 0.12, blue: 0.12)
+    @State private var dragOffset: CGFloat = 0
+
     var body: some View {
         if let track = session.currentTrack {
-            HStack(spacing: 11) {
-                ArtworkView(url: track.coverURL, size: 44, radius: 10)
+            ZStack(alignment: .bottomLeading) {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .fill(cardColor)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(track.title)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                    Text(track.subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                HStack(spacing: 0) {
+                    Spacer().frame(width: 10)
+
+                    ArtworkView(url: track.coverURL, size: 46, radius: 5)
+
+                    Spacer().frame(width: 8)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(track.title)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.92)
+
+                        Text(track.subtitle)
+                            .font(.system(size: 10, weight: .regular))
+                            .foregroundStyle(Color.white.opacity(0.70))
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Button {
+                        session.togglePlayback()
+                    } label: {
+                        ZStack {
+                            if session.isBuffering {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .tint(.white)
+                            } else {
+                                Image(systemName: session.isPlaying ? "pause.fill" : "play.fill")
+                                    .font(.system(size: 28, weight: .regular))
+                                    .foregroundStyle(.white)
+                            }
+                        }
+                        .frame(width: 50, height: 58)
+                    }
+                    .buttonStyle(.plain)
                 }
+                .frame(height: 58)
 
-                Spacer()
+                GeometryReader { proxy in
+                    let fraction: CGFloat = {
+                        guard session.playbackDuration > 0 else { return 0 }
+                        return CGFloat(min(max(session.playbackPosition / session.playbackDuration, 0), 1))
+                    }()
 
-                Button {
-                    session.toggleFavoriteCurrent()
-                } label: {
-                    Image(systemName: session.isFavorite(track) ? "heart.fill" : "heart")
-                        .foregroundStyle(session.isFavorite(track) ? lanePink : .white)
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.white.opacity(0.30))
+
+                        Rectangle()
+                            .fill(Color.white)
+                            .frame(width: proxy.size.width * fraction)
+                    }
                 }
-
-                Button {
-                    session.togglePlayback()
-                } label: {
-                    Image(systemName: session.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.title3)
-                        .frame(width: 34, height: 34)
-                }
+                .frame(height: 1)
+                .clipShape(Capsule())
             }
-            .padding(8)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-            .contentShape(Rectangle())
-            .onTapGesture { showPlayer = true }
+            .frame(height: 58)
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
+            }
+            .offset(x: dragOffset)
+            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .onTapGesture {
+                showPlayer = true
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 18)
+                    .onChanged { value in
+                        dragOffset = value.translation.width * 0.30
+                    }
+                    .onEnded { value in
+                        let threshold: CGFloat = 70
+
+                        if value.translation.width <= -threshold {
+                            session.next()
+                        } else if value.translation.width >= threshold {
+                            session.previous()
+                        }
+
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                            dragOffset = 0
+                        }
+                    }
+            )
+            .task(id: track.coverURL) {
+                await updateMiniPlayerColor(from: track.coverURL)
+            }
+            .animation(.easeInOut(duration: 0.24), value: cardColor)
         }
+    }
+
+    @MainActor
+    private func updateMiniPlayerColor(from rawURL: String?) async {
+        let fallback = UIColor(red: 0.12, green: 0.12, blue: 0.12, alpha: 1)
+
+        guard let rawURL,
+              let url = URL(string: rawURL) else {
+            cardColor = Color(uiColor: fallback)
+            return
+        }
+
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let image = UIImage(data: data),
+                  let sampled = Self.averageColor(of: image) else {
+                cardColor = Color(uiColor: fallback)
+                return
+            }
+
+            // Lane Android blends its selected Palette swatch into the current
+            // Material surface color at 20%.
+            let blended = Self.blend(base: fallback, accent: sampled, fraction: 0.20)
+            cardColor = Color(uiColor: blended)
+        } catch {
+            cardColor = Color(uiColor: fallback)
+        }
+    }
+
+    private static func averageColor(of image: UIImage) -> UIColor? {
+        guard let cgImage = image.cgImage else { return nil }
+
+        var pixel = [UInt8](repeating: 0, count: 4)
+        guard let context = CGContext(
+            data: &pixel,
+            width: 1,
+            height: 1,
+            bitsPerComponent: 8,
+            bytesPerRow: 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+
+        context.interpolationQuality = .medium
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+
+        return UIColor(
+            red: CGFloat(pixel[0]) / 255,
+            green: CGFloat(pixel[1]) / 255,
+            blue: CGFloat(pixel[2]) / 255,
+            alpha: 1
+        )
+    }
+
+    private static func blend(base: UIColor, accent: UIColor, fraction: CGFloat) -> UIColor {
+        var br: CGFloat = 0
+        var bg: CGFloat = 0
+        var bb: CGFloat = 0
+        var ba: CGFloat = 0
+        var ar: CGFloat = 0
+        var ag: CGFloat = 0
+        var ab: CGFloat = 0
+        var aa: CGFloat = 0
+
+        base.getRed(&br, green: &bg, blue: &bb, alpha: &ba)
+        accent.getRed(&ar, green: &ag, blue: &ab, alpha: &aa)
+
+        let t = min(max(fraction, 0), 1)
+        return UIColor(
+            red: br + (ar - br) * t,
+            green: bg + (ag - bg) * t,
+            blue: bb + (ab - bb) * t,
+            alpha: ba + (aa - ba) * t
+        )
     }
 }
 
