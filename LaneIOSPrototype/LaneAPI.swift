@@ -316,7 +316,7 @@ actor LaneAPI {
                 let signed = try signer.sign(unsigned, body: unsigned.httpBody)
 
                 var request = signed
-                request.timeoutInterval = canFailOverRegionalHost ? 6 : 30
+                request.timeoutInterval = canFailOverRegionalHost ? 4 : 30
 
                 let (rawData, response) = try await URLSession.shared.data(for: request)
 
@@ -332,16 +332,12 @@ actor LaneAPI {
                 )
                 lastResult = result
 
-                let retryableStatuses: Set<Int> = [
-                    408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524
-                ]
-
-                let resolverHostMismatch =
-                    normalizedPath == "/user/tracks" &&
-                    http.statusCode == 400 &&
-                    result.pretty.contains("INVALID_TRACK_IDS_BODY")
-
-                if (retryableStatuses.contains(http.statusCode) || resolverHostMismatch),
+                // For safe read requests, a regional edge can be reachable
+                // but still reject the request (403/404/451/5xx or a backend-
+                // specific 400). Trying the alternate Lane host is safe here
+                // and is important on networks where one region is filtered.
+                if canFailOverRegionalHost,
+                   !(200..<400).contains(http.statusCode),
                    index + 1 < candidates.count {
                     continue
                 }
