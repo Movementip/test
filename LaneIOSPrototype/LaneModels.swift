@@ -7,6 +7,14 @@ struct LaneTokenResponse: Decodable {
     let isFirstAuth: Bool?
 }
 
+struct LaneBackendConfig: Decodable {
+    let service: String?
+    let auth: String?
+    let telegramBotUsername: String?
+    let apiKeyRequired: Bool?
+    let musicProvider: String?
+}
+
 struct TrackStreamingResult: Decodable {
     let url: String
     let trackId: String?
