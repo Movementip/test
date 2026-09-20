@@ -235,34 +235,53 @@ final class LaneSession: ObservableObject {
 
         Task {
             defer { busy = false }
-            do {
-                await configureAPI()
-                let response = try await LaneAPI.shared.search(token: token, query: query)
+            await configureAPI()
+
+            // First try the typed response. The APK confirms platform=android,
+            // while the runtime value of `ver` was not recoverable statically.
+            if let response = try? await LaneAPI.shared.search(token: token, query: query) {
                 searchToken = response.searchToken
                 searchTracks = response.results.compactMap { $0.track }.map(TrackCandidate.init)
                 searchArtists = response.results.compactMap { $0.artist }
                 searchAlbums = response.results.compactMap { $0.album }
                 searchPlaylists = response.results.compactMap { $0.playlist }
-                status = 200
-                output = "Found \(response.results.count) results"
-            } catch {
-                // Keep a flexible fallback because the Android app uses Kotlin defaults
-                // and some backend deployments can omit fields.
-                do {
-                    let raw = try await LaneAPI.shared.searchRaw(token: token, query: query)
-                    status = raw.status
-                    output = raw.pretty
-                    searchTracks = JSONProbe.tracks(raw.json)
-                    let cards = JSONProbe.cards(raw.json, preferredKind: "search")
-                    if searchArtists.isEmpty {
-                        searchArtists = cards.filter { $0.kind == "artist" }.map {
-                            LaneArtist(name: $0.title, id: $0.backendID, platform: $0.platform, description: $0.subtitle, verified: nil, avatarUrl: $0.imageURL, headerUrl: nil, biography: nil, topTracks: nil, recentTracks: nil, albums: nil)
-                        }
-                    }
-                } catch {
-                    output = error.localizedDescription
+
+                if !searchTracks.isEmpty || !searchArtists.isEmpty || !searchAlbums.isEmpty || !searchPlaylists.isEmpty {
+                    status = 200
+                    output = "Found \(response.results.count) results"
+                    return
                 }
             }
+
+            // Compatibility probing for the API version value. This is deliberately
+            // limited to known/probable client values and finally omits `ver`.
+            let versions: [String?] = ["1.0", "1.4.7", "2", nil]
+            var lastMessage = "No results returned by Lane."
+
+            for version in versions {
+                do {
+                    let raw = try await LaneAPI.shared.searchRaw(token: token, query: query, version: version)
+                    status = raw.status
+                    lastMessage = "HTTP \(raw.status) · ver=\(version ?? "<omitted>")\n\(raw.pretty)"
+
+                    guard (200..<300).contains(raw.status) else { continue }
+
+                    let tracks = JSONProbe.tracks(raw.json)
+                    if !tracks.isEmpty {
+                        searchTracks = tracks
+                        output = "Found \(tracks.count) tracks · ver=\(version ?? "<omitted>")"
+                        return
+                    }
+                } catch {
+                    lastMessage = error.localizedDescription
+                }
+            }
+
+            searchTracks = []
+            searchArtists = []
+            searchAlbums = []
+            searchPlaylists = []
+            output = lastMessage
         }
     }
 
