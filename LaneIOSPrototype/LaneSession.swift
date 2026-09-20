@@ -184,6 +184,7 @@ final class LaneSession: ObservableObject {
     private var periodicTimeObserver: Any?
     private var playerRetriedWithCompatibilityHeaders = false
     private var playerRetriedWithLocalDownload = false
+    private var playerRetriedWithDownloadEndpoint = false
 
     var isGuest: Bool {
         token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -934,6 +935,7 @@ final class LaneSession: ObservableObject {
         isBuffering = true
         playerRetriedWithCompatibilityHeaders = false
         playerRetriedWithLocalDownload = false
+        playerRetriedWithDownloadEndpoint = false
 
         Task {
             defer { busy = false }
@@ -1213,20 +1215,13 @@ final class LaneSession: ObservableObject {
                     )
                 }
 
-                let ext: String = {
-                    if !url.pathExtension.isEmpty { return url.pathExtension }
-                    switch response.mimeType?.lowercased() {
-                    case "audio/mpeg": return "mp3"
-                    case "audio/mp4", "audio/x-m4a": return "m4a"
-                    case "audio/aac": return "aac"
-                    case "audio/ogg": return "ogg"
-                    default: return "bin"
-                    }
-                }()
-
+                // Android Lane's DownloadWorker writes every non-HLS
+                // resolved audio response to <trackId>.m4a, regardless of the
+                // CDN URL extension or Content-Type. Match that behavior because
+                // AVFoundation relies more heavily on the local UTI/extension.
                 let destination = FileManager.default.temporaryDirectory
                     .appendingPathComponent("lane_stream_\(UUID().uuidString)")
-                    .appendingPathExtension(ext)
+                    .appendingPathExtension("m4a")
 
                 try? FileManager.default.removeItem(at: destination)
                 try FileManager.default.moveItem(at: temporaryURL, to: destination)
@@ -1250,9 +1245,16 @@ final class LaneSession: ObservableObject {
                             }
                             self.player?.play()
                         case .failed:
+                            let detail = item.error?.localizedDescription ?? "Unable to decode Lane audio"
+
+                            if !self.playerRetriedWithDownloadEndpoint {
+                                self.playerRetriedWithDownloadEndpoint = true
+                                self.resolveDownloadEndpointAndPlay()
+                                return
+                            }
+
                             self.isBuffering = false
                             self.isPlaying = false
-                            let detail = item.error?.localizedDescription ?? "Unable to decode Lane audio"
                             self.playerError = detail
                             self.output = "Playback error: \(detail)"
                         case .unknown:
@@ -1291,6 +1293,254 @@ final class LaneSession: ObservableObject {
                 playerError = error.localizedDescription
                 output = "Playback error: \(error.localizedDescription)"
             }
+        }
+    }
+
+
+    private func resolveDownloadEndpointAndPlay() {
+        guard let track = currentTrack,
+              let trackID = track.trackID,
+              !trackID.isEmpty else {
+            isBuffering = false
+            isPlaying = false
+            playerError = "Lane track ID is unavailable for compatibility playback."
+            output = "Playback error: \(playerError)"
+            return
+        }
+
+        isBuffering = true
+        output = "Trying Lane download-compatible audio…"
+
+        Task {
+            do {
+                await configureAPI()
+
+                let resolved = try await LaneAPI.shared.downloadURL(
+                    token: token,
+                    trackId: trackID,
+                    quality: streamQuality
+                )
+
+                let raw = resolved.url.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !raw.isEmpty else {
+                    throw NSError(
+                        domain: "LanePlayer",
+                        code: 4,
+                        userInfo: [NSLocalizedDescriptionKey: "Lane download endpoint returned an empty URL"]
+                    )
+                }
+
+                // DownloadWorker in Android treats .m3u8 specially. For online
+                // playback AVPlayer can consume HLS directly, so try it as-is.
+                if raw.lowercased().contains(".m3u8") {
+                    try play(urlString: raw, useCompatibilityHeaders: true)
+                    return
+                }
+
+                downloadCompatibilityAudio(raw)
+            } catch {
+                isBuffering = false
+                isPlaying = false
+                playerError = error.localizedDescription
+                output = "Playback error: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func downloadCompatibilityAudio(_ urlString: String) {
+        guard let url = normalizedStreamURL(urlString) else {
+            isBuffering = false
+            playerError = "Lane returned an invalid compatibility audio URL."
+            return
+        }
+
+        Task {
+            do {
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 45
+                request.setValue("LaneMusic/1.0 (Android; Mobile)", forHTTPHeaderField: "User-Agent")
+                request.setValue("*/*", forHTTPHeaderField: "Accept")
+                request.setValue(
+                    Locale.current.language.languageCode?.identifier ?? "en",
+                    forHTTPHeaderField: "Accept-Language"
+                )
+
+                let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+
+                if let http = response as? HTTPURLResponse,
+                   !(200..<300).contains(http.statusCode) {
+                    throw NSError(
+                        domain: "LanePlayer",
+                        code: http.statusCode,
+                        userInfo: [NSLocalizedDescriptionKey: "Lane audio CDN returned HTTP \(http.statusCode)"]
+                    )
+                }
+
+                let signature = Self.mediaSignature(at: temporaryURL)
+                let destination = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("lane_download_\(UUID().uuidString)")
+                    .appendingPathExtension(Self.localAudioExtension(for: signature))
+
+                try? FileManager.default.removeItem(at: destination)
+                try FileManager.default.moveItem(at: temporaryURL, to: destination)
+
+                try playLocalCompatibilityFile(
+                    destination,
+                    sourceDescription: signature.description
+                )
+            } catch {
+                isBuffering = false
+                isPlaying = false
+                playerError = error.localizedDescription
+                output = "Playback error: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func playLocalCompatibilityFile(
+        _ url: URL,
+        sourceDescription: String
+    ) throws {
+        teardownPlayerObservers()
+
+        let item = AVPlayerItem(url: url)
+        let localPlayer = AVPlayer(playerItem: item)
+        localPlayer.automaticallyWaitsToMinimizeStalling = false
+        player = localPlayer
+
+        playerItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+            Task { @MainActor in
+                guard let self else { return }
+
+                switch item.status {
+                case .readyToPlay:
+                    self.playerError = ""
+                    self.output = "Playing Lane audio (\(sourceDescription))."
+                    self.isBuffering = false
+
+                    let duration = item.duration.seconds
+                    if duration.isFinite && duration > 0 {
+                        self.playbackDuration = duration
+                    }
+
+                    self.player?.play()
+
+                case .failed:
+                    self.isBuffering = false
+                    self.isPlaying = false
+                    let avError = item.error as NSError?
+                    let detail = avError?.localizedDescription ?? "Cannot Open"
+                    let code = avError.map { "\($0.domain) \($0.code)" } ?? "unknown AVFoundation error"
+
+                    self.playerError = "\(detail) · \(sourceDescription) · \(code)"
+                    self.output = "Playback error: \(self.playerError)"
+
+                case .unknown:
+                    self.isBuffering = true
+
+                @unknown default:
+                    break
+                }
+            }
+        }
+
+        playerTimeControlObserver = localPlayer.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isPlaying = player.timeControlStatus == .playing
+                self.isBuffering = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+                self.updatePlaybackState(self.isPlaying)
+            }
+        }
+
+        periodicTimeObserver = localPlayer.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
+            queue: .main
+        ) { [weak self] time in
+            Task { @MainActor in
+                guard let self else { return }
+                if time.seconds.isFinite {
+                    self.playbackPosition = max(0, time.seconds)
+                }
+            }
+        }
+
+        localPlayer.play()
+    }
+
+    private enum LaneMediaSignature {
+        case mp4
+        case mp3
+        case hls
+        case ogg
+        case webm
+        case unknown(String)
+
+        var description: String {
+            switch self {
+            case .mp4: return "M4A/MP4"
+            case .mp3: return "MP3"
+            case .hls: return "HLS"
+            case .ogg: return "Ogg/Opus"
+            case .webm: return "WebM"
+            case .unknown(let hex): return "unknown format \(hex)"
+            }
+        }
+    }
+
+    nonisolated private static func mediaSignature(at url: URL) -> LaneMediaSignature {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return .unknown("unreadable")
+        }
+        defer { try? handle.close() }
+
+        let data = (try? handle.read(upToCount: 32)) ?? Data()
+        let bytes = [UInt8](data)
+
+        if data.starts(with: Data("#EXTM3U".utf8)) {
+            return .hls
+        }
+        if data.starts(with: Data("OggS".utf8)) {
+            return .ogg
+        }
+        if bytes.count >= 4,
+           bytes[0] == 0x1A,
+           bytes[1] == 0x45,
+           bytes[2] == 0xDF,
+           bytes[3] == 0xA3 {
+            return .webm
+        }
+        if data.starts(with: Data("ID3".utf8)) {
+            return .mp3
+        }
+        if bytes.count >= 8,
+           String(bytes: bytes[4..<8], encoding: .ascii) == "ftyp" {
+            return .mp4
+        }
+        if bytes.count >= 2,
+           bytes[0] == 0xFF,
+           (bytes[1] & 0xE0) == 0xE0 {
+            return .mp3
+        }
+
+        return .unknown(data.prefix(8).map { String(format: "%02x", $0) }.joined())
+    }
+
+    nonisolated private static func localAudioExtension(for signature: LaneMediaSignature) -> String {
+        switch signature {
+        case .mp4:
+            return "m4a"
+        case .mp3:
+            return "mp3"
+        case .hls:
+            return "m3u8"
+        case .ogg:
+            return "ogg"
+        case .webm:
+            return "webm"
+        case .unknown:
+            // Android Lane uses .m4a for all non-HLS downloads.
+            return "m4a"
         }
     }
 
