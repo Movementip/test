@@ -962,7 +962,7 @@ final class LaneSession: ObservableObject {
                 guard self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
 
-                let result: TrackStreamingResult
+                var result: TrackStreamingResult
                 do {
                     result = try await LaneAPI.shared.stream(
                         token: self.token,
@@ -990,6 +990,39 @@ final class LaneSession: ObservableObject {
                 try Task.checkCancellation()
                 guard self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
+
+                // A contextual refId can occasionally resolve to a stale source.
+                // If Lane tells us it resolved another track, retry without refId
+                // and never hand the mismatched URL to AVPlayer.
+                if let resolvedTrackID = result.trackId,
+                   !resolvedTrackID.isEmpty,
+                   resolvedTrackID != trackID {
+                    let corrected = try await LaneAPI.shared.stream(
+                        token: self.token,
+                        trackId: trackID,
+                        refId: nil,
+                        quality: self.streamQuality
+                    )
+
+                    try Task.checkCancellation()
+                    guard self.playbackRequestID == requestID,
+                          self.currentTrack?.id == track.id else { return }
+
+                    if let correctedTrackID = corrected.trackId,
+                       !correctedTrackID.isEmpty,
+                       correctedTrackID != trackID {
+                        throw NSError(
+                            domain: "LanePlayer",
+                            code: 409,
+                            userInfo: [
+                                NSLocalizedDescriptionKey:
+                                    "Lane resolved a different track than the one selected."
+                            ]
+                        )
+                    }
+
+                    result = corrected
+                }
 
                 self.streamURL = result.url
                 try self.play(
@@ -1132,11 +1165,9 @@ final class LaneSession: ObservableObject {
                     }
 
                     if useCompatibilityHeaders,
-                       !self.playerRetriedWithLocalDownload,
-                       !self.streamURL.isEmpty {
-                        self.playerRetriedWithLocalDownload = true
-                        self.downloadStreamAndPlayLocally(
-                            self.streamURL,
+                       !self.playerRetriedWithDownloadEndpoint {
+                        self.playerRetriedWithDownloadEndpoint = true
+                        self.resolveDownloadEndpointAndPlay(
                             requestID: requestID,
                             track: track
                         )
@@ -1207,7 +1238,7 @@ final class LaneSession: ObservableObject {
         // some signed CDN URLs without ever transitioning to .failed. Android
         // Media3 retries the source; mirror that behavior here.
         Task { [weak self, weak newPlayer] in
-            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
             guard let self,
                   let newPlayer,
                   self.player === newPlayer,
@@ -1378,6 +1409,8 @@ final class LaneSession: ObservableObject {
 
                 localPlayer.play()
             } catch {
+                guard self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
                 isBuffering = false
                 isPlaying = false
                 playerError = error.localizedDescription
@@ -1445,6 +1478,8 @@ final class LaneSession: ObservableObject {
                     track: track
                 )
             } catch {
+                guard self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
                 isBuffering = false
                 isPlaying = false
                 playerError = error.localizedDescription
@@ -1507,6 +1542,8 @@ final class LaneSession: ObservableObject {
                     track: track
                 )
             } catch {
+                guard self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
                 isBuffering = false
                 isPlaying = false
                 playerError = error.localizedDescription
