@@ -306,7 +306,7 @@ actor LaneAPI {
                 let signed = try signer.sign(unsigned, body: unsigned.httpBody)
 
                 var request = signed
-                request.timeoutInterval = upperMethod == "GET" ? 12 : 30
+                request.timeoutInterval = upperMethod == "GET" ? 6 : 30
 
                 let (rawData, response) = try await URLSession.shared.data(for: request)
 
