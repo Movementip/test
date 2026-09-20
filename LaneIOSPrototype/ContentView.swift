@@ -87,7 +87,7 @@ struct ContentView: View {
         .background(laneBackground.ignoresSafeArea())
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showPlayer) {
-            FullPlayerView()
+            APKFullPlayerView()
                 .environmentObject(session)
         }
         .task {
@@ -212,8 +212,7 @@ private struct HomeHeader: View {
             }
 
             VStack(alignment: .leading, spacing: 3) {
-                BundlePNG(name: "lane")
-                    .frame(width: 190, height: 36, alignment: .leading)
+                APKLaneWordmark()
                 if let name = session.account?.displayedName, !name.isEmpty {
                     Text(name)
                         .font(.caption)
@@ -627,11 +626,12 @@ private struct LibraryHeader: View {
             NavigationLink {
                 ProfileScreen()
             } label: {
-                AvatarView(url: session.account?.avatarUrl, size: 40)
+                AvatarView(url: session.account?.avatarUrl, size: 36)
             }
 
             Text("Library")
-                .font(.system(size: 29, weight: .bold))
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .tracking(-0.5)
 
             Spacer()
 
@@ -986,29 +986,7 @@ private struct ArtistRow: View {
     let artist: LaneArtist
 
     var body: some View {
-        HStack(spacing: 12) {
-            ArtworkView(url: artist.avatarUrl, size: 52, radius: 26)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
-                    Text(artist.name ?? "Artist")
-                        .font(.subheadline.weight(.semibold))
-                    if artist.verified == true {
-                        Image(systemName: "checkmark.seal.fill")
-                            .foregroundStyle(.blue)
-                            .font(.caption)
-                    }
-                }
-                Text(artist.description ?? artist.platform ?? "Artist")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer()
-            Image(systemName: "chevron.right")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.vertical, 4)
+        APKArtistCardRow(artist: artist)
     }
 }
 
@@ -1016,19 +994,7 @@ private struct AlbumRow: View {
     let album: LaneAlbum
 
     var body: some View {
-        HStack(spacing: 12) {
-            ArtworkView(url: album.coverUrl, size: 52, radius: 10)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(album.name ?? "Album")
-                    .font(.subheadline.weight(.semibold))
-                Text([album.artistsDisplayedName, album.year].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " • "))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer()
-        }
-        .padding(.vertical, 4)
+        APKAlbumCardRow(album: album)
     }
 }
 
