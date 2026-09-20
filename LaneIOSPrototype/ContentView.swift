@@ -1151,32 +1151,57 @@ struct PlaylistDetailScreen: View {
     @State private var confirmDelete = false
 
     var body: some View {
-        List {
-            Section {
-                VStack(spacing: 12) {
-                    ArtworkView(url: playlist.playlistImageUrl, size: 210, radius: 20)
+        ScrollView {
+            VStack(spacing: 0) {
+                Spacer().frame(height: 18)
+
+                ArtworkView(
+                    url: playlist.playlistImageUrl,
+                    size: 250,
+                    radius: 8
+                )
+                .shadow(color: .black.opacity(0.40), radius: 22, y: 14)
+
+                VStack(alignment: .leading, spacing: 8) {
                     Text(playlist.playlistName ?? "Playlist")
-                        .font(.title2.bold())
-                        .multilineTextAlignment(.center)
+                        .font(.system(size: 25, weight: .bold))
+                        .lineLimit(2)
+
                     if let description = playlist.playlistDescription, !description.isEmpty {
                         Text(description)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color.white.opacity(0.62))
+                            .lineLimit(3)
                     }
 
-                    HStack(spacing: 12) {
+                    HStack(spacing: 6) {
+                        if let platform = playlist.platform, !platform.isEmpty {
+                            Text(platform.capitalized)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Color.white.opacity(0.72))
+
+                            Text("•")
+                                .foregroundStyle(Color.white.opacity(0.38))
+                        }
+
+                        Text(tracks.count == 1 ? "1 track" : "\(tracks.count) tracks")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.52))
+                    }
+
+                    HStack(spacing: 16) {
                         Button {
                             if let first = tracks.first {
-                                session.queue = tracks
-                                session.currentIndex = 0
-                                session.requestStream(for: first)
-                                showPlayer = true
+                                session.downloadTrack(first)
                             }
                         } label: {
-                            Label("Play", systemImage: "play.fill")
+                            Image(systemName: "arrow.down.circle")
+                                .font(.system(size: 23, weight: .medium))
+                                .foregroundStyle(Color.white.opacity(0.82))
+                                .frame(width: 34, height: 40)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(lanePink)
+                        .buttonStyle(.plain)
+                        .disabled(tracks.isEmpty)
 
                         Menu {
                             Button("Delete playlist", systemImage: "trash", role: .destructive) {
@@ -1184,31 +1209,152 @@ struct PlaylistDetailScreen: View {
                             }
                         } label: {
                             Image(systemName: "ellipsis")
-                                .frame(width: 42, height: 42)
+                                .rotationEffect(.degrees(90))
+                                .font(.system(size: 22, weight: .semibold))
+                                .foregroundStyle(Color.white.opacity(0.82))
+                                .frame(width: 34, height: 40)
+                        }
+
+                        Spacer()
+
+                        Button {
+                            guard !tracks.isEmpty else { return }
+                            let list = tracks.shuffled()
+                            session.queue = list
+                            session.currentIndex = 0
+                            session.requestStream(for: list[0])
+                            showPlayer = true
+                        } label: {
+                            Image(systemName: "shuffle")
+                                .font(.system(size: 21, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 40, height: 40)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(tracks.isEmpty)
+
+                        Button {
+                            guard let first = tracks.first else { return }
+                            session.queue = tracks
+                            session.currentIndex = 0
+                            session.requestStream(for: first)
+                            showPlayer = true
+                        } label: {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.white)
+                                    .frame(width: 54, height: 54)
+
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 20, weight: .bold))
+                                    .foregroundStyle(.black)
+                                    .offset(x: 1)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(tracks.isEmpty)
+                    }
+                    .padding(.top, 8)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 28)
+
+                if loading {
+                    HStack {
+                        Spacer()
+                        ProgressView().tint(lanePink)
+                        Spacer()
+                    }
+                    .padding(.vertical, 32)
+                } else if tracks.isEmpty {
+                    EmptyLaneView(
+                        icon: "music.note.list",
+                        title: "Empty playlist",
+                        subtitle: "Tracks added to this playlist will appear here."
+                    )
+                    .padding(.top, 18)
+                } else {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
+                            Button {
+                                session.queue = tracks
+                                session.currentIndex = index
+                                session.requestStream(for: track)
+                                showPlayer = true
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Group {
+                                        if session.currentTrack?.id == track.id {
+                                            Image(systemName: "waveform")
+                                                .font(.system(size: 12, weight: .bold))
+                                                .foregroundStyle(lanePink)
+                                        } else {
+                                            Text("\(index + 1)")
+                                                .font(.system(size: 12, weight: .medium))
+                                                .foregroundStyle(Color.white.opacity(0.45))
+                                        }
+                                    }
+                                    .frame(width: 24)
+
+                                    ArtworkView(url: track.coverURL, size: 46, radius: 5)
+
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(track.title)
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .foregroundStyle(
+                                                session.currentTrack?.id == track.id ? lanePink : .white
+                                            )
+                                            .lineLimit(1)
+
+                                        Text(track.subtitle)
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(Color.white.opacity(0.56))
+                                            .lineLimit(1)
+                                    }
+
+                                    Spacer()
+
+                                    Menu {
+                                        Button("Play next", systemImage: "text.insert") {
+                                            session.playNext(track)
+                                        }
+                                        Button("Add to queue", systemImage: "text.badge.plus") {
+                                            session.addToQueue(track)
+                                        }
+                                        Button(
+                                            session.isFavorite(track) ? "Remove from favorites" : "Add to favorites",
+                                            systemImage: session.isFavorite(track) ? "heart.slash" : "heart"
+                                        ) {
+                                            session.toggleFavorite(track)
+                                        }
+                                        Button("Download", systemImage: "arrow.down.circle") {
+                                            session.downloadTrack(track)
+                                        }
+                                    } label: {
+                                        Image(systemName: "ellipsis")
+                                            .font(.system(size: 17, weight: .semibold))
+                                            .foregroundStyle(Color.white.opacity(0.62))
+                                            .frame(width: 34, height: 46)
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                                .frame(minHeight: 64)
+                            }
+                            .buttonStyle(.plain)
+
+                            Rectangle()
+                                .fill(Color.white.opacity(0.055))
+                                .frame(height: 1)
+                                .padding(.leading, 98)
                         }
                     }
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-                .listRowBackground(Color.clear)
-            }
-
-            if loading {
-                HStack {
-                    Spacer()
-                    ProgressView()
-                    Spacer()
-                }
-                .listRowBackground(Color.clear)
-            } else {
-                ForEach(tracks) { track in
-                    TrackRow(track: track, showPlayer: $showPlayer)
+                    .padding(.top, 10)
                 }
             }
+            .padding(.bottom, 28)
         }
-        .scrollContentBackground(.hidden)
-        .background(laneBackground)
-        .navigationTitle("Playlist")
+        .background(laneBackground.ignoresSafeArea())
+        .navigationTitle(playlist.playlistName ?? "Playlist")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             session.loadPlaylistTracks(playlist) { loaded in
