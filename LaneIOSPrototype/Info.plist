@@ -22,6 +22,9 @@
 <key>LSRequiresIPhoneOS</key><true/>
 <key>NSAppTransportSecurity</key>
 <dict>
+  <!-- Lane's Android build loads artwork/audio from several third-party CDNs.
+       Some of those endpoints still redirect through non-ATS-compatible hosts. -->
+  <key>NSAllowsArbitraryLoads</key><true/>
   <key>NSAllowsArbitraryLoadsForMedia</key><true/>
   <key>NSAllowsLocalNetworking</key><true/>
 </dict>
