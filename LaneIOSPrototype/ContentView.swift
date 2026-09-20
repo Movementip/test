@@ -1,8 +1,25 @@
 import SwiftUI
+import UIKit
 
 private let lanePink = Color(red: 1.0, green: 130.0 / 255.0, blue: 132.0 / 255.0)
 private let laneBackground = Color(red: 14.0 / 255.0, green: 14.0 / 255.0, blue: 14.0 / 255.0)
 private let laneCard = Color.white.opacity(0.07)
+
+private struct BundlePNG: View {
+    let name: String
+    var contentMode: ContentMode = .fit
+
+    var body: some View {
+        if let url = Bundle.main.url(forResource: name, withExtension: "png"),
+           let image = UIImage(contentsOfFile: url.path) {
+            Image(uiImage: image)
+                .resizable()
+                .aspectRatio(contentMode: contentMode)
+        } else {
+            Color.clear
+        }
+    }
+}
 
 struct ContentView: View {
     @EnvironmentObject private var session: LaneSession
@@ -106,6 +123,12 @@ private struct HomeScreen: View {
                             )
                         }
 
+                        BundlePNG(name: "lane_pro_banner", contentMode: .fill)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 108)
+                            .clipShape(RoundedRectangle(cornerRadius: 22))
+                            .padding(.horizontal, 16)
+
                         NavigationLink {
                             WaveScreen()
                         } label: {
@@ -153,9 +176,9 @@ private struct HomeHeader: View {
                 AvatarView(url: session.account?.avatarUrl, size: 42)
             }
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Lane")
-                    .font(.system(size: 26, weight: .black, design: .rounded))
+            VStack(alignment: .leading, spacing: 3) {
+                BundlePNG(name: "lane")
+                    .frame(width: 88, height: 22, alignment: .leading)
                 if let name = session.account?.displayedName, !name.isEmpty {
                     Text(name)
                         .font(.caption)
@@ -198,14 +221,8 @@ private struct TelegramLoginCard: View {
             TelegramLoginScreen()
         } label: {
             HStack(spacing: 16) {
-                ZStack {
-                    Circle()
-                        .fill(Color.blue.opacity(0.22))
-                        .frame(width: 52, height: 52)
-                    Image(systemName: "paperplane.fill")
-                        .font(.system(size: 24))
-                        .foregroundStyle(.blue)
-                }
+                BundlePNG(name: "telegram")
+                    .frame(width: 52, height: 52)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Sign in to Lane")
@@ -1250,14 +1267,8 @@ private struct TelegramLoginScreen: View {
         VStack(spacing: 24) {
             Spacer()
 
-            ZStack {
-                Circle()
-                    .fill(Color.blue.opacity(0.18))
-                    .frame(width: 116, height: 116)
-                Image(systemName: "paperplane.fill")
-                    .font(.system(size: 48))
-                    .foregroundStyle(.blue)
-            }
+            BundlePNG(name: "telegram")
+                .frame(width: 116, height: 116)
 
             VStack(spacing: 8) {
                 Text("Sign in with Telegram")
@@ -1628,6 +1639,16 @@ private struct CreatePlaylistSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    HStack {
+                        Spacer()
+                        BundlePNG(name: "lane_3d_logo_playlist")
+                            .frame(width: 120, height: 148)
+                        Spacer()
+                    }
+                    .listRowBackground(Color.clear)
+                }
+
                 Section("Playlist") {
                     TextField("Name", text: $name)
                     TextField("Description", text: $description, axis: .vertical)
@@ -1660,9 +1681,10 @@ private struct TelegramImportScreen: View {
         VStack(spacing: 20) {
             Spacer()
 
-            Image(systemName: "paperplane.circle.fill")
-                .font(.system(size: 82))
-                .foregroundStyle(.blue)
+            BundlePNG(name: "import_tracks_background_card", contentMode: .fill)
+                .frame(maxWidth: 330)
+                .frame(height: 99)
+                .clipShape(RoundedRectangle(cornerRadius: 20))
 
             Text("Import from Telegram")
                 .font(.title.bold())
@@ -1717,9 +1739,8 @@ private struct WaveScreen: View {
     var body: some View {
         VStack(spacing: 22) {
             Spacer()
-            Image(systemName: "waveform.circle.fill")
-                .font(.system(size: 90))
-                .foregroundStyle(lanePink)
+            BundlePNG(name: "lane_logo_3d_wave")
+                .frame(width: 150, height: 170)
             Text("Wave")
                 .font(.largeTitle.bold())
             Text("Build a continuous queue from your current track using Lane recommendations.")
