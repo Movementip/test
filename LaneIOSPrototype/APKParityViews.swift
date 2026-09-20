@@ -471,6 +471,147 @@ struct APKImportTracksCard: View {
     }
 }
 
+// MARK: - Import components recovered from Lane Android 1.4.7
+
+struct APKImportBackButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.left")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct APKImportPlatformButton: View {
+    let title: String
+    let asset: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 16) {
+                Text(title)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+
+                Spacer()
+
+                APKBundleImage(name: asset)
+                    .frame(width: 24, height: 24)
+                    .opacity(0.8)
+            }
+            .padding(.horizontal, 25)
+            .frame(height: 60)
+            .background(Color.black, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.white.opacity(0.20), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct APKImportOptionButton: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let accent: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 20) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+                    Image(systemName: icon)
+                        .font(.system(size: 27, weight: .medium))
+                        .foregroundStyle(accent)
+                }
+                .frame(width: 56, height: 56)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text(subtitle)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.white.opacity(0.70))
+                        .multilineTextAlignment(.leading)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct APKPrimaryButton: View {
+    let title: String
+    var loading = false
+    var enabled = true
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                if loading {
+                    ProgressView()
+                        .tint(.black)
+                }
+                Text(title)
+                    .font(.system(size: 16, weight: .bold))
+            }
+            .foregroundStyle(.black)
+            .frame(maxWidth: .infinity)
+            .frame(height: 52)
+            .background(apkPink.opacity(enabled ? 1 : 0.45), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled || loading)
+    }
+}
+
+struct APKPlaylistEmptyState: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "list.bullet")
+                .font(.system(size: 40, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.50))
+                .overlay(alignment: .bottomTrailing) {
+                    Image(systemName: "music.note")
+                        .font(.system(size: 30, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.55))
+                        .offset(x: 20, y: 10)
+                }
+                .padding(.bottom, 8)
+
+            Text("Playlist is empty")
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(.white)
+
+            Text("Add tracks to start listening to music at your own pace.")
+                .font(.system(size: 15))
+                .foregroundStyle(Color.white.opacity(0.60))
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 28)
+        .padding(.vertical, 38)
+    }
+}
+
 private struct APKRemoteImage: View {
     let url: String?
     var cornerRadius: CGFloat = 8

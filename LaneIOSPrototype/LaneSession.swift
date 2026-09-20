@@ -609,23 +609,72 @@ final class LaneSession: ObservableObject {
         }
 
         Task { @MainActor in
-            do {
-                await configureAPI()
-                let result: PaginatedResult<TrackData> = try await LaneAPI.shared.playlistTracks(
-                    token: token,
-                    playlistId: id
-                )
-                let tracks: [TrackCandidate] = result.items.map {
-                    TrackCandidate($0, refID: id)
+            await configureAPI()
+
+            // Android starts these two reads together. The tracks endpoint is
+            // 1-based; page=0 silently returns an empty page on the Lane API.
+            async let detailsRequest = try? LaneAPI.shared.playlist(
+                token: token,
+                playlistId: id,
+                platform: playlist.platform
+            )
+            async let pageRequest = try? LaneAPI.shared.playlistTracks(
+                token: token,
+                playlistId: id,
+                page: 1,
+                pageSize: 50
+            )
+
+            let (details, page) = await (detailsRequest, pageRequest)
+            if let page, !page.items.isEmpty {
+                var items = page.items
+                if let totalPages = page.totalPages, totalPages > 1 {
+                    for pageNumber in 2...totalPages {
+                        guard let next = try? await LaneAPI.shared.playlistTracks(
+                            token: token,
+                            playlistId: id,
+                            page: pageNumber,
+                            pageSize: 50
+                        ) else { break }
+                        items.append(contentsOf: next.items)
+                    }
                 }
-                completion(tracks)
-            } catch {
-                output = error.localizedDescription
-                let fallback: [TrackCandidate] = playlist.playlistTracks?.map {
-                    TrackCandidate($0, refID: id)
-                } ?? []
-                completion(fallback)
+                completion(items.map { TrackCandidate($0, refID: id) })
+                return
             }
+
+            let resolvedPlaylist = details ?? playlist
+            if let embedded = resolvedPlaylist.playlistTracks, !embedded.isEmpty {
+                completion(embedded.map { TrackCandidate($0, refID: id) })
+                return
+            }
+
+            // Match Android's offline/server fallback: resolve the playlist's
+            // IDs through the read-only POST /user/tracks in pages of 50.
+            let ids = resolvedPlaylist.playlistTracksIds ?? playlist.playlistTracksIds ?? []
+            guard !ids.isEmpty else {
+                completion([])
+                return
+            }
+
+            var loaded: [TrackData] = []
+            for start in stride(from: 0, to: ids.count, by: 50) {
+                let end = min(start + 50, ids.count)
+                if let batch = try? await LaneAPI.shared.tracksByIds(
+                    token: token,
+                    ids: Array(ids[start..<end]),
+                    prefetch: false
+                ) {
+                    loaded.append(contentsOf: batch)
+                }
+            }
+
+            let byID = Dictionary(
+                loaded.compactMap { track in track.songId.map { ($0, track) } },
+                uniquingKeysWith: { first, _ in first }
+            )
+            let ordered = ids.compactMap { byID[$0] }
+            completion(ordered.map { TrackCandidate($0, refID: id) })
         }
     }
 

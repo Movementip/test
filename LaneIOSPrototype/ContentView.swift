@@ -1291,6 +1291,7 @@ private struct PlaylistRow: View {
 
 struct PlaylistDetailScreen: View {
     @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
     let playlist: LanePlaylist
     @Binding var showPlayer: Bool
 
@@ -1343,9 +1344,11 @@ struct PlaylistDetailScreen: View {
                                 session.downloadTrack(first)
                             }
                         } label: {
-                            Image(systemName: "arrow.down.circle")
-                                .font(.system(size: 23, weight: .medium))
-                                .foregroundStyle(Color.white.opacity(0.82))
+                            APKTemplateIcon(
+                                name: "download_playlist",
+                                size: 28,
+                                color: Color.white.opacity(0.82)
+                            )
                                 .frame(width: 34, height: 40)
                         }
                         .buttonStyle(.plain)
@@ -1415,11 +1418,7 @@ struct PlaylistDetailScreen: View {
                     }
                     .padding(.vertical, 32)
                 } else if tracks.isEmpty {
-                    EmptyLaneView(
-                        icon: "music.note.list",
-                        title: "Empty playlist",
-                        subtitle: "Tracks added to this playlist will appear here."
-                    )
+                    APKPlaylistEmptyState()
                     .padding(.top, 18)
                 } else {
                     LazyVStack(spacing: 0) {
@@ -1502,8 +1501,24 @@ struct PlaylistDetailScreen: View {
             .padding(.bottom, 28)
         }
         .background(laneBackground.ignoresSafeArea())
-        .navigationTitle(playlist.playlistName ?? "Playlist")
-        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack(spacing: 0) {
+                APKImportBackButton { dismiss() }
+
+                Text(playlist.playlistName ?? "Playlist")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity)
+
+                Color.clear
+                    .frame(width: 44, height: 44)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 52)
+            .background(laneBackground.opacity(0.96))
+        }
         .onAppear {
             session.loadPlaylistTracks(playlist) { loaded in
                 tracks = loaded
@@ -2510,6 +2525,28 @@ private enum MusicImportPlatform: String, CaseIterable, Identifiable {
         case .yandex: return "waveform"
         }
     }
+
+    var asset: String {
+        switch self {
+        case .spotify: return "ic_spotify"
+        case .soundCloud: return "ic_soundcloud"
+        case .telegram: return "telegram"
+        case .yandex: return "ic_yandex_music"
+        }
+    }
+
+    var displayName: String {
+        self == .yandex ? "Yandex Music" : rawValue
+    }
+
+    var accent: Color {
+        switch self {
+        case .spotify: return Color(red: 0.12, green: 0.84, blue: 0.38)
+        case .soundCloud: return Color(red: 1.0, green: 0.33, blue: 0.0)
+        case .telegram: return Color(red: 0.12, green: 0.65, blue: 0.92)
+        case .yandex: return Color(red: 1.0, green: 0.76, blue: 0.05)
+        }
+    }
 }
 
 private enum MusicImportKind: String, CaseIterable, Identifiable {
@@ -2519,9 +2556,18 @@ private enum MusicImportKind: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+private enum MusicImportStep: Equatable {
+    case platforms
+    case options
+    case input
+    case preview
+}
+
 private struct ImportTracksScreen: View {
     @EnvironmentObject private var session: LaneSession
     @Environment(\.openURL) private var openURL
+    @Environment(\.dismiss) private var dismiss
+    @State private var step: MusicImportStep = .platforms
     @State private var platform: MusicImportPlatform = .spotify
     @State private var importKind: MusicImportKind = .playlist
     @State private var sourceValue = ""
@@ -2535,106 +2581,253 @@ private struct ImportTracksScreen: View {
     @State private var loading = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                BundlePNG(name: "import_tracks_background_card", contentMode: .fill)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 112)
-                    .clipShape(RoundedRectangle(cornerRadius: 20))
+        ZStack {
+            laneBackground.ignoresSafeArea()
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Import your tracks")
-                        .font(.title.bold())
-                    Text("Transfer music from Spotify, SoundCloud, Telegram or Yandex to a Lane playlist.")
-                        .foregroundStyle(.secondary)
-                }
+            RadialGradient(
+                colors: [platform.accent.opacity(step == .platforms ? 0.05 : 0.18), .clear],
+                center: .top,
+                startRadius: 0,
+                endRadius: 520
+            )
+            .ignoresSafeArea()
 
-                sourceCard
+            VStack(spacing: 0) {
+                importTopBar
 
-                if let preview {
-                    importPreview(preview)
-                }
-
-                if !message.isEmpty {
-                    Text(message)
-                        .font(.subheadline)
-                        .foregroundStyle(message.hasPrefix("Imported") ? Color.green : lanePink)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(14)
-                        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14))
-                        .textSelection(.enabled)
+                ScrollView {
+                    Group {
+                        switch step {
+                        case .platforms:
+                            platformSelection
+                        case .options:
+                            importOptions
+                        case .input:
+                            platformInput
+                        case .preview:
+                            if let preview {
+                                importPreview(preview)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 32)
                 }
             }
-            .padding(16)
-            .padding(.bottom, 28)
         }
         .onAppear {
             if targetPlaylistID.isEmpty {
                 targetPlaylistID = session.serverPlaylists.first?.playlistId ?? ""
             }
         }
-        .onChange(of: platform) { _ in
-            resetPreview()
-            importKind = .playlist
-        }
-        .onChange(of: importKind) { _ in resetPreview() }
-        .background(laneBackground)
-        .navigationTitle("Import")
-        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
     }
 
-    private var sourceCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Source")
-                .font(.headline)
+    private var importTopBar: some View {
+        HStack {
+            APKImportBackButton(action: navigateBack)
 
-            Picker("Platform", selection: $platform) {
+            Spacer()
+
+            if step == .preview {
+                Text("Import preview")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+
+            Spacer()
+
+            Color.clear.frame(width: 44, height: 44)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 52)
+    }
+
+    private var platformSelection: some View {
+        VStack(spacing: 0) {
+            Spacer().frame(height: 26)
+
+            AvatarView(url: session.account?.avatarUrl, size: 80)
+
+            Spacer().frame(height: 16)
+
+            Text(session.account?.displayedName ?? "Lane")
+                .font(.system(size: 20, weight: .bold))
+
+            if let username = session.account?.userName, !username.isEmpty {
+                Text("@\(username)")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.white.opacity(0.60))
+                    .padding(.top, 2)
+            }
+
+            Spacer().frame(height: 54)
+
+            Text("Import your tracks")
+                .font(.system(size: 27, weight: .bold))
+                .multilineTextAlignment(.center)
+
+            Text("Music is always with you, regardless of the platform")
+                .font(.system(size: 15))
+                .foregroundStyle(Color.white.opacity(0.62))
+                .multilineTextAlignment(.center)
+                .padding(.top, 8)
+
+            VStack(spacing: 16) {
                 ForEach(MusicImportPlatform.allCases) { item in
-                    Label(item.rawValue, systemImage: item.icon).tag(item)
+                    APKImportPlatformButton(
+                        title: item.displayName,
+                        asset: item.asset
+                    ) {
+                        platform = item
+                        importKind = .playlist
+                        resetPreview()
+                        step = .options
+                    }
                 }
             }
-            .pickerStyle(.menu)
-            .tint(lanePink)
+            .padding(.top, 32)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var importOptions: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Spacer().frame(height: 22)
+
+            (Text("What do you want to\nimport from ") +
+                Text(platform.displayName).foregroundColor(platform.accent) +
+                Text("?"))
+                .font(.system(size: 27, weight: .bold))
+                .foregroundStyle(.white)
+
+            VStack(spacing: 24) {
+                if platform == .telegram {
+                    APKImportOptionButton(
+                        icon: "music.note.list",
+                        title: "Tracks",
+                        subtitle: "Transfer your tracks via the official Lane Telegram bot",
+                        accent: platform.accent
+                    ) {
+                        importKind = .playlist
+                        step = .input
+                    }
+                } else {
+                    APKImportOptionButton(
+                        icon: "heart",
+                        title: "Favorite tracks",
+                        subtitle: "Transfer your liked tracks",
+                        accent: platform.accent
+                    ) {
+                        importKind = .liked
+                        step = .input
+                    }
+
+                    APKImportOptionButton(
+                        icon: "music.note.list",
+                        title: "Playlist",
+                        subtitle: platform == .soundCloud
+                            ? "Add tracks from any SoundCloud playlist"
+                            : "Add tracks from any playlist",
+                        accent: platform.accent
+                    ) {
+                        importKind = .playlist
+                        step = .input
+                    }
+                }
+            }
+            .padding(.top, 48)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var platformInput: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Spacer().frame(height: 22)
+
+            Text(inputTitle)
+                .font(.system(size: 27, weight: .bold))
+                .foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer().frame(height: 38)
 
             if platform == .telegram {
                 telegramImportControls
             } else {
-                Picker("Import", selection: $importKind) {
-                    ForEach(MusicImportKind.allCases) { item in
-                        Text(item.rawValue).tag(item)
+                VStack(spacing: 14) {
+                    if platform == .spotify, importKind == .liked {
+                        tokenField("Spotify bearer token", text: $spotifyBearerToken)
+                        tokenField("Spotify client token", text: $spotifyClientToken)
+
+                        Text("Use the same Spotify session tokens as the Android importer.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.white.opacity(0.55))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        TextField(sourcePlaceholder, text: $sourceValue)
+                            .font(.system(size: 16, weight: .medium))
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .padding(.horizontal, 16)
+                            .frame(height: 56)
+                            .background(Color.black, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .stroke(platform.accent.opacity(0.70), lineWidth: 1)
+                            }
                     }
-                }
-                .pickerStyle(.segmented)
 
-                if platform == .spotify, importKind == .liked {
-                    SecureField("Spotify bearer token", text: $spotifyBearerToken)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    SecureField("Spotify client token", text: $spotifyClientToken)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    Text("These are the same two session tokens used by the Android importer.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    TextField(sourcePlaceholder, text: $sourceValue)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                    APKPrimaryButton(
+                        title: loading ? "Loading preview…" : "Continue",
+                        loading: loading,
+                        enabled: canRequestPreview,
+                        action: requestPreview
+                    )
                 }
+            }
 
-                Button {
-                    requestPreview()
-                } label: {
-                    Label(loading ? "Loading preview…" : "Preview import", systemImage: "magnifyingglass")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(lanePink)
-                .disabled(!canRequestPreview || loading)
+            if !message.isEmpty {
+                Text(message)
+                    .font(.system(size: 13))
+                    .foregroundStyle(lanePink)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14))
+                    .padding(.top, 20)
+                    .textSelection(.enabled)
             }
         }
-        .padding(16)
-        .background(laneCard, in: RoundedRectangle(cornerRadius: 18))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var inputTitle: String {
+        if platform == .telegram {
+            return "Transfer tracks with the Lane Telegram bot"
+        }
+        if importKind == .liked {
+            switch platform {
+            case .spotify: return "Connect Spotify to import your favorite tracks"
+            case .soundCloud: return "Enter the URL of your SoundCloud profile"
+            case .yandex: return "Enter the URL of your Yandex Music favorite playlist"
+            case .telegram: return ""
+            }
+        }
+        return "Enter the URL of the\n\(platform.displayName) playlist"
+    }
+
+    private func tokenField(_ title: String, text: Binding<String>) -> some View {
+        SecureField(title, text: text)
+            .font(.system(size: 16, weight: .medium))
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .padding(.horizontal, 16)
+            .frame(height: 56)
+            .background(Color.black, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(platform.accent.opacity(0.70), lineWidth: 1)
+            }
     }
 
     private var sourcePlaceholder: String {
@@ -2660,15 +2853,12 @@ private struct ImportTracksScreen: View {
     @ViewBuilder
     private var telegramImportControls: some View {
         if telegramCode.isEmpty {
-            Button {
-                startTelegramImport()
-            } label: {
-                Label(loading ? "Requesting code…" : "Get Telegram import code", systemImage: "paperplane.fill")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(lanePink)
-            .disabled(session.isGuest || loading)
+            APKPrimaryButton(
+                title: loading ? "Requesting code…" : "Get Telegram import code",
+                loading: loading,
+                enabled: !session.isGuest,
+                action: startTelegramImport
+            )
         } else {
             let command = "/import \(telegramCode)"
 
@@ -2689,22 +2879,30 @@ private struct ImportTracksScreen: View {
                 }
             }
             .padding(12)
-            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+            .background(Color.black, in: RoundedRectangle(cornerRadius: 14))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(platform.accent.opacity(0.45), lineWidth: 1)
+            }
 
-            HStack {
-                Button("Open bot") {
+            HStack(spacing: 12) {
+                Button {
                     if let url = URL(string: "https://t.me/lane_music_bot") {
                         openURL(url)
                     }
+                } label: {
+                    Text("Open bot")
+                        .font(.system(size: 15, weight: .bold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 48)
                 }
                 .buttonStyle(.bordered)
 
-                Button(loading ? "Checking…" : "I sent the command") {
-                    finishTelegramImport()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(lanePink)
-                .disabled(loading)
+                APKPrimaryButton(
+                    title: loading ? "Checking…" : "I sent it",
+                    loading: loading,
+                    action: finishTelegramImport
+                )
             }
         }
     }
@@ -2748,15 +2946,22 @@ private struct ImportTracksScreen: View {
                 }
                 .pickerStyle(.menu)
 
-                Button {
-                    importPreviewTracks()
-                } label: {
-                    Label(loading ? "Importing…" : "Import to Lane", systemImage: "square.and.arrow.down")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(lanePink)
-                .disabled(targetPlaylistID.isEmpty || importTrackIDs.isEmpty || loading)
+                APKPrimaryButton(
+                    title: loading ? "Importing…" : "Import to Lane",
+                    loading: loading,
+                    enabled: !targetPlaylistID.isEmpty && !importTrackIDs.isEmpty,
+                    action: importPreviewTracks
+                )
+            }
+
+            if !message.isEmpty {
+                Text(message)
+                    .font(.system(size: 13))
+                    .foregroundStyle(message.hasPrefix("Imported") ? Color.green : lanePink)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14))
+                    .textSelection(.enabled)
             }
         }
         .padding(16)
@@ -2775,12 +2980,26 @@ private struct ImportTracksScreen: View {
         message = ""
     }
 
+    private func navigateBack() {
+        switch step {
+        case .platforms:
+            dismiss()
+        case .options:
+            step = .platforms
+        case .input:
+            step = .options
+        case .preview:
+            step = .input
+        }
+    }
+
     private func acceptPreview(_ value: LanePlaylist) async {
         preview = value
         previewTracks = await session.tracksForImportPreview(value)
         if targetPlaylistID.isEmpty {
             targetPlaylistID = session.serverPlaylists.first?.playlistId ?? ""
         }
+        step = .preview
     }
 
     private func requestPreview() {

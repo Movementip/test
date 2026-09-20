@@ -339,13 +339,22 @@ actor LaneAPI {
         let upperMethod = method.uppercased()
         let normalizedPath = "/" + path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
-        // Most Lane reads are GETs, but /user/tracks is a read-only POST in
-        // Android 1.4.7. It must be allowed to fail over too: on some networks
-        // one regional host is reachable but answers this endpoint with
-        // INVALID_TRACK_IDS_BODY while the other host serves it normally.
+        // Most Lane reads are GETs, but several legacy mutations are GETs too.
+        // Exclude them explicitly so regional retry can never perform an action
+        // twice. /user/tracks is the only read-only POST used by Android 1.4.7.
+        let mutatingGETPaths: Set<String> = [
+            "/createUserOrLogin",
+            "/delete-playlist",
+            "/import/telegram/start",
+            "/share/create",
+            "/user/history-bump-item",
+            "/user/history-delete-item",
+            "/user/playlist/add",
+            "/user/playlist/remove-track"
+        ]
         let readOnlyPOSTPaths: Set<String> = ["/user/tracks"]
         let canFailOverRegionalHost =
-            upperMethod == "GET" ||
+            (upperMethod == "GET" && !mutatingGETPaths.contains(normalizedPath)) ||
             (upperMethod == "POST" && readOnlyPOSTPaths.contains(normalizedPath))
 
         var candidates: [URL] = [base]
@@ -769,15 +778,16 @@ actor LaneAPI {
         try await request(path: "/user/recent", token: token)
     }
 
-    func playlist(token: String, playlistId: String, platform: String? = nil) async throws -> APIResult {
-        try await request(
+    func playlist(token: String, playlistId: String, platform: String? = nil) async throws -> LanePlaylist {
+        try await decoded(
+            LanePlaylist.self,
             path: "/playlist/\(playlistId)",
             token: token,
             query: [.init(name: "platform", value: platform)]
         )
     }
 
-    func playlistTracks(token: String, playlistId: String, page: Int = 0, pageSize: Int = 100) async throws -> PaginatedResult<TrackData> {
+    func playlistTracks(token: String, playlistId: String, page: Int = 1, pageSize: Int = 50) async throws -> PaginatedResult<TrackData> {
         try await decoded(
             PaginatedResult<TrackData>.self,
             path: "/playlist/\(playlistId)/tracks",
@@ -1037,7 +1047,8 @@ actor LaneAPI {
             path: "/user/import/preview",
             token: token,
             query: [
-                .init(name: "platform", value: platform),
+                // Android sends Platform.name.lowercase(), not the display label.
+                .init(name: "platform", value: platform.lowercased()),
                 .init(name: "spotifyBearerToken", value: spotifyBearerToken),
                 .init(name: "spotifyClientToken", value: spotifyClientToken),
                 .init(name: "spotifyPlaylistId", value: spotifyPlaylistId),
