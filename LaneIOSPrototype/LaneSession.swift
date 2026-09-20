@@ -35,6 +35,28 @@ final class LaneSession: ObservableObject {
     @Published var history: [TrackCandidate] = []
     @Published var downloadedTrackIDs: Set<String> = []
 
+    func fetchArtistDetail(_ artist: LaneArtist) async -> LaneArtist {
+        guard let id = artist.id, !id.isEmpty else { return artist }
+        do {
+            await configureAPI()
+            return try await LaneAPI.shared.artistDetail(token: token, artistId: id)
+        } catch {
+            output = error.localizedDescription
+            return artist
+        }
+    }
+
+    func fetchAlbumDetail(_ album: LaneAlbum) async -> LaneAlbum {
+        guard let id = album.id, !id.isEmpty else { return album }
+        do {
+            await configureAPI()
+            return try await LaneAPI.shared.albumDetail(token: token, albumId: id)
+        } catch {
+            output = error.localizedDescription
+            return album
+        }
+    }
+
     // MARK: Social
     @Published var friends: [UserInfoDTO] = []
     @Published var userSearchResults: [UserInfoDTO] = []
@@ -46,9 +68,16 @@ final class LaneSession: ObservableObject {
     @Published var queue: [TrackCandidate] = []
     @Published var currentIndex: Int?
     @Published var isPlaying = false
+    @Published var isBuffering = false
     @Published var streamURL = ""
+    @Published var playbackPosition: Double = 0
+    @Published var playbackDuration: Double = 0
+    @Published var playerError = ""
 
     private var player: AVPlayer?
+    private var playerItemStatusObserver: NSKeyValueObservation?
+    private var playerTimeControlObserver: NSKeyValueObservation?
+    private var periodicTimeObserver: Any?
 
     var isGuest: Bool {
         token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -543,9 +572,17 @@ final class LaneSession: ObservableObject {
             defer { busy = false }
             do {
                 await configureAPI()
-                comments = try await LaneAPI.shared.comments(token: token, trackId: id).items
+                comments = try await LaneAPI.shared.comments(
+                    token: token,
+                    trackId: id,
+                    page: 0,
+                    pageSize: 30,
+                    sortBy: "Relevance"
+                ).items
+                output = comments.isEmpty ? "No comments on this track yet." : "Loaded \(comments.count) comments."
             } catch {
-                output = error.localizedDescription
+                comments = []
+                output = "Comments error: \(error.localizedDescription)"
             }
         }
     }
@@ -635,6 +672,9 @@ final class LaneSession: ObservableObject {
 
     func requestStream(for track: TrackCandidate) {
         currentTrack = track
+        playerError = ""
+        playbackPosition = 0
+        playbackDuration = parseDuration(track.duration) ?? 0
 
         if let index = queue.firstIndex(of: track) {
             currentIndex = index
@@ -646,11 +686,15 @@ final class LaneSession: ObservableObject {
         }
 
         guard let trackID = track.trackID, !trackID.isEmpty else {
-            output = "Track has no songId"
+            playerError = "Track has no songId"
+            output = playerError
+            isPlaying = false
             return
         }
 
         busy = true
+        isBuffering = true
+
         Task {
             defer { busy = false }
             do {
@@ -661,30 +705,159 @@ final class LaneSession: ObservableObject {
                     refId: track.refID,
                     quality: streamQuality
                 )
+
                 streamURL = result.url
-                play(urlString: result.url)
+                try play(urlString: result.url)
             } catch {
-                output = error.localizedDescription
+                isBuffering = false
+                isPlaying = false
+                playerError = error.localizedDescription
+                output = "Playback error: \(error.localizedDescription)"
             }
         }
     }
 
-    private func play(urlString: String) {
-        guard let url = URL(string: urlString) else {
-            output = "Invalid stream URL"
-            return
+    private func normalizedStreamURL(_ raw: String) -> URL? {
+        let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let direct = URL(string: clean), direct.scheme != nil {
+            return direct
         }
 
-        do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
-            try AVAudioSession.sharedInstance().setActive(true)
-        } catch {
-            output = error.localizedDescription
+        if clean.hasPrefix("//") {
+            return URL(string: "https:" + clean)
         }
 
-        player = AVPlayer(url: url)
-        player?.play()
-        isPlaying = true
+        if let encoded = clean.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+           let url = URL(string: encoded),
+           url.scheme != nil {
+            return url
+        }
+
+        return nil
+    }
+
+    private func teardownPlayerObservers() {
+        playerItemStatusObserver?.invalidate()
+        playerItemStatusObserver = nil
+
+        playerTimeControlObserver?.invalidate()
+        playerTimeControlObserver = nil
+
+        if let periodicTimeObserver, let player {
+            player.removeTimeObserver(periodicTimeObserver)
+        }
+        periodicTimeObserver = nil
+    }
+
+    private func play(urlString: String) throws {
+        guard let url = normalizedStreamURL(urlString) else {
+            throw NSError(
+                domain: "LanePlayer",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Lane returned an invalid stream URL"]
+            )
+        }
+
+        teardownPlayerObservers()
+
+        try AVAudioSession.sharedInstance().setCategory(
+            .playback,
+            mode: .default,
+            options: [.allowAirPlay, .allowBluetoothA2DP]
+        )
+        try AVAudioSession.sharedInstance().setActive(true)
+
+        // Android Lane resolves the URL and hands it to Media3. Supplying the
+        // same client identity helps CDN endpoints which check the media client.
+        let headers = [
+            "User-Agent": "LaneMusic/1.0 (Android; Mobile)",
+            "Accept": "*/*",
+            "Accept-Language": Locale.current.language.languageCode?.identifier ?? "en"
+        ]
+
+        let asset = AVURLAsset(
+            url: url,
+            options: ["AVURLAssetHTTPHeaderFieldsKey": headers]
+        )
+        let item = AVPlayerItem(asset: asset)
+        let newPlayer = AVPlayer(playerItem: item)
+        newPlayer.automaticallyWaitsToMinimizeStalling = true
+        player = newPlayer
+
+        playerItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+            Task { @MainActor in
+                guard let self else { return }
+
+                switch item.status {
+                case .readyToPlay:
+                    self.playerError = ""
+                    self.isBuffering = false
+
+                    let seconds = item.duration.seconds
+                    if seconds.isFinite && seconds > 0 {
+                        self.playbackDuration = seconds
+                    }
+
+                    self.player?.play()
+
+                case .failed:
+                    self.isBuffering = false
+                    self.isPlaying = false
+                    let detail = item.error?.localizedDescription ?? "Unable to play this stream"
+                    self.playerError = detail
+                    self.output = "Playback error: \(detail)"
+
+                case .unknown:
+                    self.isBuffering = true
+
+                @unknown default:
+                    break
+                }
+            }
+        }
+
+        playerTimeControlObserver = newPlayer.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
+            Task { @MainActor in
+                guard let self else { return }
+
+                switch player.timeControlStatus {
+                case .playing:
+                    self.isPlaying = true
+                    self.isBuffering = false
+                case .waitingToPlayAtSpecifiedRate:
+                    self.isPlaying = false
+                    self.isBuffering = true
+                case .paused:
+                    self.isPlaying = false
+                @unknown default:
+                    self.isPlaying = false
+                }
+
+                self.updatePlaybackState(self.isPlaying)
+            }
+        }
+
+        periodicTimeObserver = newPlayer.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
+            queue: .main
+        ) { [weak self] time in
+            Task { @MainActor in
+                guard let self else { return }
+                let seconds = time.seconds
+                if seconds.isFinite {
+                    self.playbackPosition = max(0, seconds)
+                }
+
+                if let duration = self.player?.currentItem?.duration.seconds,
+                   duration.isFinite,
+                   duration > 0 {
+                    self.playbackDuration = duration
+                }
+            }
+        }
+
+        newPlayer.play()
 
         if let currentTrack {
             history.removeAll { $0.id == currentTrack.id }
@@ -696,6 +869,33 @@ final class LaneSession: ObservableObject {
         }
 
         updateNowPlaying()
+    }
+
+    func seek(to seconds: Double) {
+        guard let player, seconds.isFinite else { return }
+
+        let target = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        playbackPosition = max(0, seconds)
+    }
+
+    private func parseDuration(_ raw: String?) -> Double? {
+        guard let raw, !raw.isEmpty else { return nil }
+
+        if let direct = Double(raw), direct > 0 {
+            // Backends sometimes return milliseconds and sometimes seconds.
+            return direct > 20_000 ? direct / 1000.0 : direct
+        }
+
+        let parts = raw.split(separator: ":").compactMap { Double($0) }
+        if parts.count == 2 {
+            return parts[0] * 60 + parts[1]
+        }
+        if parts.count == 3 {
+            return parts[0] * 3600 + parts[1] * 60 + parts[2]
+        }
+
+        return nil
     }
 
     func pause() {
@@ -716,8 +916,12 @@ final class LaneSession: ObservableObject {
 
     func stop() {
         player?.pause()
+        teardownPlayerObservers()
         player = nil
         isPlaying = false
+        isBuffering = false
+        playbackPosition = 0
+        playbackDuration = 0
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
 
