@@ -145,10 +145,20 @@ actor LaneAPI {
         _ request: URLRequest,
         directTimeout: TimeInterval
     ) async throws -> (Data, HTTPURLResponse) {
+        let isBNITSigned = request.value(forHTTPHeaderField: "X-Core-Token") != nil
+
         // This is the route Android 1.4 uses in Russian time zones. Going to
         // the resolved RU edge first avoids the long system-DNS stall seen on
         // affected mobile providers. TLS still validates ru.laneapi.com.
         if request.url?.host == "ru.laneapi.com" {
+            if isBNITSigned {
+                let direct = try await AndroidNetworkTransport.data(
+                    for: request,
+                    timeout: directTimeout
+                )
+                return (direct.data, direct.response)
+            }
+
             if let direct = try? await AndroidNetworkTransport.data(
                 for: request,
                 timeout: directTimeout
@@ -164,7 +174,12 @@ actor LaneAPI {
             }
             return (data, http)
         } catch {
-            guard signingConfiguration.mode == .official else { throw error }
+            // Never reuse BNIT headers on a second transport. LaneAPI's outer
+            // safe-read loop rebuilds and signs a fresh request. Mutations do
+            // not retry automatically because their commit state is unknown.
+            guard signingConfiguration.mode == .official, !isBNITSigned else {
+                throw error
+            }
             let direct = try await AndroidNetworkTransport.data(
                 for: request,
                 timeout: directTimeout
@@ -478,10 +493,13 @@ actor LaneAPI {
                         return result
                     }
 
+                    let replayRejected = http.statusCode == 401 &&
+                        result.pretty.localizedCaseInsensitiveContains("REPLAY_ATTACK_DETECTED")
                     let transient = http.statusCode == 408 ||
                         http.statusCode == 425 ||
                         http.statusCode == 429 ||
-                        (500...599).contains(http.statusCode)
+                        (500...599).contains(http.statusCode) ||
+                        (canFailOverRegionalHost && replayRejected)
                     shouldRetryRound = shouldRetryRound || transient
 
                     // Safe reads may move to the other regional edge. Mutation

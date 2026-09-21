@@ -41,8 +41,14 @@ enum AndroidNetworkTransport {
 
         let addresses = try await resolve(host: host)
         var lastError: Error = URLError(.cannotFindHost)
+        let isBNITSigned = request.value(forHTTPHeaderField: "X-Core-Token") != nil
+        let attemptAddresses = isBNITSigned ? Array(addresses.prefix(1)) : addresses
 
-        for address in addresses {
+        // A BNIT signature is single-use. If an edge receives the request but
+        // the response is lost, sending the same bytes to another resolved IP
+        // triggers REPLAY_ATTACK_DETECTED. Safe API retries are re-signed by
+        // LaneAPI instead; mutations remain single-shot.
+        for address in attemptAddresses {
             do {
                 return try await DirectHTTPSOperation.run(
                     request: request,
