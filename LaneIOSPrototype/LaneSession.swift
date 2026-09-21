@@ -856,6 +856,25 @@ final class LaneSession: ObservableObject {
         return url
     }
 
+    func searchPlaylistInviteUsers(_ query: String) async throws -> [UserInfoDTO] {
+        await configureAPI()
+        return try await LaneAPI.shared.userSearch(token: token, query: query)
+    }
+
+    func invitePlaylistUsers(_ userIds: [String], to playlist: LanePlaylist) async throws {
+        guard let id = playlist.playlistId, !userIds.isEmpty else {
+            throw LaneAPIError.invalidURL
+        }
+        await configureAPI()
+        let result = try await LaneAPI.shared.invitePlaylistUsers(
+            token: token,
+            playlistId: id,
+            userIds: userIds
+        )
+        status = result.status
+        output = result.pretty
+    }
+
     func addTrack(_ track: TrackCandidate, to playlist: LanePlaylist) {
         guard let playlistID = playlist.playlistId, let trackID = track.trackID else { return }
         Task {

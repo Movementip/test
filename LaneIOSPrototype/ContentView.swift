@@ -1501,6 +1501,7 @@ struct PlaylistDetailScreen: View {
     @State private var actionTrack: TrackCandidate?
     @State private var showPlaylistActions = false
     @State private var showEditPlaylist = false
+    @State private var showInvitePlaylist = false
     @State private var shareItem: LaneShareURL?
     @State private var actionError: String?
     @State private var editedName: String?
@@ -1666,6 +1667,15 @@ struct PlaylistDetailScreen: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 28)
 
+                if let actionError {
+                    Text(actionError)
+                        .font(.system(size: 13))
+                        .foregroundStyle(lanePink)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 12)
+                }
+
                 if loading {
                     HStack {
                         Spacer()
@@ -1745,14 +1755,6 @@ struct PlaylistDetailScreen: View {
                     .padding(.top, 10)
                 }
 
-                if let actionError {
-                    Text(actionError)
-                        .font(.system(size: 13))
-                        .foregroundStyle(lanePink)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 20)
-                        .padding(.top, 12)
-                }
             }
             .padding(.bottom, 28)
         }
@@ -1813,6 +1815,11 @@ struct PlaylistDetailScreen: View {
                         showEditPlaylist = true
                     }
                 },
+                onInvite: {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        showInvitePlaylist = true
+                    }
+                },
                 onShare: { sharePlaylist() },
                 onToggleVisibility: { togglePlaylistVisibility() },
                 onSave: { savePlaylist() },
@@ -1835,6 +1842,10 @@ struct PlaylistDetailScreen: View {
                     editedDescription = description
                 }
             )
+        }
+        .sheet(isPresented: $showInvitePlaylist) {
+            APKInvitePlaylistUsersSheet(playlist: playlist)
+                .environmentObject(session)
         }
         .sheet(item: $shareItem) { item in
             LaneShareActivitySheet(url: item.url)
@@ -1949,6 +1960,179 @@ private struct APKEditPlaylistSheet: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("Cancel") { dismiss() }
                 }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .presentationDetents([.large])
+    }
+}
+
+private struct APKInvitePlaylistUsersSheet: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
+    let playlist: LanePlaylist
+
+    @State private var query = ""
+    @State private var results: [UserInfoDTO] = []
+    @State private var selectedIDs: Set<String> = []
+    @State private var searching = false
+    @State private var submitting = false
+    @State private var errorMessage: String?
+    @State private var shareItem: LaneShareURL?
+
+    private var people: [UserInfoDTO] {
+        let source = query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? session.friends : results
+        let excluded = Set(playlist.collaboratorIds ?? [])
+        return source.filter { user in
+            guard let id = user.laneId else { return false }
+            return id != session.account?.laneId && !excluded.contains(id)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search people", text: $query)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+                .padding(.horizontal, 14)
+                .frame(height: 48)
+                .background(laneCard, in: RoundedRectangle(cornerRadius: 14))
+                .padding(16)
+
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        Button {
+                            Task {
+                                do {
+                                    let url = try await session.sharePlaylist(playlist)
+                                    shareItem = LaneShareURL(url: url)
+                                } catch {
+                                    errorMessage = error.localizedDescription
+                                }
+                            }
+                        } label: {
+                            Label("Invite by link", systemImage: "link")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .frame(height: 52)
+                        }
+                        .buttonStyle(.plain)
+
+                        if searching {
+                            ProgressView().tint(lanePink).padding(.vertical, 20)
+                        }
+
+                        ForEach(Array(people.enumerated()), id: \.offset) { _, user in
+                            if let id = user.laneId {
+                                Button {
+                                    if selectedIDs.contains(id) {
+                                        selectedIDs.remove(id)
+                                    } else {
+                                        selectedIDs.insert(id)
+                                    }
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        AvatarView(url: user.avatarUrl, size: 46)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(user.displayedName ?? user.userName ?? "Lane user")
+                                                .font(.system(size: 15, weight: .semibold))
+                                                .foregroundStyle(.white)
+                                            if let name = user.userName {
+                                                Text("@\(name)")
+                                                    .font(.system(size: 12))
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        Spacer()
+                                        Image(systemName: selectedIDs.contains(id)
+                                            ? "checkmark.circle.fill" : "circle")
+                                            .font(.system(size: 23))
+                                            .foregroundStyle(selectedIDs.contains(id)
+                                                ? lanePink : Color.white.opacity(0.45))
+                                    }
+                                    .frame(height: 60)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                }
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.system(size: 13))
+                        .foregroundStyle(lanePink)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 8)
+                }
+
+                Button {
+                    guard !selectedIDs.isEmpty else { return }
+                    submitting = true
+                    Task {
+                        defer { submitting = false }
+                        do {
+                            try await session.invitePlaylistUsers(Array(selectedIDs), to: playlist)
+                            dismiss()
+                        } catch {
+                            errorMessage = error.localizedDescription
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        if submitting { ProgressView().tint(.black) }
+                        Text("Invite \(selectedIDs.count)")
+                            .font(.system(size: 16, weight: .bold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 52)
+                    .foregroundStyle(.black)
+                    .background(lanePink, in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+                .disabled(selectedIDs.isEmpty || submitting)
+                .padding(16)
+            }
+            .background(laneBackground.ignoresSafeArea())
+            .navigationTitle("Add member")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .task(id: query) {
+                let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !clean.isEmpty else {
+                    results = []
+                    searching = false
+                    return
+                }
+                searching = true
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard !Task.isCancelled else { return }
+                do {
+                    let found = try await session.searchPlaylistInviteUsers(clean)
+                    guard !Task.isCancelled else { return }
+                    results = found
+                    errorMessage = nil
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    results = []
+                    errorMessage = error.localizedDescription
+                }
+                searching = false
+            }
+            .sheet(item: $shareItem) { item in
+                LaneShareActivitySheet(url: item.url)
             }
         }
         .preferredColorScheme(.dark)

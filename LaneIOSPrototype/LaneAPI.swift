@@ -967,6 +967,15 @@ actor LaneAPI {
         )
     }
 
+    func invitePlaylistUsers(token: String, playlistId: String, userIds: [String]) async throws -> APIResult {
+        try await request(
+            path: "/playlist/\(playlistId)/invite",
+            method: "POST",
+            token: token,
+            json: ["userIds": userIds]
+        )
+    }
+
     func addTracks(token: String, playlistId: String, trackIds: [String]) async throws -> APIResult {
         // The Android UserApi.M signature is @Body List<String>. Retrying a
         // rejected mutation with guessed object shapes only sends extra POSTs

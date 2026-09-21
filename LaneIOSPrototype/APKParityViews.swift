@@ -355,6 +355,7 @@ struct APKPlaylistActionsSheet: View {
     let isSaved: Bool
     let visibility: String
     let onEdit: () -> Void
+    let onInvite: () -> Void
     let onShare: () -> Void
     let onToggleVisibility: () -> Void
     let onSave: () -> Void
@@ -386,6 +387,7 @@ struct APKPlaylistActionsSheet: View {
 
                 if isOwner {
                     action("Edit", icon: "pencil", asset: nil, perform: onEdit)
+                    action("Invite collaborators", icon: "person.badge.plus", asset: nil, perform: onInvite)
                 } else if !isSaved {
                     action("Add to Library", icon: "square.stack", asset: "ic_lib_outline", perform: onSave)
                 }
@@ -1437,8 +1439,21 @@ struct APKArtistDetailScreen: View {
     @ViewBuilder
     private func trackSection(title: String, tracks: [TrackCandidate]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.system(size: 20, weight: .bold))
+            HStack {
+                Text(title)
+                    .font(.system(size: 20, weight: .bold))
+                Spacer()
+                if tracks.count > 5 {
+                    NavigationLink {
+                        APKArtistTracksScreen(title: title, tracks: tracks)
+                    } label: {
+                        Text("Show all")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.50))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
 
             VStack(spacing: 0) {
                 ForEach(Array(tracks.prefix(5).enumerated()), id: \.element.id) { index, track in
@@ -1464,6 +1479,36 @@ struct APKArtistDetailScreen: View {
         session.currentIndex = 0
         session.requestStream(for: list[0])
         showPlayer = true
+    }
+}
+
+private struct APKArtistTracksScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    let title: String
+    let tracks: [TrackCandidate]
+    @State private var showPlayer = false
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
+                    APKAlbumTrackRow(index: index + 1, track: track) {
+                        session.queue = tracks
+                        session.currentIndex = index
+                        session.requestStream(for: track)
+                        showPlayer = true
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+        .background(apkBackground.ignoresSafeArea())
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .fullScreenCover(isPresented: $showPlayer) {
+            APKFullPlayerView().environmentObject(session)
+        }
     }
 }
 
