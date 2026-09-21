@@ -110,6 +110,45 @@ final class LaneSession: ObservableObject {
         }
     }
 
+    private func resolveTrackDataResilient(
+        _ ids: [String],
+        prefetch: Bool
+    ) async throws -> [TrackData] {
+        guard !ids.isEmpty else { return [] }
+
+        do {
+            return try await LaneAPI.shared.tracksByIds(
+                token: token,
+                ids: ids,
+                prefetch: prefetch
+            )
+        } catch {
+            let invalidBody = error.localizedDescription
+                .localizedCaseInsensitiveContains("INVALID_TRACK_IDS_BODY")
+            guard invalidBody else { throw error }
+
+            // The current backend rejects a whole request when either its
+            // accepted batch size is exceeded or one stale platform ID is
+            // present. Split until the valid IDs resolve; a single invalid ID
+            // is skipped without discarding the rest of the playlist.
+            guard ids.count > 1 else {
+                output = "Skipped an unresolved source track: \(ids[0])"
+                return []
+            }
+
+            let middle = ids.count / 2
+            let left = try await resolveTrackDataResilient(
+                Array(ids[..<middle]),
+                prefetch: prefetch
+            )
+            let right = try await resolveTrackDataResilient(
+                Array(ids[middle...]),
+                prefetch: prefetch
+            )
+            return left + right
+        }
+    }
+
     func resolveTracksByIDs(
         _ ids: [String],
         prefetch: Bool = false,
@@ -126,11 +165,10 @@ final class LaneSession: ObservableObject {
             // Android resolves large collections in pages. Keeping each
             // read-only /user/tracks body small also avoids carrier/proxy body
             // limits that are common when the phone is used without a VPN.
-            for start in stride(from: 0, to: clean.count, by: 50) {
-                let end = min(start + 50, clean.count)
-                let batch = try await LaneAPI.shared.tracksByIds(
-                    token: token,
-                    ids: Array(clean[start..<end]),
+            for start in stride(from: 0, to: clean.count, by: 15) {
+                let end = min(start + 15, clean.count)
+                let batch = try await resolveTrackDataResilient(
+                    Array(clean[start..<end]),
                     prefetch: prefetch
                 )
                 tracks.append(contentsOf: batch)
@@ -686,7 +724,7 @@ final class LaneSession: ObservableObject {
             }
 
             // Match Android's offline/server fallback: resolve the playlist's
-            // IDs through the read-only POST /user/tracks in pages of 50.
+            // IDs through the read-only POST /user/tracks in resilient pages.
             let ids = resolvedPlaylist.playlistTracksIds ?? playlist.playlistTracksIds ?? []
             guard !ids.isEmpty else {
                 completion([])
@@ -694,11 +732,10 @@ final class LaneSession: ObservableObject {
             }
 
             var loaded: [TrackData] = []
-            for start in stride(from: 0, to: ids.count, by: 50) {
-                let end = min(start + 50, ids.count)
-                if let batch = try? await LaneAPI.shared.tracksByIds(
-                    token: token,
-                    ids: Array(ids[start..<end]),
+            for start in stride(from: 0, to: ids.count, by: 15) {
+                let end = min(start + 15, ids.count)
+                if let batch = try? await resolveTrackDataResilient(
+                    Array(ids[start..<end]),
                     prefetch: false
                 ) {
                     loaded.append(contentsOf: batch)
@@ -843,16 +880,15 @@ final class LaneSession: ObservableObject {
         // hundreds of already loaded tracks. Failed pages get one complete
         // regional retry before the partial result is returned for a resumable
         // local save.
-        for start in stride(from: 0, to: ids.count, by: 50) {
-            let end = min(start + 50, ids.count)
+        for start in stride(from: 0, to: ids.count, by: 15) {
+            let end = min(start + 15, ids.count)
             let page = Array(ids[start..<end])
             var resolvedPage: [TrackData]?
 
             for attempt in 0..<2 {
                 do {
-                    resolvedPage = try await LaneAPI.shared.tracksByIds(
-                        token: token,
-                        ids: page,
+                    resolvedPage = try await resolveTrackDataResilient(
+                        page,
                         prefetch: false
                     )
                     break
@@ -941,12 +977,11 @@ final class LaneSession: ObservableObject {
         // ImportViewModel.loadPreviewTracks in Android resolves the platform
         // IDs through /user/tracks before addTracksToPlaylist. The preview IDs
         // (for example Yandex IDs) are not necessarily valid Lane songIds.
-        for start in stride(from: 0, to: sourceIDs.count, by: 50) {
+        for start in stride(from: 0, to: sourceIDs.count, by: 15) {
             try Task.checkCancellation()
-            let end = min(start + 50, sourceIDs.count)
-            let tracks = try await LaneAPI.shared.tracksByIds(
-                token: token,
-                ids: Array(sourceIDs[start..<end]),
+            let end = min(start + 15, sourceIDs.count)
+            let tracks = try await resolveTrackDataResilient(
+                Array(sourceIDs[start..<end]),
                 prefetch: false
             )
             resolved.append(contentsOf: tracks.compactMap(\.songId))
