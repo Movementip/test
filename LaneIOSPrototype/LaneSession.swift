@@ -72,6 +72,9 @@ final class LaneSession: ObservableObject {
     @Published var searchAlbums: [LaneAlbum] = []
     @Published var searchPlaylists: [LanePlaylist] = []
     @Published var searchResultItems: [LaneSearchResultItem] = []
+    @Published var searchHistoryItems: [LaneSearchHistoryItem] = []
+    @Published var searchHistoryIsLoading = false
+    @Published var searchHistoryMessage = ""
     @Published var searchToken: String?
     @Published var searchMessage = ""
     @Published var searchIsLoading = false
@@ -568,6 +571,69 @@ final class LaneSession: ObservableObject {
     }
 
     // MARK: Search
+
+    func loadSearchHistory() async {
+        guard !isGuest else { return }
+        searchHistoryIsLoading = true
+        defer { searchHistoryIsLoading = false }
+
+        do {
+            await configureAPI()
+            let result = try await LaneAPI.shared.searchHistory(token: token)
+            guard let entries = result.json as? [[String: Any]] else {
+                throw LaneAPIError.decoding("Invalid search history response")
+            }
+
+            let decoder = JSONDecoder()
+            searchHistoryItems = entries.compactMap { entry in
+                guard let payload = entry["data"] as? [String: Any],
+                      let data = try? JSONSerialization.data(withJSONObject: payload) else {
+                    return nil
+                }
+
+                let type = (entry["type"] as? String ?? "").lowercased()
+                if type.contains("track") || payload["songId"] != nil {
+                    guard let track = try? decoder.decode(TrackData.self, from: data),
+                          let id = track.songId, !id.isEmpty else { return nil }
+                    return LaneSearchHistoryItem(id: "track:\(id)", track: track, artist: nil, album: nil)
+                }
+                if type.contains("album") || payload["tracks"] != nil {
+                    guard let album = try? decoder.decode(LaneAlbum.self, from: data),
+                          let id = album.id, !id.isEmpty else { return nil }
+                    return LaneSearchHistoryItem(id: "album:\(id)", track: nil, artist: nil, album: album)
+                }
+                guard let artist = try? decoder.decode(LaneArtist.self, from: data),
+                      let id = artist.id, !id.isEmpty else { return nil }
+                return LaneSearchHistoryItem(id: "artist:\(id)", track: nil, artist: artist, album: nil)
+            }
+            searchHistoryMessage = ""
+        } catch {
+            searchHistoryMessage = "Recent searches are unavailable. Try again."
+            output = error.localizedDescription
+        }
+    }
+
+    func bumpSearchHistoryItem(_ item: LaneSearchHistoryItem) async {
+        do {
+            await configureAPI()
+            _ = try await LaneAPI.shared.bumpSearchHistoryItem(token: token, key: item.id)
+        } catch {
+            output = error.localizedDescription
+        }
+    }
+
+    func deleteSearchHistoryItem(_ item: LaneSearchHistoryItem) async {
+        let original = searchHistoryItems
+        searchHistoryItems.removeAll { $0.id == item.id }
+        do {
+            await configureAPI()
+            _ = try await LaneAPI.shared.deleteSearchHistoryItem(token: token, key: item.id)
+        } catch {
+            searchHistoryItems = original
+            searchHistoryMessage = "Could not remove this search. Try again."
+            output = error.localizedDescription
+        }
+    }
 
     private func clearSearchResults() {
         searchToken = nil

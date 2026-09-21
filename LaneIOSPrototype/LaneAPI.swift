@@ -1169,6 +1169,22 @@ actor LaneAPI {
         try await request(path: "/user/search/history", token: token)
     }
 
+    func bumpSearchHistoryItem(token: String, key: String) async throws -> APIResult {
+        try await request(
+            path: "/user/history-bump-item",
+            token: token,
+            query: [.init(name: "item", value: key)]
+        )
+    }
+
+    func deleteSearchHistoryItem(token: String, key: String) async throws -> APIResult {
+        try await request(
+            path: "/user/history-delete-item",
+            token: token,
+            query: [.init(name: "item", value: key)]
+        )
+    }
+
     func importPreview(
         token: String,
         platform: String,

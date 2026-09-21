@@ -86,7 +86,7 @@ struct ContentView: View {
                     .accessibilityHidden(selectedTab != 2)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.bottom, 60)
+            .padding(.bottom, session.currentTrack == nil ? 48 : 108)
 
             VStack(spacing: 0) {
                 if session.currentTrack != nil {
@@ -145,16 +145,13 @@ private struct LaneBottomBar: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: 48)
-        .padding(.bottom, 12)
         .background(
             Color(red: 21.0 / 255.0, green: 21.0 / 255.0, blue: 21.0 / 255.0)
                 .clipShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
-                .ignoresSafeArea(edges: .bottom)
         )
         .overlay {
             RoundedRectangle(cornerRadius: 36, style: .continuous)
                 .stroke(Color.white.opacity(0.05), lineWidth: 1)
-                .padding(.bottom, 12)
         }
         .shadow(color: .black.opacity(0.30), radius: 8, y: 2)
     }
@@ -187,75 +184,79 @@ private struct HomeScreen: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 24) {
-                    HomeHeader()
+            VStack(spacing: 0) {
+                HomeHeader()
+                    .padding(.bottom, 24)
+                    .background(laneBackground)
 
-                    if session.isGuest {
-                        TelegramLoginCard()
-                    } else {
-                        if session.busy && session.homeSections.isEmpty && session.homeTracks.isEmpty {
-                            HStack {
-                                Spacer()
-                                ProgressView()
-                                    .tint(lanePink)
-                                Spacer()
-                            }
-                            .padding(.vertical, 24)
-                        }
-
-                        if !session.homeSections.isEmpty {
-                            APKHomeFeedView(
-                                sections: session.homeSections,
-                                showPlayer: $showPlayer
-                            )
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 24) {
+                        if session.isGuest {
+                            TelegramLoginCard()
                         } else {
-                            // Compatibility fallback for older Lane feed payloads.
-                            if !session.homeTracks.isEmpty {
-                                TrackSection(
-                                    title: "For you",
-                                    subtitle: "Picked for your listening",
-                                    tracks: Array(session.homeTracks.prefix(12)),
-                                    showPlayer: $showPlayer
-                                )
+                            if session.busy && session.homeSections.isEmpty && session.homeTracks.isEmpty {
+                                HStack {
+                                    Spacer()
+                                    ProgressView()
+                                        .tint(lanePink)
+                                    Spacer()
+                                }
+                                .padding(.vertical, 24)
                             }
 
-                            if !session.recentTracks.isEmpty {
-                                TrackSection(
-                                    title: "Recently played",
-                                    subtitle: nil,
-                                    tracks: Array(session.recentTracks.prefix(10)),
+                            if !session.homeSections.isEmpty {
+                                APKHomeFeedView(
+                                    sections: session.homeSections,
                                     showPlayer: $showPlayer
                                 )
-                            }
+                            } else {
+                                // Compatibility fallback for older Lane feed payloads.
+                                if !session.homeTracks.isEmpty {
+                                    TrackSection(
+                                        title: "For you",
+                                        subtitle: "Picked for your listening",
+                                        tracks: Array(session.homeTracks.prefix(12)),
+                                        showPlayer: $showPlayer
+                                    )
+                                }
 
-                            if !session.serverPlaylists.isEmpty {
-                                CardShelf(
-                                    title: "Your playlists",
-                                    cards: session.serverPlaylists.map {
-                                        LaneCardItem(
-                                            id: $0.playlistId ?? UUID().uuidString,
-                                            title: $0.playlistName ?? "Playlist",
-                                            subtitle: $0.playlistDescription ?? "\($0.tracksCount ?? 0) tracks",
-                                            imageURL: $0.playlistImageUrl,
-                                            kind: "playlist",
-                                            backendID: $0.playlistId,
-                                            platform: $0.platform
-                                        )
-                                    }
-                                )
+                                if !session.recentTracks.isEmpty {
+                                    TrackSection(
+                                        title: "Recently played",
+                                        subtitle: nil,
+                                        tracks: Array(session.recentTracks.prefix(10)),
+                                        showPlayer: $showPlayer
+                                    )
+                                }
+
+                                if !session.serverPlaylists.isEmpty {
+                                    CardShelf(
+                                        title: "Your playlists",
+                                        cards: session.serverPlaylists.map {
+                                            LaneCardItem(
+                                                id: $0.playlistId ?? UUID().uuidString,
+                                                title: $0.playlistName ?? "Playlist",
+                                                subtitle: $0.playlistDescription ?? "\($0.tracksCount ?? 0) tracks",
+                                                imageURL: $0.playlistImageUrl,
+                                                kind: "playlist",
+                                                backendID: $0.playlistId,
+                                                platform: $0.platform
+                                            )
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
+                    .padding(.bottom, 22)
                 }
-                .padding(.bottom, 22)
+                .refreshable {
+                    if !session.isGuest {
+                        await session.refreshAfterLogin()
+                    }
+                }
             }
             .background(laneBackground)
-            .refreshable {
-                if !session.isGuest {
-                    await session.refreshAfterLogin()
-                }
-            }
             .toolbar(.hidden, for: .navigationBar)
         }
     }
@@ -464,6 +465,11 @@ private struct SearchScreen: View {
                     session.search(clean)
                 }
             }
+            .task(id: isActive && query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                if isActive && query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    await session.loadSearchHistory()
+                }
+            }
             .onChange(of: isActive) { active in
                 if !active { isSearchFocused = false }
             }
@@ -472,14 +478,26 @@ private struct SearchScreen: View {
 
     @ViewBuilder
     private var searchHistoryContent: some View {
-        let history = (session.account?.searchHistory ?? []).filter { !$0.isEmpty }
-        if history.isEmpty {
+        if session.searchHistoryIsLoading && session.searchHistoryItems.isEmpty {
+            Spacer()
+            ProgressView().tint(lanePink)
+            Spacer()
+        } else if session.searchHistoryItems.isEmpty {
             Spacer()
             EmptyLaneView(
                 icon: "magnifyingglass",
-                title: "What are we looking for today?",
-                subtitle: "A track, artist, or album?"
+                title: session.searchHistoryMessage.isEmpty ? "What are we looking for today?" : "Recent searches unavailable",
+                subtitle: session.searchHistoryMessage.isEmpty
+                    ? "A track, artist, or album?"
+                    : session.searchHistoryMessage
             )
+            if !session.searchHistoryMessage.isEmpty {
+                Button("Retry") {
+                    Task { await session.loadSearchHistory() }
+                }
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(lanePink)
+            }
             Spacer()
         } else {
             ScrollView {
@@ -488,32 +506,100 @@ private struct SearchScreen: View {
                         .font(.system(size: 17, weight: .bold))
                         .padding(.vertical, 12)
 
-                    ForEach(Array(history.reversed().prefix(20)), id: \.self) { item in
-                        Button {
-                            query = item
-                            isSearchFocused = false
-                        } label: {
-                            HStack(spacing: 14) {
-                                Image(systemName: "clock.arrow.circlepath")
-                                    .font(.system(size: 18))
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 28)
-                                Text(item)
-                                    .foregroundStyle(.white)
-                                    .lineLimit(1)
-                                Spacer()
-                                Image(systemName: "arrow.up.left")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .frame(height: 52)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
+                    ForEach(Array(session.searchHistoryItems.prefix(20))) { item in
+                        historyRow(item)
+                    }
+
+                    if !session.searchHistoryMessage.isEmpty {
+                        Text(session.searchHistoryMessage)
+                            .font(.caption)
+                            .foregroundStyle(lanePink)
+                            .padding(.vertical, 10)
                     }
                 }
-                .padding(.horizontal, 24)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 24)
+            }
+            .refreshable {
+                await session.loadSearchHistory()
             }
         }
+    }
+
+    private func historyRow(_ item: LaneSearchHistoryItem) -> some View {
+        HStack(spacing: 0) {
+            Group {
+                if let track = item.track {
+                    Button {
+                        let context = "history:\(UUID().uuidString)"
+                        let historyTracks = session.searchHistoryItems.compactMap { $0.track }.map {
+                            TrackCandidate($0, refID: context)
+                        }
+                        let candidate = historyTracks.first { $0.trackID == track.songId }
+                            ?? TrackCandidate(track, refID: context)
+                        session.queue = historyTracks.isEmpty ? [candidate] : historyTracks
+                        session.currentIndex = session.queue.firstIndex(of: candidate)
+                        session.requestStream(for: candidate)
+                        showPlayer = true
+                        Task { await session.bumpSearchHistoryItem(item) }
+                    } label: {
+                        historyRowLabel(item)
+                    }
+                } else if let artist = item.artist {
+                    NavigationLink {
+                        APKArtistDetailScreen(seed: artist)
+                            .task { await session.bumpSearchHistoryItem(item) }
+                    } label: {
+                        historyRowLabel(item)
+                    }
+                } else if let album = item.album {
+                    NavigationLink {
+                        APKAlbumDetailScreen(seed: album)
+                            .task { await session.bumpSearchHistoryItem(item) }
+                    } label: {
+                        historyRowLabel(item)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                Task { await session.deleteSearchHistoryItem(item) }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 42, height: 58)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Remove \(item.title) from recent searches")
+        }
+        .frame(height: 64)
+    }
+
+    private func historyRowLabel(_ item: LaneSearchHistoryItem) -> some View {
+        HStack(spacing: 14) {
+            APKRemoteImage(url: item.imageURL, circle: item.artist != nil)
+                .frame(width: 50, height: 50)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+
+                HStack(spacing: 5) {
+                    APKPlatformIcon(platform: item.platform, size: 10)
+                    Text(item.subtitle)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.white.opacity(0.70))
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(height: 58)
+        .contentShape(Rectangle())
     }
 
     private var hasSearchResults: Bool {

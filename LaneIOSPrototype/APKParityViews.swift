@@ -903,7 +903,7 @@ struct APKPlaylistEmptyState: View {
     }
 }
 
-private struct APKRemoteImage: View {
+struct APKRemoteImage: View {
     let url: String?
     var cornerRadius: CGFloat = 8
     var circle = false

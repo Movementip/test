@@ -77,6 +77,31 @@ struct LaneSearchResultItem: Decodable, Identifiable {
     }
 }
 
+struct LaneSearchHistoryItem: Identifiable {
+    let id: String
+    let track: TrackData?
+    let artist: LaneArtist?
+    let album: LaneAlbum?
+
+    var title: String {
+        track?.title ?? artist?.name ?? album?.name ?? ""
+    }
+
+    var subtitle: String {
+        if let track { return track.artistsDisplayedName ?? "Track" }
+        if artist != nil { return "Artist" }
+        return "Album • \(album?.artistsDisplayedName ?? "")"
+    }
+
+    var imageURL: String? {
+        track?.coverUrl ?? artist?.avatarUrl ?? album?.coverUrl
+    }
+
+    var platform: String? {
+        track?.platform ?? artist?.platform ?? album?.platform
+    }
+}
+
 struct TrackData: Decodable, Hashable {
     let songId: String?
     let platform: String?
