@@ -933,10 +933,10 @@ actor LaneAPI {
         // issued before mutation, so trying the next supported encoding cannot
         // add a batch twice. Custom backends keep the legacy array first.
         let officialBodies: [Any] = [
+            trackIds,
             ["trackIds": trackIds],
             ["playlistTracks": trackIds],
-            ["playlistTracksIds": trackIds],
-            trackIds
+            ["playlistTracksIds": trackIds]
         ]
         let customBodies: [Any] = [
             trackIds,

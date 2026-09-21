@@ -935,6 +935,29 @@ final class LaneSession: ObservableObject {
         return existing
     }
 
+    private func canonicalImportTrackIDs(_ sourceIDs: [String]) async throws -> [String] {
+        var resolved: [String] = []
+
+        // ImportViewModel.loadPreviewTracks in Android resolves the platform
+        // IDs through /user/tracks before addTracksToPlaylist. The preview IDs
+        // (for example Yandex IDs) are not necessarily valid Lane songIds.
+        for start in stride(from: 0, to: sourceIDs.count, by: 50) {
+            try Task.checkCancellation()
+            let end = min(start + 50, sourceIDs.count)
+            let tracks = try await LaneAPI.shared.tracksByIds(
+                token: token,
+                ids: Array(sourceIDs[start..<end]),
+                prefetch: false
+            )
+            resolved.append(contentsOf: tracks.compactMap(\.songId))
+        }
+
+        var seen = Set<String>()
+        return resolved
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
     @discardableResult
     func importTracks(
         _ trackIDs: [String],
@@ -946,12 +969,18 @@ final class LaneSession: ObservableObject {
         guard !clean.isEmpty else { throw LaneAPIError.emptyResponse }
 
         await configureAPI()
+        progress(0, clean.count)
+
+        let canonical = try await canonicalImportTrackIDs(clean)
+        guard !canonical.isEmpty else {
+            throw LaneAPIError.decoding("Lane could not resolve any source tracks for import")
+        }
 
         // A previously interrupted import is resumed instead of starting from
         // zero. This also makes a second tap safe and avoids duplicate tracks.
         let existing = try await serverTrackIDs(in: playlistID)
-        let pending = clean.filter { !existing.contains($0) }
-        var completed = clean.count - pending.count
+        let pending = canonical.filter { !existing.contains($0) }
+        var completed = canonical.count - pending.count
         progress(completed, clean.count)
 
         // Android's free/import UI works with 15 tracks at a time. Keep the

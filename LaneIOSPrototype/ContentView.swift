@@ -3274,7 +3274,11 @@ private struct ImportTracksScreen: View {
                     importCompleted = completed
                     importTotal = total
                 }
-                message = "All \(imported) tracks are now in the Lane playlist."
+                if imported >= importTotal {
+                    message = "All \(imported) tracks are now in the Lane playlist."
+                } else {
+                    message = "Imported \(imported) of \(importTotal) tracks. Lane could not resolve \(importTotal - imported) source tracks."
+                }
             } catch {
                 session.output = "Import error: \(error.localizedDescription)"
                 let detail = friendlyImportError(error)
