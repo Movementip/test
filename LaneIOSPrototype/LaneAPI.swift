@@ -967,6 +967,15 @@ actor LaneAPI {
         )
     }
 
+    func setStatusTrack(token: String, trackId: String) async throws -> APIResult {
+        try await request(
+            path: "/user/status",
+            method: "POST",
+            token: token,
+            json: ["trackId": trackId]
+        )
+    }
+
     func invitePlaylistUsers(token: String, playlistId: String, userIds: [String]) async throws -> APIResult {
         try await request(
             path: "/playlist/\(playlistId)/invite",

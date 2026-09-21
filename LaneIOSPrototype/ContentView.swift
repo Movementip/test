@@ -2140,12 +2140,12 @@ private struct APKInvitePlaylistUsersSheet: View {
     }
 }
 
-private struct LaneShareURL: Identifiable {
+struct LaneShareURL: Identifiable {
     let url: URL
     var id: String { url.absoluteString }
 }
 
-private struct LaneShareActivitySheet: UIViewControllerRepresentable {
+struct LaneShareActivitySheet: UIViewControllerRepresentable {
     let url: URL
 
     func makeUIViewController(context: Context) -> UIActivityViewController {

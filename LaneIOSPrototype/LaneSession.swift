@@ -856,6 +856,28 @@ final class LaneSession: ObservableObject {
         return url
     }
 
+    func shareTrack(_ track: TrackCandidate) async throws -> URL {
+        guard let id = track.trackID, !id.isEmpty else { throw LaneAPIError.invalidURL }
+        await configureAPI()
+        let share = try await LaneAPI.shared.createShareLink(
+            token: token,
+            elementId: id,
+            type: "track"
+        )
+        guard let url = URL(string: "https://music.sk-lane.com/\(share.id)") else {
+            throw LaneAPIError.invalidURL
+        }
+        return url
+    }
+
+    func setStatusTrack(_ track: TrackCandidate) async throws {
+        guard let id = track.trackID, !id.isEmpty else { throw LaneAPIError.invalidURL }
+        await configureAPI()
+        let result = try await LaneAPI.shared.setStatusTrack(token: token, trackId: id)
+        status = result.status
+        output = result.pretty
+    }
+
     func searchPlaylistInviteUsers(_ query: String) async throws -> [UserInfoDTO] {
         await configureAPI()
         return try await LaneAPI.shared.userSearch(token: token, query: query)
@@ -1481,6 +1503,30 @@ final class LaneSession: ObservableObject {
                     currentIndex = nil
                 }
                 output = result.pretty
+            } catch {
+                output = error.localizedDescription
+            }
+        }
+    }
+
+    func startWave(from track: TrackCandidate) {
+        guard let id = track.trackID else { return }
+        Task {
+            do {
+                await configureAPI()
+                let result = try await LaneAPI.shared.recommendations(
+                    token: token,
+                    trackId: id,
+                    platform: track.platform.isEmpty ? "all" : track.platform
+                )
+                let recommended = JSONProbe.tracks(result.json)
+                guard let first = recommended.first else {
+                    output = "No tracks found for this wave"
+                    return
+                }
+                queue = recommended
+                currentIndex = 0
+                requestStream(for: first)
             } catch {
                 output = error.localizedDescription
             }

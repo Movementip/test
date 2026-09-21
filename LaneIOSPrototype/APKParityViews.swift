@@ -247,6 +247,10 @@ struct APKTrackActionsSheet: View {
     let track: TrackCandidate
 
     @State private var choosingPlaylist = false
+    @State private var shareItem: LaneShareURL?
+    @State private var actionError: String?
+    @State private var actionNotice: String?
+    @State private var sharing = false
 
     var body: some View {
         NavigationStack {
@@ -261,18 +265,18 @@ struct APKTrackActionsSheet: View {
 
                     HStack(spacing: 14) {
                         APKRemoteImage(url: track.coverURL, cornerRadius: 8)
-                            .frame(width: 58, height: 58)
+                            .frame(width: 64, height: 64)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(track.title)
-                                .font(.system(size: 17, weight: .bold))
+                                .font(.system(size: 24, weight: .bold))
                                 .lineLimit(1)
                             Text(track.subtitle)
-                                .font(.system(size: 13))
+                                .font(.system(size: 16))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
                     }
-                    .padding(.bottom, 18)
+                    .padding(.bottom, 32)
 
                     if choosingPlaylist {
                         actionRow("Back to track", icon: "chevron.left") {
@@ -295,25 +299,64 @@ struct APKTrackActionsSheet: View {
                             }
                         }
                     } else {
-                        actionRow(session.isFavorite(track) ? "Remove from favorites" : "Add to favorites",
+                        actionRow(session.isFavorite(track) ? "Remove from liked" : "Like",
                                   icon: session.isFavorite(track) ? "heart.fill" : "heart") {
                             session.toggleFavorite(track)
-                            dismiss()
-                        }
-                        actionRow("Play next", icon: "text.insert") {
-                            session.playNext(track)
-                            dismiss()
-                        }
-                        actionRow("Add to queue", icon: "text.badge.plus") {
-                            session.addToQueue(track)
                             dismiss()
                         }
                         actionRow("Add to playlist", icon: "music.note.list") {
                             choosingPlaylist = true
                         }
-                        actionRow("Download", icon: "arrow.down.circle") {
+
+                        Rectangle()
+                            .fill(Color.white.opacity(0.10))
+                            .frame(height: 1)
+                            .padding(.vertical, 20)
+
+                        capsuleAction(
+                            session.isDownloaded(track) ? "Downloaded" : "Download track",
+                            icon: session.isDownloaded(track) ? "checkmark" : "arrow.down"
+                        ) {
                             session.downloadTrack(track)
                             dismiss()
+                        }
+                        capsuleAction("Use as status", icon: "music.note") {
+                            Task {
+                                do {
+                                    try await session.setStatusTrack(track)
+                                    actionNotice = "Status updated"
+                                } catch {
+                                    actionError = error.localizedDescription
+                                }
+                            }
+                        }
+                        if track.platform.lowercased() != "telegram" {
+                            capsuleAction("Start wave from this song", icon: "waveform") {
+                                session.startWave(from: track)
+                                dismiss()
+                            }
+                        }
+
+                        Rectangle()
+                            .fill(Color.white.opacity(0.10))
+                            .frame(height: 1)
+                            .padding(.vertical, 18)
+
+                        HStack(spacing: 36) {
+                            Button("Copy link") { createShareLink(copy: true) }
+                            Button("More") { createShareLink(copy: false) }
+                        }
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .disabled(sharing)
+                        .padding(.bottom, 12)
+
+                        if sharing { ProgressView().tint(.white) }
+                        if let actionNotice {
+                            Text(actionNotice).foregroundStyle(.green)
+                        }
+                        if let actionError {
+                            Text(actionError).foregroundStyle(apkPink)
                         }
                     }
                 }
@@ -326,6 +369,45 @@ struct APKTrackActionsSheet: View {
         .preferredColorScheme(.dark)
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.hidden)
+        .sheet(item: $shareItem) { item in
+            LaneShareActivitySheet(url: item.url)
+        }
+    }
+
+    private func createShareLink(copy: Bool) {
+        guard !sharing else { return }
+        sharing = true
+        actionError = nil
+        Task {
+            defer { sharing = false }
+            do {
+                let url = try await session.shareTrack(track)
+                if copy {
+                    UIPasteboard.general.url = url
+                    actionNotice = "Link copied"
+                } else {
+                    shareItem = LaneShareURL(url: url)
+                }
+            } catch {
+                actionError = error.localizedDescription
+            }
+        }
+    }
+
+    private func capsuleAction(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: icon).frame(width: 24)
+                Text(title).font(.system(size: 16, weight: .semibold))
+                Spacer()
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 18)
+            .frame(height: 52)
+            .background(apkSurface, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .padding(.bottom, 15)
     }
 
     private func actionRow(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
