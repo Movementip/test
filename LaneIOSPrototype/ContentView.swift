@@ -1499,6 +1499,40 @@ struct PlaylistDetailScreen: View {
     @State private var loading = true
     @State private var confirmDelete = false
     @State private var actionTrack: TrackCandidate?
+    @State private var showPlaylistActions = false
+    @State private var showEditPlaylist = false
+    @State private var shareItem: LaneShareURL?
+    @State private var actionError: String?
+    @State private var editedName: String?
+    @State private var editedDescription: String?
+    @State private var editedVisibility: String?
+
+    private var isOwner: Bool {
+        guard let creator = playlist.creatorLid,
+              let accountID = session.account?.laneId else { return false }
+        return creator == accountID
+    }
+
+    private var isSaved: Bool {
+        session.serverPlaylists.contains { $0.playlistId == playlist.playlistId }
+    }
+
+    private var visibleName: String {
+        editedName ?? playlist.playlistName ?? "Playlist"
+    }
+
+    private var visibleDescription: String? {
+        editedDescription ?? playlist.playlistDescription
+    }
+
+    private var visibleVisibility: String {
+        editedVisibility ?? playlist.visibility ?? "public"
+    }
+
+    private var downloadState: LanePlaylistDownloadState? {
+        guard let id = playlist.playlistId else { return nil }
+        return session.playlistDownloads[id]
+    }
 
     var body: some View {
         ScrollView {
@@ -1513,11 +1547,11 @@ struct PlaylistDetailScreen: View {
                 .shadow(color: .black.opacity(0.40), radius: 22, y: 14)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(playlist.playlistName ?? "Playlist")
+                    Text(visibleName)
                         .font(.system(size: 25, weight: .bold))
                         .lineLimit(2)
 
-                    if let description = playlist.playlistDescription, !description.isEmpty {
+                    if let description = visibleDescription, !description.isEmpty {
                         Text(description)
                             .font(.system(size: 14))
                             .foregroundStyle(Color.white.opacity(0.62))
@@ -1534,31 +1568,42 @@ struct PlaylistDetailScreen: View {
                                 .foregroundStyle(Color.white.opacity(0.38))
                         }
 
-                        Text(tracks.count == 1 ? "1 track" : "\(tracks.count) tracks")
+                        let count = loading ? (playlist.tracksCount ?? tracks.count) : tracks.count
+                        Text(count == 1 ? "1 track" : "\(count) tracks")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(Color.white.opacity(0.52))
                     }
 
                     HStack(spacing: 16) {
                         Button {
-                            if let first = tracks.first {
-                                session.downloadTrack(first)
+                            if let id = playlist.playlistId {
+                                if downloadState?.isRunning == true {
+                                    session.cancelPlaylistDownload(id)
+                                } else {
+                                    session.downloadPlaylistTracks(tracks, playlistID: id)
+                                }
                             }
                         } label: {
-                            APKTemplateIcon(
-                                name: "download_playlist",
-                                size: 28,
-                                color: Color.white.opacity(0.82)
-                            )
-                                .frame(width: 34, height: 40)
+                            Group {
+                                if downloadState?.isRunning == true {
+                                    ProgressView().tint(lanePink)
+                                } else {
+                                    APKTemplateIcon(
+                                        name: "download_playlist",
+                                        size: 28,
+                                        color: Color.white.opacity(0.82)
+                                    )
+                                }
+                            }
+                            .frame(width: 34, height: 40)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel(downloadState?.isRunning == true
+                            ? "Stop playlist download" : "Download playlist")
                         .disabled(tracks.isEmpty)
 
-                        Menu {
-                            Button("Delete playlist", systemImage: "trash", role: .destructive) {
-                                confirmDelete = true
-                            }
+                        Button {
+                            showPlaylistActions = true
                         } label: {
                             Image(systemName: "ellipsis")
                                 .rotationEffect(.degrees(90))
@@ -1607,6 +1652,16 @@ struct PlaylistDetailScreen: View {
                         .disabled(tracks.isEmpty)
                     }
                     .padding(.top, 8)
+
+                    if let downloadState {
+                        Text(downloadState.isRunning
+                            ? "Saving \(downloadState.completed)/\(downloadState.total) tracks…"
+                            : "Saved \(downloadState.completed - downloadState.failed)/\(downloadState.total) tracks" +
+                                (downloadState.failed == 0 ? "" : " · \(downloadState.failed) failed"))
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(downloadState.failed == 0 ? Color.white.opacity(0.55) : lanePink)
+                            .padding(.top, 2)
+                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 28)
@@ -1689,6 +1744,15 @@ struct PlaylistDetailScreen: View {
                     }
                     .padding(.top, 10)
                 }
+
+                if let actionError {
+                    Text(actionError)
+                        .font(.system(size: 13))
+                        .foregroundStyle(lanePink)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 12)
+                }
             }
             .padding(.bottom, 28)
         }
@@ -1698,7 +1762,7 @@ struct PlaylistDetailScreen: View {
             HStack(spacing: 0) {
                 APKImportBackButton { dismiss() }
 
-                Text(playlist.playlistName ?? "Playlist")
+                Text(visibleName)
                     .font(.system(size: 17, weight: .bold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
@@ -1719,7 +1783,14 @@ struct PlaylistDetailScreen: View {
         }
         .alert("Delete playlist?", isPresented: $confirmDelete) {
             Button("Delete", role: .destructive) {
-                session.deleteServerPlaylist(playlist)
+                Task {
+                    do {
+                        try await session.deleteServerPlaylist(playlist)
+                        dismiss()
+                    } catch {
+                        actionError = error.localizedDescription
+                    }
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -1728,7 +1799,176 @@ struct PlaylistDetailScreen: View {
         .sheet(item: $actionTrack) { track in
             APKTrackActionsSheet(track: track)
         }
+        .sheet(isPresented: $showPlaylistActions) {
+            APKPlaylistActionsSheet(
+                playlist: playlist,
+                creatorName: isOwner
+                    ? (session.account?.displayedName ?? session.account?.userName ?? "Lane")
+                    : (playlist.platform ?? "Lane"),
+                isOwner: isOwner,
+                isSaved: isSaved,
+                visibility: visibleVisibility,
+                onEdit: {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        showEditPlaylist = true
+                    }
+                },
+                onShare: { sharePlaylist() },
+                onToggleVisibility: { togglePlaylistVisibility() },
+                onSave: { savePlaylist() },
+                onDelete: {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        confirmDelete = true
+                    }
+                }
+            )
+        }
+        .sheet(isPresented: $showEditPlaylist) {
+            APKEditPlaylistSheet(
+                name: visibleName,
+                description: visibleDescription ?? "",
+                onSave: { name, description in
+                    try await session.editServerPlaylist(
+                        playlist, name: name, description: description
+                    )
+                    editedName = name
+                    editedDescription = description
+                }
+            )
+        }
+        .sheet(item: $shareItem) { item in
+            LaneShareActivitySheet(url: item.url)
+        }
     }
+
+    private func sharePlaylist() {
+        Task {
+            do {
+                let url = try await session.sharePlaylist(playlist)
+                shareItem = LaneShareURL(url: url)
+            } catch {
+                actionError = error.localizedDescription
+            }
+        }
+    }
+
+    private func togglePlaylistVisibility() {
+        let next = visibleVisibility.lowercased() == "public" ? "private" : "public"
+        Task {
+            do {
+                try await session.setPlaylistVisibility(playlist, visibility: next)
+                editedVisibility = next
+            } catch {
+                actionError = error.localizedDescription
+            }
+        }
+    }
+
+    private func savePlaylist() {
+        Task {
+            do {
+                try await session.savePlaylistToLibrary(playlist)
+            } catch {
+                actionError = error.localizedDescription
+            }
+        }
+    }
+}
+
+private struct APKEditPlaylistSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+    @State private var description: String
+    @State private var saving = false
+    @State private var errorMessage: String?
+    let onSave: (String, String) async throws -> Void
+
+    init(name: String, description: String, onSave: @escaping (String, String) async throws -> Void) {
+        _name = State(initialValue: name)
+        _description = State(initialValue: description)
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Playlist name")
+                    .font(.system(size: 14, weight: .semibold))
+                TextField("Name", text: $name)
+                    .padding(14)
+                    .background(laneCard, in: RoundedRectangle(cornerRadius: 12))
+
+                Text("Description")
+                    .font(.system(size: 14, weight: .semibold))
+                TextEditor(text: $description)
+                    .scrollContentBackground(.hidden)
+                    .padding(10)
+                    .frame(height: 130)
+                    .background(laneCard, in: RoundedRectangle(cornerRadius: 12))
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.system(size: 13))
+                        .foregroundStyle(lanePink)
+                }
+
+                Button {
+                    let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !cleanName.isEmpty else { return }
+                    saving = true
+                    Task {
+                        defer { saving = false }
+                        do {
+                            try await onSave(cleanName, description)
+                            dismiss()
+                        } catch {
+                            errorMessage = error.localizedDescription
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        if saving { ProgressView().tint(.black) }
+                        Text("Save changes")
+                            .font(.system(size: 16, weight: .bold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 52)
+                    .foregroundStyle(.black)
+                    .background(lanePink, in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+                .disabled(saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                Spacer()
+            }
+            .padding(20)
+            .background(laneBackground.ignoresSafeArea())
+            .navigationTitle("Edit playlist")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .presentationDetents([.large])
+    }
+}
+
+private struct LaneShareURL: Identifiable {
+    let url: URL
+    var id: String { url.absoluteString }
+}
+
+private struct LaneShareActivitySheet: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 private struct TrackInfoScreen: View {

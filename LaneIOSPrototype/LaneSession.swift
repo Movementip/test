@@ -40,6 +40,13 @@ private struct YandexArtistPayload: Decodable {
     let name: String?
 }
 
+struct LanePlaylistDownloadState: Equatable {
+    let completed: Int
+    let total: Int
+    let failed: Int
+    let isRunning: Bool
+}
+
 @MainActor
 final class LaneSession: ObservableObject {
     // MARK: Account / API
@@ -107,6 +114,8 @@ final class LaneSession: ObservableObject {
     @Published var localPlaylists: [LocalPlaylist] = []
     @Published var history: [TrackCandidate] = []
     @Published var downloadedTrackIDs: Set<String> = []
+    @Published var playlistDownloads: [String: LanePlaylistDownloadState] = [:]
+    private var playlistDownloadTasks: [String: Task<Void, Never>] = [:]
     private var localTrackStore: [String: TrackCandidate] = [:]
 
     func fetchArtistDetail(_ artist: LaneArtist) async -> LaneArtist {
@@ -783,19 +792,68 @@ final class LaneSession: ObservableObject {
         }
     }
 
-    func deleteServerPlaylist(_ playlist: LanePlaylist) {
-        guard let id = playlist.playlistId else { return }
-        Task {
-            do {
-                await configureAPI()
-                let result = try await LaneAPI.shared.deletePlaylist(token: token, playlistId: id)
-                status = result.status
-                output = result.pretty
-                await loadLibrary()
-            } catch {
-                output = error.localizedDescription
-            }
+    func deleteServerPlaylist(_ playlist: LanePlaylist) async throws {
+        guard let id = playlist.playlistId else { throw LaneAPIError.invalidURL }
+        await configureAPI()
+        let result = try await LaneAPI.shared.deletePlaylist(token: token, playlistId: id)
+        status = result.status
+        output = result.pretty
+        await loadLibrary()
+    }
+
+    func editServerPlaylist(
+        _ playlist: LanePlaylist,
+        name: String,
+        description: String
+    ) async throws {
+        guard let id = playlist.playlistId else { throw LaneAPIError.invalidURL }
+        await configureAPI()
+        let result = try await LaneAPI.shared.editPlaylist(
+            token: token,
+            playlistId: id,
+            imageURL: playlist.playlistImageUrl ?? "",
+            name: name,
+            description: description
+        )
+        status = result.status
+        output = result.pretty
+        await loadLibrary()
+    }
+
+    func setPlaylistVisibility(_ playlist: LanePlaylist, visibility: String) async throws {
+        guard let id = playlist.playlistId else { throw LaneAPIError.invalidURL }
+        await configureAPI()
+        let result = try await LaneAPI.shared.setPlaylistVisibility(
+            token: token,
+            playlistId: id,
+            visibility: visibility
+        )
+        status = result.status
+        output = result.pretty
+        await loadLibrary()
+    }
+
+    func savePlaylistToLibrary(_ playlist: LanePlaylist) async throws {
+        guard let id = playlist.playlistId else { throw LaneAPIError.invalidURL }
+        await configureAPI()
+        let result = try await LaneAPI.shared.addPlaylistToLibrary(token: token, playlistId: id)
+        status = result.status
+        output = result.pretty
+        await loadLibrary()
+    }
+
+    func sharePlaylist(_ playlist: LanePlaylist) async throws -> URL {
+        guard let id = playlist.playlistId else { throw LaneAPIError.invalidURL }
+        await configureAPI()
+        let share = try await LaneAPI.shared.createShareLink(
+            token: token,
+            elementId: id,
+            type: "playlist"
+        )
+        guard let url = URL(string: "https://music.sk-lane.com/\(share.id)") else {
+            throw LaneAPIError.invalidURL
         }
+        return url
     }
 
     func addTrack(_ track: TrackCandidate, to playlist: LanePlaylist) {
@@ -2486,37 +2544,97 @@ final class LaneSession: ObservableObject {
     // MARK: Downloads
 
     func downloadTrack(_ track: TrackCandidate) {
-        guard let trackID = track.trackID else { return }
+        guard track.trackID != nil else { return }
 
         busy = true
         Task {
             defer { busy = false }
             do {
                 await configureAPI()
-                let stream = try await LaneAPI.shared.downloadURL(token: token, trackId: trackID, quality: streamQuality)
-                guard let remoteURL = URL(string: stream.url) else {
-                    throw LaneAPIError.invalidURL
-                }
-
-                let (temporary, _) = try await URLSession.shared.download(from: remoteURL)
-                let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                    .appendingPathComponent("LaneDownloads", isDirectory: true)
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-
-                let safeID = trackID.replacingOccurrences(of: "/", with: "_")
-                let ext = remoteURL.pathExtension.isEmpty ? "m4a" : remoteURL.pathExtension
-                let destination = directory.appendingPathComponent("\(safeID).\(ext)")
-
-                try? FileManager.default.removeItem(at: destination)
-                try FileManager.default.moveItem(at: temporary, to: destination)
-
-                downloadedTrackIDs.insert(trackID)
-                UserDefaults.standard.set(Array(downloadedTrackIDs), forKey: "lane.downloads")
+                try await persistDownloadedTrack(track)
                 output = "Downloaded \(track.title)"
             } catch {
                 output = error.localizedDescription
             }
         }
+    }
+
+    func downloadPlaylistTracks(_ tracks: [TrackCandidate], playlistID: String) {
+        guard !tracks.isEmpty, playlistDownloadTasks[playlistID] == nil else { return }
+
+        playlistDownloads[playlistID] = LanePlaylistDownloadState(
+            completed: 0, total: tracks.count, failed: 0, isRunning: true
+        )
+
+        playlistDownloadTasks[playlistID] = Task {
+            await configureAPI()
+            var completed = 0
+            var failed = 0
+
+            for track in tracks {
+                if Task.isCancelled { break }
+                do {
+                    if !isDownloaded(track) {
+                        try await persistDownloadedTrack(track)
+                    }
+                } catch {
+                    if Task.isCancelled { break }
+                    failed += 1
+                    output = "Download failed for \(track.title): \(error.localizedDescription)"
+                }
+                completed += 1
+                playlistDownloads[playlistID] = LanePlaylistDownloadState(
+                    completed: completed, total: tracks.count, failed: failed, isRunning: true
+                )
+            }
+
+            playlistDownloads[playlistID] = LanePlaylistDownloadState(
+                completed: completed, total: tracks.count, failed: failed, isRunning: false
+            )
+            playlistDownloadTasks[playlistID] = nil
+        }
+    }
+
+    func cancelPlaylistDownload(_ playlistID: String) {
+        playlistDownloadTasks[playlistID]?.cancel()
+    }
+
+    private func persistDownloadedTrack(_ track: TrackCandidate) async throws {
+        guard let trackID = track.trackID else { throw LaneAPIError.invalidURL }
+        let stream = try await LaneAPI.shared.downloadURL(
+            token: token, trackId: trackID, quality: streamQuality
+        )
+        guard let remoteURL = URL(string: stream.url) else {
+            throw LaneAPIError.invalidURL
+        }
+
+        let (temporary, response) = try await URLSession.shared.download(from: remoteURL)
+        try Task.checkCancellation()
+        if let http = response as? HTTPURLResponse,
+           !(200..<300).contains(http.statusCode) {
+            try? FileManager.default.removeItem(at: temporary)
+            throw NSError(
+                domain: "LaneDownload",
+                code: http.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "Audio download returned HTTP \(http.statusCode)"]
+            )
+        }
+
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("LaneDownloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let safeID = trackID.replacingOccurrences(of: "/", with: "_")
+        let ext = remoteURL.pathExtension.isEmpty ? "m4a" : remoteURL.pathExtension
+        let destination = directory.appendingPathComponent("\(safeID).\(ext)")
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+        } else {
+            try FileManager.default.moveItem(at: temporary, to: destination)
+        }
+
+        downloadedTrackIDs.insert(trackID)
+        UserDefaults.standard.set(Array(downloadedTrackIDs), forKey: "lane.downloads")
     }
 
     func isDownloaded(_ track: TrackCandidate) -> Bool {

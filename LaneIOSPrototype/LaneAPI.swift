@@ -946,6 +946,27 @@ actor LaneAPI {
         try await request(path: "/user/playlist/add", token: token, query: [.init(name: "playlistId", value: playlistId)])
     }
 
+    func setPlaylistVisibility(token: String, playlistId: String, visibility: String) async throws -> APIResult {
+        try await request(
+            path: "/playlist/\(playlistId)/visibility",
+            method: "POST",
+            token: token,
+            json: ["visibility": visibility]
+        )
+    }
+
+    func createShareLink(token: String, elementId: String, type: String) async throws -> LaneShareItem {
+        try await decoded(
+            LaneShareItem.self,
+            path: "/share/create",
+            token: token,
+            query: [
+                .init(name: "shareElementId", value: elementId),
+                .init(name: "shareType", value: type)
+            ]
+        )
+    }
+
     func addTracks(token: String, playlistId: String, trackIds: [String]) async throws -> APIResult {
         // The Android UserApi.M signature is @Body List<String>. Retrying a
         // rejected mutation with guessed object shapes only sends extra POSTs

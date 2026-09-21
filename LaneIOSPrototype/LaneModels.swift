@@ -31,6 +31,10 @@ struct TrackStatsDTO: Decodable {
     let commentsCount: Int64
 }
 
+struct LaneShareItem: Decodable {
+    let id: String
+}
+
 
 struct LaneTrackLyricsLine: Decodable, Hashable, Identifiable {
     let startTimeMs: String

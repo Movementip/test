@@ -347,6 +347,102 @@ struct APKTrackActionsSheet: View {
     }
 }
 
+struct APKPlaylistActionsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let playlist: LanePlaylist
+    let creatorName: String
+    let isOwner: Bool
+    let isSaved: Bool
+    let visibility: String
+    let onEdit: () -> Void
+    let onShare: () -> Void
+    let onToggleVisibility: () -> Void
+    let onSave: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                Capsule()
+                    .fill(Color.white.opacity(0.35))
+                    .frame(width: 40, height: 5)
+                    .padding(.top, 10)
+                    .padding(.bottom, 18)
+
+                APKRemoteImage(url: playlist.playlistImageUrl, cornerRadius: 12)
+                    .frame(width: 200, height: 200)
+
+                Text(playlist.playlistName ?? "Playlist")
+                    .font(.system(size: 21, weight: .bold))
+                    .lineLimit(1)
+                    .padding(.top, 16)
+
+                Text(creatorName)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .padding(.top, 5)
+                    .padding(.bottom, 20)
+
+                if isOwner {
+                    action("Edit", icon: "pencil", asset: nil, perform: onEdit)
+                } else if !isSaved {
+                    action("Add to Library", icon: "square.stack", asset: "ic_lib_outline", perform: onSave)
+                }
+
+                action("Share", icon: "square.and.arrow.up", asset: "ic_share", perform: onShare)
+
+                if isOwner {
+                    action(
+                        visibility.lowercased() == "public" ? "Make private" : "Make public",
+                        icon: visibility.lowercased() == "public" ? "eye.slash" : "eye",
+                        asset: visibility.lowercased() == "public" ? "invisible" : "visible",
+                        perform: onToggleVisibility
+                    )
+                    action("Delete", icon: "trash", asset: "ic_delete", perform: onDelete)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 22)
+            .padding(.bottom, 28)
+        }
+        .background(apkBackground.ignoresSafeArea())
+        .preferredColorScheme(.dark)
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.hidden)
+    }
+
+    private func action(
+        _ title: String,
+        icon: String,
+        asset: String?,
+        perform: @escaping () -> Void
+    ) -> some View {
+        Button {
+            dismiss()
+            perform()
+        } label: {
+            HStack(spacing: 17) {
+                if let asset {
+                    APKTemplateIcon(name: asset, size: 25)
+                        .frame(width: 28)
+                } else {
+                    Image(systemName: icon)
+                        .font(.system(size: 22, weight: .medium))
+                        .frame(width: 28)
+                }
+                Text(title)
+                    .font(.system(size: 16, weight: .semibold))
+                Spacer()
+            }
+            .foregroundStyle(.white)
+            .frame(height: 54)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 struct APKSearchArtistRow: View {
     let artist: LaneArtist
 
