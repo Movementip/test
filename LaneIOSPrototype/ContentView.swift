@@ -1479,6 +1479,7 @@ struct PlaylistDetailScreen: View {
     @State private var tracks: [TrackCandidate] = []
     @State private var loading = true
     @State private var confirmDelete = false
+    @State private var actionTrack: TrackCandidate?
 
     var body: some View {
         ScrollView {
@@ -1604,71 +1605,62 @@ struct PlaylistDetailScreen: View {
                 } else {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
-                            Button {
-                                session.queue = tracks
-                                session.currentIndex = index
-                                session.requestStream(for: track)
-                                showPlayer = true
-                            } label: {
-                                HStack(spacing: 12) {
-                                    Group {
-                                        if session.currentTrack?.id == track.id {
-                                            Image(systemName: "waveform")
-                                                .font(.system(size: 12, weight: .bold))
-                                                .foregroundStyle(lanePink)
-                                        } else {
-                                            Text("\(index + 1)")
-                                                .font(.system(size: 12, weight: .medium))
-                                                .foregroundStyle(Color.white.opacity(0.45))
+                            HStack(spacing: 0) {
+                                Button {
+                                    session.queue = tracks
+                                    session.currentIndex = index
+                                    session.requestStream(for: track)
+                                    showPlayer = true
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        Group {
+                                            if session.currentTrack?.id == track.id {
+                                                Image(systemName: "waveform")
+                                                    .font(.system(size: 12, weight: .bold))
+                                                    .foregroundStyle(lanePink)
+                                            } else {
+                                                Text("\(index + 1)")
+                                                    .font(.system(size: 12, weight: .medium))
+                                                    .foregroundStyle(Color.white.opacity(0.45))
+                                            }
                                         }
+                                        .frame(width: 24)
+
+                                        ArtworkView(url: track.coverURL, size: 46, radius: 5)
+
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(track.title)
+                                                .font(.system(size: 15, weight: .semibold))
+                                                .foregroundStyle(
+                                                    session.currentTrack?.id == track.id ? lanePink : .white
+                                                )
+                                                .lineLimit(1)
+
+                                            Text(track.subtitle)
+                                                .font(.system(size: 12))
+                                                .foregroundStyle(Color.white.opacity(0.56))
+                                                .lineLimit(1)
+                                        }
+
+                                        Spacer()
                                     }
-                                    .frame(width: 24)
-
-                                    ArtworkView(url: track.coverURL, size: 46, radius: 5)
-
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(track.title)
-                                            .font(.system(size: 15, weight: .semibold))
-                                            .foregroundStyle(
-                                                session.currentTrack?.id == track.id ? lanePink : .white
-                                            )
-                                            .lineLimit(1)
-
-                                        Text(track.subtitle)
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(Color.white.opacity(0.56))
-                                            .lineLimit(1)
-                                    }
-
-                                    Spacer()
-
-                                    Menu {
-                                        Button("Play next", systemImage: "text.insert") {
-                                            session.playNext(track)
-                                        }
-                                        Button("Add to queue", systemImage: "text.badge.plus") {
-                                            session.addToQueue(track)
-                                        }
-                                        Button(
-                                            session.isFavorite(track) ? "Remove from favorites" : "Add to favorites",
-                                            systemImage: session.isFavorite(track) ? "heart.slash" : "heart"
-                                        ) {
-                                            session.toggleFavorite(track)
-                                        }
-                                        Button("Download", systemImage: "arrow.down.circle") {
-                                            session.downloadTrack(track)
-                                        }
-                                    } label: {
-                                        Image(systemName: "ellipsis")
-                                            .font(.system(size: 17, weight: .semibold))
-                                            .foregroundStyle(Color.white.opacity(0.62))
-                                            .frame(width: 34, height: 46)
-                                    }
+                                    .contentShape(Rectangle())
                                 }
-                                .padding(.horizontal, 16)
-                                .frame(minHeight: 64)
+                                .buttonStyle(.plain)
+
+                                Button {
+                                    actionTrack = track
+                                } label: {
+                                    Image(systemName: "ellipsis")
+                                        .font(.system(size: 17, weight: .semibold))
+                                        .foregroundStyle(Color.white.opacity(0.62))
+                                        .frame(width: 40, height: 58)
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
+                            .padding(.leading, 16)
+                            .padding(.trailing, 10)
+                            .frame(minHeight: 64)
 
                             Rectangle()
                                 .fill(Color.white.opacity(0.055))
@@ -1713,6 +1705,9 @@ struct PlaylistDetailScreen: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This action cannot be undone.")
+        }
+        .sheet(item: $actionTrack) { track in
+            APKTrackActionsSheet(track: track)
         }
     }
 }

@@ -1232,9 +1232,14 @@ struct APKArtistDetailScreen: View {
                                     .font(.system(size: 20, weight: .bold))
                                 Spacer()
                                 if albums.count > 4 {
-                                    Text("Show all")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(Color.white.opacity(0.50))
+                                    NavigationLink {
+                                        APKArtistAlbumsScreen(albums: albums)
+                                    } label: {
+                                        Text("Show all")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(Color.white.opacity(0.50))
+                                    }
+                                    .buttonStyle(.plain)
                                 }
                             }
 
@@ -1262,9 +1267,14 @@ struct APKArtistDetailScreen: View {
                                     .font(.system(size: 20, weight: .bold))
                                 Spacer()
                                 if related.count > 5 {
-                                    Text("Show all")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(Color.white.opacity(0.50))
+                                    NavigationLink {
+                                        APKRelatedArtistsScreen(artists: related)
+                                    } label: {
+                                        Text("Show all")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(Color.white.opacity(0.50))
+                                    }
+                                    .buttonStyle(.plain)
                                 }
                             }
 
@@ -1358,6 +1368,47 @@ struct APKArtistDetailScreen: View {
         session.currentIndex = 0
         session.requestStream(for: list[0])
         showPlayer = true
+    }
+}
+
+private struct APKArtistAlbumsScreen: View {
+    let albums: [LaneAlbum]
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 2) {
+                ForEach(Array(albums.enumerated()), id: \.offset) { _, album in
+                    APKAlbumCardRow(album: album)
+                }
+            }
+            .padding(.vertical, 12)
+        }
+        .background(apkBackground.ignoresSafeArea())
+        .navigationTitle("Albums")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct APKRelatedArtistsScreen: View {
+    let artists: [LaneRelatedArtist]
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 2) {
+                ForEach(Array(artists.enumerated()), id: \.offset) { _, related in
+                    APKArtistCardRow(artist: LaneArtist(
+                        name: related.name,
+                        id: related.id,
+                        platform: related.platform,
+                        avatarUrl: related.avatarUrl
+                    ))
+                }
+            }
+            .padding(.vertical, 12)
+        }
+        .background(apkBackground.ignoresSafeArea())
+        .navigationTitle("Artists")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
