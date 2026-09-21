@@ -3151,9 +3151,16 @@ private struct ImportTracksScreen: View {
     }
 
     private var importTrackIDs: [String] {
-        if let ids = preview?.playlistTracksIds, !ids.isEmpty { return ids }
-        if let tracks = preview?.playlistTracks { return tracks.compactMap(\.songId) }
-        return previewTracks.compactMap(\.trackID)
+        // LanePlaylistItem.getTracksIdsOnly() in Android concatenates resolved
+        // TrackData.songId values with playlistTracksIds. Keep the same order;
+        // preferring playlistTracksIds used to discard the canonical IDs that
+        // the import endpoint can actually accept.
+        let embedded = preview?.playlistTracks?.compactMap(\.songId) ?? []
+        let unresolved = preview?.playlistTracksIds ?? []
+        let fallback = previewTracks.compactMap(\.trackID)
+        let combined = embedded + unresolved + (embedded.isEmpty && unresolved.isEmpty ? fallback : [])
+        var seen = Set<String>()
+        return combined.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
     private var importButtonTitle: String {

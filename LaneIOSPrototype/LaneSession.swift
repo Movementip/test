@@ -972,31 +972,19 @@ final class LaneSession: ObservableObject {
     }
 
     private func canonicalImportBatch(_ sourceIDs: [String]) async throws -> [String] {
-        do {
-            // Android first resolves preview IDs through /user/tracks. Do this
-            // once per import batch, without recursively turning one rejected
-            // body into dozens of identical requests.
-            let tracks = try await LaneAPI.shared.tracksByIds(
-                token: token,
-                ids: sourceIDs,
-                prefetch: false
-            )
-            var seen = Set<String>()
-            let canonical = tracks
-                .compactMap(\.songId)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty && seen.insert($0).inserted }
-
-            // ImportViewModel in Android falls back to the preview's IDs when
-            // preview track resolution is unavailable. Preserve that behavior
-            // instead of waiting through the complete 1,000+ item collection.
-            return canonical.isEmpty ? sourceIDs : canonical
-        } catch {
-            let invalidBody = error.localizedDescription
-                .localizedCaseInsensitiveContains("INVALID_TRACK_IDS_BODY")
-            guard invalidBody else { throw error }
-            return sourceIDs
-        }
+        // A preview page may mix canonical Lane songIds with stale/external
+        // platform IDs. The server rejects the complete body if even one ID is
+        // invalid, so isolate it within this small page and keep every valid
+        // TrackData result. Never pass an unresolved source ID to add-tracks.
+        let tracks = try await resolveTrackDataResilient(
+            sourceIDs,
+            prefetch: false
+        )
+        var seen = Set<String>()
+        return tracks
+            .compactMap(\.songId)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
     @discardableResult
@@ -1032,6 +1020,12 @@ final class LaneSession: ObservableObject {
             let canonical = try await canonicalImportBatch(sourceBatch)
                 .filter { seenCanonical.insert($0).inserted }
             let pending = canonical.filter { !existing.contains($0) }
+
+            if canonical.isEmpty {
+                processed += sourceBatch.count
+                progress(processed, clean.count, "")
+                continue
+            }
 
             if !pending.isEmpty {
                 progress(processed, clean.count, "Adding \(start + 1)–\(end) of \(clean.count)…")
