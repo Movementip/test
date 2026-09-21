@@ -1209,50 +1209,6 @@ final class LaneSession: ObservableObject {
         }
     }
 
-    private func validateImportIDs(_ ids: [String]) async throws -> Set<String> {
-        var valid = Set<String>()
-        let bearer = token
-
-        // A rejected batch may contain one bad ID. The read-only resolver can
-        // check candidates independently without risking duplicate additions.
-        for start in stride(from: 0, to: ids.count, by: 6) {
-            try Task.checkCancellation()
-            let end = min(start + 6, ids.count)
-            let wave = Array(ids[start..<end])
-            let accepted = try await withThrowingTaskGroup(
-                of: String?.self,
-                returning: [String].self
-            ) { group in
-                for id in wave {
-                    group.addTask {
-                        do {
-                            let tracks = try await LaneAPI.shared.tracksByIds(
-                                token: bearer,
-                                ids: [id],
-                                prefetch: false
-                            )
-                            return tracks.contains { $0.songId == id } ? id : nil
-                        } catch {
-                            if error.localizedDescription.localizedCaseInsensitiveContains("INVALID_TRACK_IDS_BODY") {
-                                return nil
-                            }
-                            throw error
-                        }
-                    }
-                }
-
-                var resolved: [String] = []
-                for try await id in group {
-                    if let id { resolved.append(id) }
-                }
-                return resolved
-            }
-            valid.formUnion(accepted)
-        }
-
-        return valid
-    }
-
     private func addImportIDsBySplitting(
         _ ids: [String],
         into playlistID: String
@@ -1303,34 +1259,20 @@ final class LaneSession: ObservableObject {
               result.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY") else {
             throw LaneAPIError.http(result.status, result.pretty)
         }
+        guard ids.count > 1 else { return [] }
 
-        let valid = try await validateImportIDs(ids)
-        let candidates = ids.filter { valid.contains($0) }
-        guard !candidates.isEmpty else {
-            throw LaneAPIError.decoding(
-                "Lane rejected this import batch, and /user/tracks did not recognize any of its \(ids.count) matched track IDs. No tracks from this batch were added."
-            )
-        }
-
-        let added: [String]
-        if candidates.count == ids.count, candidates.count > 1 {
-            let middle = candidates.count / 2
-            let left = try await addImportIDsBySplitting(
-                Array(candidates[..<middle]),
-                into: playlistID
-            )
-            let right = try await addImportIDsBySplitting(
-                Array(candidates[middle...]),
-                into: playlistID
-            )
-            added = left + right
-        } else {
-            added = try await addImportIDsBySplitting(candidates, into: playlistID)
-        }
+        // /user/tracks is a separate read API. Its rejection cannot prove that
+        // an ID is invalid for the playlist mutation, so do not let it veto
+        // every matched track. A definite 400 from add-tracks is safe to split
+        // into smaller, ordered requests; ambiguous failures are never retried.
+        let middle = ids.count / 2
+        let left = try await addImportIDsBySplitting(Array(ids[..<middle]), into: playlistID)
+        let right = try await addImportIDsBySplitting(Array(ids[middle...]), into: playlistID)
+        let added = left + right
 
         guard !added.isEmpty else {
             throw LaneAPIError.decoding(
-                "Lane rejected even individually verified track IDs in /user/playlist/add-tracks. No tracks from this batch were added."
+                "Lane rejected all \(ids.count) matched track IDs individually in /user/playlist/add-tracks. No tracks from this batch were added."
             )
         }
         return added
