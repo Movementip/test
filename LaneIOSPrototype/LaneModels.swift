@@ -84,6 +84,17 @@ struct TrackData: Decodable, Hashable {
     let artistAvatars: [String]?
 }
 
+struct YandexImportTrack: Identifiable, Hashable, Sendable {
+    let yandexID: String
+    let originalIndex: Int
+    let title: String
+    let artists: [String]
+    let coverURL: String?
+
+    var id: String { "\(yandexID)|\(originalIndex)" }
+    var artistText: String { artists.joined(separator: ", ") }
+}
+
 struct LaneRelatedArtist: Decodable, Hashable {
     let id: String?
     let name: String?

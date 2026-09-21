@@ -2,6 +2,32 @@ import Foundation
 import AVFoundation
 import MediaPlayer
 
+private struct YandexPlaylistEnvelope: Decodable {
+    let result: YandexPlaylistPayload
+}
+
+private struct YandexPlaylistPayload: Decodable {
+    let tracks: [YandexPlaylistEntry]
+}
+
+private struct YandexPlaylistEntry: Decodable {
+    let id: String?
+    let originalIndex: Int?
+    let track: YandexTrackPayload?
+}
+
+private struct YandexTrackPayload: Decodable {
+    let id: String?
+    let title: String?
+    let artists: [YandexArtistPayload]?
+    let coverUri: String?
+    let available: Bool?
+}
+
+private struct YandexArtistPayload: Decodable {
+    let name: String?
+}
+
 @MainActor
 final class LaneSession: ObservableObject {
     // MARK: Account / API
@@ -919,6 +945,90 @@ final class LaneSession: ObservableObject {
         return ordered.map { TrackCandidate($0, refID: playlist.playlistId) }
     }
 
+    func yandexPlaylistTracks(from source: String) async throws -> [YandexImportTrack] {
+        let clean = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let pageURL = URL(string: clean),
+              let playlistUUID = pageURL.pathComponents.last(where: { $0.hasPrefix("lk.") }) else {
+            throw LaneAPIError.decoding("Invalid Yandex Music playlist link")
+        }
+
+        var pageRequest = URLRequest(url: pageURL)
+        pageRequest.timeoutInterval = 25
+        pageRequest.setValue(
+            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36",
+            forHTTPHeaderField: "User-Agent"
+        )
+        let (pageData, pageResponse) = try await URLSession.shared.data(for: pageRequest)
+        guard let pageHTTP = pageResponse as? HTTPURLResponse,
+              (200..<300).contains(pageHTTP.statusCode),
+              let rawHTML = String(data: pageData, encoding: .utf8) else {
+            throw LaneAPIError.decoding("Yandex Music did not return the public playlist page")
+        }
+
+        let html = rawHTML.replacingOccurrences(of: "\\\"", with: "\"")
+        let marker = "\"playlistUuid\":\"\(playlistUUID)\""
+        var cursor = html.startIndex
+        var ownerAndKind: (String, String)?
+        let expression = try NSRegularExpression(pattern: #"\"uid\":([0-9]+),\"kind\":([0-9]+)"#)
+
+        while cursor < html.endIndex,
+              let markerRange = html.range(of: marker, range: cursor..<html.endIndex) {
+            let windowEnd = html.index(
+                markerRange.upperBound,
+                offsetBy: 2_000,
+                limitedBy: html.endIndex
+            ) ?? html.endIndex
+            let window = String(html[markerRange.lowerBound..<windowEnd])
+            let fullRange = NSRange(window.startIndex..<window.endIndex, in: window)
+            if let match = expression.firstMatch(in: window, range: fullRange),
+               let uidRange = Range(match.range(at: 1), in: window),
+               let kindRange = Range(match.range(at: 2), in: window) {
+                ownerAndKind = (String(window[uidRange]), String(window[kindRange]))
+                break
+            }
+            cursor = markerRange.upperBound
+        }
+
+        guard let (uid, kind) = ownerAndKind,
+              let apiURL = URL(string: "https://api.music.yandex.net/users/\(uid)/playlists/\(kind)") else {
+            throw LaneAPIError.decoding("Could not resolve the public Yandex Music playlist")
+        }
+
+        var apiRequest = URLRequest(url: apiURL)
+        apiRequest.timeoutInterval = 45
+        apiRequest.setValue("Yandex-Music-API", forHTTPHeaderField: "User-Agent")
+        apiRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (apiData, apiResponse) = try await URLSession.shared.data(for: apiRequest)
+        guard let apiHTTP = apiResponse as? HTTPURLResponse,
+              (200..<300).contains(apiHTTP.statusCode) else {
+            throw LaneAPIError.http(
+                (apiResponse as? HTTPURLResponse)?.statusCode ?? 0,
+                "Yandex Music playlist metadata is unavailable"
+            )
+        }
+
+        let payload = try JSONDecoder().decode(YandexPlaylistEnvelope.self, from: apiData).result
+        return payload.tracks.enumerated().compactMap { offset, entry in
+            guard let track = entry.track,
+                  track.available != false,
+                  let id = track.id ?? entry.id,
+                  let title = track.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !id.isEmpty,
+                  !title.isEmpty else { return nil }
+            let cover = track.coverUri.map {
+                let value = $0.replacingOccurrences(of: "%%", with: "200x200")
+                return value.hasPrefix("http") ? value : "https://\(value)"
+            }
+            return YandexImportTrack(
+                yandexID: id,
+                originalIndex: entry.originalIndex ?? offset,
+                title: title,
+                artists: (track.artists ?? []).compactMap(\.name),
+                coverURL: cover
+            )
+        }
+    }
+
     private func serverTrackIDs(in playlistID: String) async throws -> Set<String> {
         let cached = serverPlaylists.first { $0.playlistId == playlistID }
 
@@ -985,6 +1095,163 @@ final class LaneSession: ObservableObject {
             .compactMap(\.songId)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    nonisolated private static func normalizedImportText(_ value: String) -> String {
+        let folded = value.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")
+        )
+        var separated = String.UnicodeScalarView()
+        for scalar in folded.unicodeScalars {
+            separated.append(CharacterSet.alphanumerics.contains(scalar) ? scalar : " ")
+        }
+        return String(separated)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+
+    nonisolated private static func bestLaneMatchID(
+        for source: YandexImportTrack,
+        in response: LaneCombinedSearchResponse
+    ) -> String? {
+        let wantedTitle = normalizedImportText(source.title)
+        let wantedArtists = source.artists.map(normalizedImportText).filter { !$0.isEmpty }
+        var best: (score: Int, id: String)?
+
+        for item in response.results {
+            guard let track = item.track,
+                  let songID = track.songId,
+                  !songID.isEmpty else { continue }
+            let title = normalizedImportText(track.title ?? "")
+            let artist = normalizedImportText(track.artistsDisplayedName ?? "")
+            var score = 0
+
+            if title == wantedTitle {
+                score += 100
+            } else if !title.isEmpty,
+                      (title.contains(wantedTitle) || wantedTitle.contains(title)) {
+                score += 55
+            }
+
+            let artistMatched = wantedArtists.contains { wanted in
+                artist == wanted || artist.contains(wanted) || wanted.contains(artist)
+            }
+            if artistMatched {
+                score += wantedArtists.contains(artist) ? 60 : 40
+            }
+
+            if best == nil || score > best!.score {
+                best = (score, songID)
+            }
+        }
+
+        let minimumScore = wantedArtists.isEmpty ? 100 : 120
+        guard let best, best.score >= minimumScore else { return nil }
+        return best.id
+    }
+
+    private func resolveYandexImportBatch(
+        _ batch: [YandexImportTrack],
+        cache: inout [String: String]
+    ) async throws -> [(YandexImportTrack, String)] {
+        let unresolved = batch.filter { cache[$0.yandexID] == nil }
+
+        // Six parallel searches are substantially faster than the former
+        // one-request-at-a-time ID resolver while staying below burst limits.
+        for start in stride(from: 0, to: unresolved.count, by: 6) {
+            try Task.checkCancellation()
+            let end = min(start + 6, unresolved.count)
+            let wave = Array(unresolved[start..<end])
+            let resolved = try await withThrowingTaskGroup(
+                of: (String, String?).self,
+                returning: [(String, String?)].self
+            ) { group in
+                for track in wave {
+                    let bearer = token
+                    group.addTask {
+                        let query = ([track.title] + Array(track.artists.prefix(2))).joined(separator: " ")
+                        let response = try await LaneAPI.shared.search(token: bearer, query: query)
+                        return (
+                            track.yandexID,
+                            LaneSession.bestLaneMatchID(for: track, in: response)
+                        )
+                    }
+                }
+
+                var values: [(String, String?)] = []
+                for try await value in group {
+                    values.append(value)
+                }
+                return values
+            }
+
+            for (yandexID, laneID) in resolved {
+                if let laneID { cache[yandexID] = laneID }
+            }
+        }
+
+        return batch.compactMap { source in
+            guard let laneID = cache[source.yandexID], !laneID.isEmpty else { return nil }
+            return (source, laneID)
+        }
+    }
+
+    @discardableResult
+    func importYandexTracks(
+        _ tracks: [YandexImportTrack],
+        into playlistID: String,
+        progress: @escaping (_ completed: Int, _ total: Int, _ stage: String) -> Void,
+        importedBatch: @escaping ([YandexImportTrack]) -> Void
+    ) async throws -> Int {
+        guard !tracks.isEmpty else { throw LaneAPIError.emptyResponse }
+        await configureAPI()
+        progress(0, tracks.count, "Checking Lane playlist…")
+
+        var existing = try await serverTrackIDs(in: playlistID)
+        var cache = UserDefaults.standard.dictionary(forKey: "lane.yandexTrackMap") as? [String: String] ?? [:]
+        var seenLaneIDs = Set<String>()
+        var processed = 0
+        var imported = 0
+
+        for start in stride(from: 0, to: tracks.count, by: 15) {
+            try Task.checkCancellation()
+            let end = min(start + 15, tracks.count)
+            let sourceBatch = Array(tracks[start..<end])
+            progress(processed, tracks.count, "Matching \(start + 1)–\(end) of \(tracks.count)…")
+
+            let matches = try await resolveYandexImportBatch(sourceBatch, cache: &cache)
+                .filter { seenLaneIDs.insert($0.1).inserted }
+            let pendingIDs = matches.map(\.1).filter { !existing.contains($0) }
+
+            if !pendingIDs.isEmpty {
+                progress(processed, tracks.count, "Adding \(start + 1)–\(end) of \(tracks.count)…")
+                let result = try await LaneAPI.shared.addTracks(
+                    token: token,
+                    playlistId: playlistID,
+                    trackIds: pendingIDs
+                )
+                status = result.status
+                guard (200..<300).contains(result.status) else {
+                    throw LaneAPIError.http(result.status, result.pretty)
+                }
+            }
+
+            existing.formUnion(matches.map(\.1))
+            imported += matches.count
+            processed += sourceBatch.count
+            importedBatch(matches.map(\.0))
+            progress(processed, tracks.count, "")
+            UserDefaults.standard.set(cache, forKey: "lane.yandexTrackMap")
+
+            if end < tracks.count {
+                try await Task.sleep(nanoseconds: 150_000_000)
+            }
+        }
+
+        output = "Imported \(imported) of \(tracks.count) Yandex tracks to Lane"
+        await loadLibrary()
+        return imported
     }
 
     @discardableResult
