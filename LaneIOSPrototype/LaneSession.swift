@@ -1209,6 +1209,133 @@ final class LaneSession: ObservableObject {
         }
     }
 
+    private func validateImportIDs(_ ids: [String]) async throws -> Set<String> {
+        var valid = Set<String>()
+        let bearer = token
+
+        // A rejected batch may contain one bad ID. The read-only resolver can
+        // check candidates independently without risking duplicate additions.
+        for start in stride(from: 0, to: ids.count, by: 6) {
+            try Task.checkCancellation()
+            let end = min(start + 6, ids.count)
+            let wave = Array(ids[start..<end])
+            let accepted = try await withThrowingTaskGroup(
+                of: String?.self,
+                returning: [String].self
+            ) { group in
+                for id in wave {
+                    group.addTask {
+                        do {
+                            let tracks = try await LaneAPI.shared.tracksByIds(
+                                token: bearer,
+                                ids: [id],
+                                prefetch: false
+                            )
+                            return tracks.contains { $0.songId == id } ? id : nil
+                        } catch {
+                            if error.localizedDescription.localizedCaseInsensitiveContains("INVALID_TRACK_IDS_BODY") {
+                                return nil
+                            }
+                            throw error
+                        }
+                    }
+                }
+
+                var resolved: [String] = []
+                for try await id in group {
+                    if let id { resolved.append(id) }
+                }
+                return resolved
+            }
+            valid.formUnion(accepted)
+        }
+
+        return valid
+    }
+
+    private func addImportIDsBySplitting(
+        _ ids: [String],
+        into playlistID: String
+    ) async throws -> [String] {
+        guard !ids.isEmpty else { return [] }
+        try Task.checkCancellation()
+
+        let result = try await LaneAPI.shared.addTracks(
+            token: token,
+            playlistId: playlistID,
+            trackIds: ids
+        )
+        status = result.status
+        if (200..<300).contains(result.status) {
+            return ids
+        }
+
+        guard result.status == 400,
+              result.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY") else {
+            throw LaneAPIError.http(result.status, result.pretty)
+        }
+        guard ids.count > 1 else { return [] }
+
+        // Only an explicit validation rejection is safe to split. A timeout
+        // or ambiguous transport failure still stops immediately.
+        let middle = ids.count / 2
+        let left = try await addImportIDsBySplitting(Array(ids[..<middle]), into: playlistID)
+        let right = try await addImportIDsBySplitting(Array(ids[middle...]), into: playlistID)
+        return left + right
+    }
+
+    private func addYandexImportBatch(
+        _ ids: [String],
+        into playlistID: String
+    ) async throws -> [String] {
+        guard !ids.isEmpty else { return [] }
+        let result = try await LaneAPI.shared.addTracks(
+            token: token,
+            playlistId: playlistID,
+            trackIds: ids
+        )
+        status = result.status
+        if (200..<300).contains(result.status) {
+            return ids
+        }
+
+        guard result.status == 400,
+              result.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY") else {
+            throw LaneAPIError.http(result.status, result.pretty)
+        }
+
+        let valid = try await validateImportIDs(ids)
+        let candidates = ids.filter { valid.contains($0) }
+        guard !candidates.isEmpty else {
+            throw LaneAPIError.decoding(
+                "Lane rejected this import batch, and /user/tracks did not recognize any of its \(ids.count) matched track IDs. No tracks from this batch were added."
+            )
+        }
+
+        let added: [String]
+        if candidates.count == ids.count, candidates.count > 1 {
+            let middle = candidates.count / 2
+            let left = try await addImportIDsBySplitting(
+                Array(candidates[..<middle]),
+                into: playlistID
+            )
+            let right = try await addImportIDsBySplitting(
+                Array(candidates[middle...]),
+                into: playlistID
+            )
+            added = left + right
+        } else {
+            added = try await addImportIDsBySplitting(candidates, into: playlistID)
+        }
+
+        guard !added.isEmpty else {
+            throw LaneAPIError.decoding(
+                "Lane rejected even individually verified track IDs in /user/playlist/add-tracks. No tracks from this batch were added."
+            )
+        }
+        return added
+    }
+
     @discardableResult
     func importYandexTracks(
         _ tracks: [YandexImportTrack],
@@ -1235,24 +1362,19 @@ final class LaneSession: ObservableObject {
             let matches = try await resolveYandexImportBatch(sourceBatch, cache: &cache)
                 .filter { seenLaneIDs.insert($0.1).inserted }
             let pendingIDs = matches.map(\.1).filter { !existing.contains($0) }
+            var confirmedIDs = Set(matches.map(\.1).filter { existing.contains($0) })
 
             if !pendingIDs.isEmpty {
                 progress(processed, tracks.count, "Adding \(start + 1)–\(end) of \(tracks.count)…")
-                let result = try await LaneAPI.shared.addTracks(
-                    token: token,
-                    playlistId: playlistID,
-                    trackIds: pendingIDs
-                )
-                status = result.status
-                guard (200..<300).contains(result.status) else {
-                    throw LaneAPIError.http(result.status, result.pretty)
-                }
+                let addedIDs = try await addYandexImportBatch(pendingIDs, into: playlistID)
+                confirmedIDs.formUnion(addedIDs)
             }
 
-            existing.formUnion(matches.map(\.1))
-            imported += matches.count
+            existing.formUnion(confirmedIDs)
+            let confirmed = matches.filter { confirmedIDs.contains($0.1) }
+            imported += confirmed.count
             processed += sourceBatch.count
-            importedBatch(matches.map(\.0))
+            importedBatch(confirmed.map(\.0))
             progress(processed, tracks.count, "")
             UserDefaults.standard.set(cache, forKey: "lane.yandexTrackMap")
 
