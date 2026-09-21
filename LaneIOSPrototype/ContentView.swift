@@ -2722,6 +2722,8 @@ private struct ImportTracksScreen: View {
     @State private var localSaving = false
     @State private var importCompleted = 0
     @State private var importTotal = 0
+    @State private var importStage = ""
+    @State private var importTask: Task<Void, Never>?
 
     var body: some View {
         ZStack {
@@ -2762,6 +2764,10 @@ private struct ImportTracksScreen: View {
             if targetPlaylistID.isEmpty {
                 targetPlaylistID = session.serverPlaylists.first?.playlistId ?? ""
             }
+        }
+        .onDisappear {
+            importTask?.cancel()
+            importTask = nil
         }
         .toolbar(.hidden, for: .navigationBar)
     }
@@ -3091,7 +3097,9 @@ private struct ImportTracksScreen: View {
 
                 APKPrimaryButton(
                     title: loading && importTotal > 0
-                        ? "Importing \(importCompleted)/\(importTotal)…"
+                        ? (importStage.isEmpty
+                            ? "Importing \(importCompleted)/\(importTotal)…"
+                            : importStage)
                         : importButtonTitle,
                     loading: loading,
                     enabled: !targetPlaylistID.isEmpty && !importTrackIDs.isEmpty,
@@ -3260,19 +3268,26 @@ private struct ImportTracksScreen: View {
     }
 
     private func performImport(_ ids: [String]) {
+        importTask?.cancel()
         loading = true
         message = ""
         importCompleted = 0
         importTotal = Set(ids.filter { !$0.isEmpty }).count
-        Task {
-            defer { loading = false }
+        importStage = ""
+        importTask = Task {
+            defer {
+                loading = false
+                importStage = ""
+                importTask = nil
+            }
             do {
                 let imported = try await session.importTracks(
                     ids,
                     into: targetPlaylistID
-                ) { completed, total in
+                ) { completed, total, stage in
                     importCompleted = completed
                     importTotal = total
+                    importStage = stage
                 }
                 if imported >= importTotal {
                     message = "All \(imported) tracks are now in the Lane playlist."

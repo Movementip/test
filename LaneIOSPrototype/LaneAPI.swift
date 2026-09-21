@@ -436,7 +436,9 @@ actor LaneAPI {
         // Stream resolution already has endpoint/quality compatibility
         // fallbacks at the player layer. One pass over both regional hosts is
         // enough here and prevents the UI appearing to load forever offline.
-        let retryRounds = canFailOverRegionalHost && normalizedPath != "/track/stream" ? 2 : 1
+        let retryRounds = canFailOverRegionalHost &&
+            normalizedPath != "/track/stream" &&
+            normalizedPath != "/user/tracks" ? 2 : 1
         let longReadPaths: Set<String> = [
             "/user/import/preview",
             "/user/tracks",
@@ -447,7 +449,7 @@ actor LaneAPI {
             "/track/download"
         ]
         let requestTimeout: TimeInterval = canFailOverRegionalHost
-            ? (normalizedPath == "/user/import/preview" ? 45 : (normalizedPath == "/track/stream" ? 6 : (longReadPaths.contains(normalizedPath) ? 20 : 12)))
+            ? (normalizedPath == "/user/import/preview" ? 45 : (normalizedPath == "/track/stream" ? 6 : (normalizedPath == "/user/tracks" ? 12 : (longReadPaths.contains(normalizedPath) ? 20 : 12))))
             : 30
 
         for round in 0..<retryRounds {
