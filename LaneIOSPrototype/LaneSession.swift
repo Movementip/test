@@ -14,6 +14,18 @@ private struct YandexPlaylistEntry: Decodable {
     let id: String?
     let originalIndex: Int?
     let track: YandexTrackPayload?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, originalIndex, track
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? values.decode(String.self, forKey: .id))
+            ?? (try? values.decode(Int64.self, forKey: .id)).map(String.init)
+        originalIndex = try values.decodeIfPresent(Int.self, forKey: .originalIndex)
+        track = try values.decodeIfPresent(YandexTrackPayload.self, forKey: .track)
+    }
 }
 
 private struct YandexTrackPayload: Decodable {
