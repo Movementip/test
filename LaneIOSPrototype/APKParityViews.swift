@@ -1962,7 +1962,7 @@ struct APKFullPlayerView: View {
                             .padding(.horizontal, 8)
                             .transition(.opacity.combined(with: .scale(scale: 0.98)))
                             .offset(x: artworkDragOffset)
-                            .opacity(1 - min(abs(artworkDragOffset) / 500, 0.35))
+                            .opacity(1 - min(Double(abs(artworkDragOffset)) / 500.0, 0.35))
                             .contentShape(Rectangle())
                             .simultaneousGesture(
                                 DragGesture(minimumDistance: 38)
