@@ -2734,8 +2734,9 @@ private struct ImportTracksScreen: View {
     @State private var importStage = ""
     @State private var importTask: Task<Void, Never>?
     @State private var yandexTracks: [YandexImportTrack] = []
-    @State private var importedYandexTracks: [YandexImportTrack] = []
+    @State private var importedTrackIDs: [String] = []
     @State private var importSort: MusicImportSort = .original
+    @State private var previewRequestID = UUID()
 
     var body: some View {
         ZStack {
@@ -3075,19 +3076,29 @@ private struct ImportTracksScreen: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(playlist.playlistName ?? "Import preview")
                         .font(.headline)
-                    Text("\(importSourceCount) tracks")
+                    Text("\(importSourceCount) tracks in Lane preview")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
             }
 
             if !yandexTracks.isEmpty {
-                Picker("Order", selection: $importSort) {
+                if yandexTracks.count != importSourceCount {
+                    Text("Yandex shows \(yandexTracks.count) tracks, but Lane returned \(importSourceCount) importable IDs. Only the Lane preview can be added to a Lane playlist.")
+                        .font(.caption)
+                        .foregroundStyle(lanePink)
+                }
+
+                Picker("Display order", selection: $importSort) {
                     ForEach(MusicImportSort.allCases) { option in
                         Text(option.rawValue).tag(option)
                     }
                 }
                 .pickerStyle(.menu)
+
+                Text("Display sorting does not change the Lane preview import order.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
 
                 ForEach(Array(sortedYandexTracks.prefix(8))) { track in
                     HStack(spacing: 10) {
@@ -3141,21 +3152,22 @@ private struct ImportTracksScreen: View {
                 )
             }
 
-            if !importedYandexTracks.isEmpty {
+            if !importedTrackIDs.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Added to Lane · \(importedYandexTracks.count)")
+                    Text("In Lane playlist · \(importedTrackIDs.count)")
                         .font(.system(size: 14, weight: .bold))
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 12) {
-                            ForEach(Array(importedYandexTracks.suffix(12))) { track in
+                            ForEach(Array(importedTrackIDs.suffix(12)), id: \.self) { id in
+                                let track = preview?.playlistTracks?.first { $0.songId == id }
                                 VStack(alignment: .leading, spacing: 6) {
                                     ZStack(alignment: .bottomTrailing) {
-                                        ArtworkView(url: track.coverURL, size: 72, radius: 10)
+                                        ArtworkView(url: track?.coverUrl, size: 72, radius: 10)
                                         Image(systemName: "checkmark.circle.fill")
                                             .foregroundStyle(Color.green)
                                             .background(Color.black, in: Circle())
                                     }
-                                    Text(track.title)
+                                    Text(track?.title ?? "Lane track")
                                         .font(.caption)
                                         .lineLimit(1)
                                         .frame(width: 72, alignment: .leading)
@@ -3218,8 +3230,7 @@ private struct ImportTracksScreen: View {
         // the import endpoint can actually accept.
         let embedded = preview?.playlistTracks?.compactMap(\.songId) ?? []
         let unresolved = preview?.playlistTracksIds ?? []
-        let fallback = previewTracks.compactMap(\.trackID)
-        let combined = embedded + unresolved + (embedded.isEmpty && unresolved.isEmpty ? fallback : [])
+        let combined = embedded + unresolved
         var seen = Set<String>()
         return combined.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
@@ -3229,7 +3240,7 @@ private struct ImportTracksScreen: View {
     }
 
     private var importSourceCount: Int {
-        yandexTracks.isEmpty ? importTrackIDs.count : yandexTracks.count
+        importTrackIDs.count
     }
 
     private var sortedYandexTracks: [YandexImportTrack] {
@@ -3249,7 +3260,7 @@ private struct ImportTracksScreen: View {
         preview = nil
         previewTracks = []
         yandexTracks = []
-        importedYandexTracks = []
+        importedTrackIDs = []
         importSort = .original
         message = ""
     }
@@ -3269,9 +3280,9 @@ private struct ImportTracksScreen: View {
 
     private func acceptPreview(_ value: LanePlaylist) async {
         preview = value
-        previewTracks = yandexTracks.isEmpty
-            ? await session.tracksForImportPreview(value)
-            : []
+        previewTracks = platform == .yandex
+            ? (value.playlistTracks ?? []).map { TrackCandidate($0, refID: value.playlistId) }
+            : await session.tracksForImportPreview(value)
         if targetPlaylistID.isEmpty {
             targetPlaylistID = session.serverPlaylists.first?.playlistId ?? ""
         }
@@ -3279,12 +3290,16 @@ private struct ImportTracksScreen: View {
     }
 
     private func requestPreview() {
+        resetPreview()
+        let requestID = UUID()
+        previewRequestID = requestID
         loading = true
-        message = ""
         let input = sourceValue.trimmingCharacters(in: .whitespacesAndNewlines)
 
         Task {
-            defer { loading = false }
+            defer {
+                if previewRequestID == requestID { loading = false }
+            }
             do {
                 let result = try await session.previewMusicImport(
                     platform: platform.rawValue,
@@ -3295,10 +3310,18 @@ private struct ImportTracksScreen: View {
                     yandexPlaylistID: platform == .yandex ? input : nil,
                     soundCloudProfileURL: platform == .soundCloud && importKind == .liked ? input : nil
                 )
-                if platform == .yandex {
-                    yandexTracks = try await session.yandexPlaylistTracks(from: input)
-                }
+                guard previewRequestID == requestID else { return }
                 await acceptPreview(result)
+                if platform == .yandex {
+                    // Public Yandex metadata decorates the screen but does not
+                    // delay or determine the Lane import ID list.
+                    Task {
+                        let tracks = (try? await session.yandexPlaylistTracks(from: input)) ?? []
+                        if step == .preview && previewRequestID == requestID {
+                            yandexTracks = tracks
+                        }
+                    }
+                }
             } catch {
                 message = friendlyImportError(error)
             }
@@ -3333,7 +3356,7 @@ private struct ImportTracksScreen: View {
     }
 
     private func importPreviewTracks() {
-        performImport(importTrackIDs, yandex: sortedYandexTracks)
+        performImport(importTrackIDs)
     }
 
     private func saveAllOnDevice() {
@@ -3360,14 +3383,14 @@ private struct ImportTracksScreen: View {
         }
     }
 
-    private func performImport(_ ids: [String], yandex: [YandexImportTrack] = []) {
+    private func performImport(_ ids: [String]) {
         importTask?.cancel()
         loading = true
         message = ""
         importCompleted = 0
-        importTotal = yandex.isEmpty ? Set(ids.filter { !$0.isEmpty }).count : yandex.count
+        importTotal = Set(ids.filter { !$0.isEmpty }).count
         importStage = ""
-        importedYandexTracks = []
+        importedTrackIDs = []
         importTask = Task {
             defer {
                 loading = false
@@ -3380,26 +3403,17 @@ private struct ImportTracksScreen: View {
                     importTotal = total
                     importStage = stage
                 }
-                let imported: Int
-                if yandex.isEmpty {
-                    imported = try await session.importTracks(
-                        ids,
-                        into: targetPlaylistID,
-                        progress: updateProgress
-                    )
-                } else {
-                    imported = try await session.importYandexTracks(
-                        yandex,
-                        into: targetPlaylistID,
-                        progress: updateProgress
-                    ) { batch in
-                        importedYandexTracks.append(contentsOf: batch)
-                    }
+                let imported = try await session.importTracks(
+                    ids,
+                    into: targetPlaylistID,
+                    progress: updateProgress
+                ) { batch in
+                    importedTrackIDs.append(contentsOf: batch)
                 }
                 if imported >= importTotal {
                     message = "All \(imported) tracks are now in the Lane playlist."
                 } else {
-                    message = "Imported \(imported) of \(importTotal) tracks. Lane could not resolve \(importTotal - imported) source tracks."
+                    message = "Added \(imported) of \(importTotal) Lane preview tracks. Lane rejected \(importTotal - imported) IDs."
                 }
             } catch {
                 session.output = "Import error: \(error.localizedDescription)"
