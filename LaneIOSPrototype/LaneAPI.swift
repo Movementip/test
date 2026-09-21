@@ -927,15 +927,47 @@ actor LaneAPI {
     }
 
     func addTracks(token: String, playlistId: String, trackIds: [String]) async throws -> APIResult {
-        // Android contract: playlistId is a query parameter and the body is the
-        // raw JSON string array (not a { trackIds: ... } wrapper).
-        try await request(
-            path: "/user/playlist/add-tracks",
-            method: "POST",
-            token: token,
-            query: [.init(name: "playlistId", value: playlistId)],
-            json: trackIds
-        )
+        // Android 1.4.7 used a raw string array, while the current official
+        // backend validates an object body. Negotiate only when the server
+        // explicitly reports INVALID_PLAYLIST_TRACKS_BODY: that response is
+        // issued before mutation, so trying the next supported encoding cannot
+        // add a batch twice. Custom backends keep the legacy array first.
+        let officialBodies: [Any] = [
+            ["trackIds": trackIds],
+            ["playlistTracks": trackIds],
+            ["playlistTracksIds": trackIds],
+            trackIds
+        ]
+        let customBodies: [Any] = [
+            trackIds,
+            ["trackIds": trackIds],
+            ["playlistTracks": trackIds],
+            ["playlistTracksIds": trackIds]
+        ]
+        let bodies = signingConfiguration.mode == .official ? officialBodies : customBodies
+        var lastResult: APIResult?
+
+        for body in bodies {
+            let result = try await request(
+                path: "/user/playlist/add-tracks",
+                method: "POST",
+                token: token,
+                query: [.init(name: "playlistId", value: playlistId)],
+                json: body
+            )
+            lastResult = result
+
+            if (200..<300).contains(result.status) {
+                return result
+            }
+
+            guard result.status == 400,
+                  result.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY") else {
+                return result
+            }
+        }
+
+        return lastResult ?? APIResult(status: 400, headers: [:], data: Data())
     }
 
     func removeTrack(token: String, playlistId: String, trackId: String) async throws -> APIResult {
