@@ -935,25 +935,32 @@ private struct MiniPlayerView: View {
                     .fill(cardColor)
 
                 HStack(spacing: 0) {
-                    Spacer().frame(width: 10)
+                    Button {
+                        showPlayer = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            ArtworkView(url: track.coverURL, size: 46, radius: 5)
 
-                    ArtworkView(url: track.coverURL, size: 46, radius: 5)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(track.title)
+                                    .font(.system(size: 15, weight: .medium))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.92)
 
-                    Spacer().frame(width: 8)
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(track.title)
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.92)
-
-                        Text(track.subtitle)
-                            .font(.system(size: 10, weight: .regular))
-                            .foregroundStyle(Color.white.opacity(0.70))
-                            .lineLimit(1)
+                                Text(track.subtitle)
+                                    .font(.system(size: 10, weight: .regular))
+                                    .foregroundStyle(Color.white.opacity(0.70))
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: 58)
+                        .contentShape(Rectangle())
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .buttonStyle(.plain)
+                    .padding(.leading, 10)
 
                     Button {
                         session.togglePlayback()
@@ -1000,9 +1007,6 @@ private struct MiniPlayerView: View {
             }
             .offset(x: dragOffset)
             .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-            .onTapGesture {
-                showPlayer = true
-            }
             .simultaneousGesture(
                 DragGesture(minimumDistance: 18)
                     .onChanged { value in

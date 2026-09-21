@@ -1911,20 +1911,7 @@ struct APKFullPlayerView: View {
     @State private var showLyrics = false
     @State private var draggingProgress = false
     @State private var draggedValue: Double = 0
-
-    private var progressBinding: Binding<Double> {
-        Binding(
-            get: {
-                if draggingProgress { return draggedValue }
-                guard session.playbackDuration > 0 else { return 0 }
-                return min(max(session.playbackPosition / session.playbackDuration, 0), 1)
-            },
-            set: { newValue in
-                draggingProgress = true
-                draggedValue = newValue
-            }
-        )
-    }
+    @State private var artworkDragOffset: CGFloat = 0
 
     var body: some View {
         ZStack {
@@ -1974,16 +1961,26 @@ struct APKFullPlayerView: View {
                             }
                             .padding(.horizontal, 8)
                             .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                            .offset(x: artworkDragOffset)
+                            .opacity(1 - min(abs(artworkDragOffset) / 500, 0.35))
                             .contentShape(Rectangle())
-                            .gesture(
+                            .simultaneousGesture(
                                 DragGesture(minimumDistance: 38)
+                                    .onChanged { value in
+                                        guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                                        artworkDragOffset = value.translation.width * 0.55
+                                    }
                                     .onEnded { value in
-                                        guard abs(value.translation.width) > abs(value.translation.height),
-                                              abs(value.translation.width) > 70 else { return }
-                                        if value.translation.width < 0 {
-                                            session.next()
-                                        } else {
-                                            session.previous()
+                                        if abs(value.translation.width) > abs(value.translation.height),
+                                           abs(value.translation.width) > 70 {
+                                            if value.translation.width < 0 {
+                                                session.next()
+                                            } else {
+                                                session.previous()
+                                            }
+                                        }
+                                        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                                            artworkDragOffset = 0
                                         }
                                     }
                             )
@@ -2104,11 +2101,13 @@ struct APKFullPlayerView: View {
             Spacer()
 
             VStack(spacing: 1) {
-                Text("NOW PLAYING")
+                Text("PLAYING FROM")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
-                Text("Lane")
+                Text(playerSource)
                     .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .frame(maxWidth: 220)
             }
 
             Spacer()
@@ -2122,6 +2121,26 @@ struct APKFullPlayerView: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    private var playerSource: String {
+        guard let refID = session.currentTrack?.refID, !refID.isEmpty else { return "Lane" }
+
+        if refID == "lane_likes" { return "Liked tracks" }
+        if refID.hasPrefix("album:") {
+            let id = String(refID.dropFirst("album:".count))
+            let album = (session.serverAlbums + session.searchAlbums).first { $0.id == id }
+            return album?.name.map { "Album \"\($0)\"" } ?? "Album"
+        }
+        if refID.hasPrefix("artist:") {
+            let id = String(refID.dropFirst("artist:".count))
+            let artist = (session.serverArtists + session.searchArtists).first { $0.id == id }
+            return artist?.name ?? "Artist"
+        }
+        if let playlist = (session.serverPlaylists + session.searchPlaylists).first(where: { $0.playlistId == refID }) {
+            return playlist.playlistName.map { "Playlist \"\($0)\"" } ?? "Playlist"
+        }
+        return "Lane"
     }
 
     @ViewBuilder
@@ -2218,19 +2237,59 @@ struct APKFullPlayerView: View {
 
     private func progress(_ track: TrackCandidate) -> some View {
         VStack(spacing: 4) {
-            Slider(value: progressBinding, in: 0...1, onEditingChanged: { editing in
-                if !editing {
-                    let seconds = draggedValue * max(session.playbackDuration, 0)
-                    session.seek(to: seconds)
-                    draggingProgress = false
-                } else {
-                    draggingProgress = true
-                    draggedValue = session.playbackDuration > 0
+            GeometryReader { geometry in
+                let fraction = draggingProgress
+                    ? draggedValue
+                    : (session.playbackDuration > 0
                         ? session.playbackPosition / session.playbackDuration
-                        : 0
+                        : 0)
+                let clamped = min(max(fraction, 0), 1)
+
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.24))
+                        .frame(height: 4)
+
+                    Capsule()
+                        .fill(Color.white)
+                        .frame(width: geometry.size.width * CGFloat(clamped), height: 4)
+
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 12, height: 12)
+                        .offset(x: geometry.size.width * CGFloat(clamped) - 6)
                 }
-            })
-            .tint(.white)
+                .frame(height: geometry.size.height)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            guard session.playbackDuration > 0 else { return }
+                            draggingProgress = true
+                            draggedValue = Double(min(max(value.location.x / max(geometry.size.width, 1), 0), 1))
+                        }
+                        .onEnded { value in
+                            guard session.playbackDuration > 0 else { return }
+                            let position = min(max(value.location.x / max(geometry.size.width, 1), 0), 1)
+                            session.seek(to: Double(position) * session.playbackDuration)
+                            draggingProgress = false
+                        }
+                )
+            }
+            .frame(height: 28)
+            .accessibilityElement()
+            .accessibilityLabel("Playback position")
+            .accessibilityValue(formatTime(session.playbackPosition))
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment:
+                    session.seek(to: min(session.playbackPosition + 10, session.playbackDuration))
+                case .decrement:
+                    session.seek(to: max(session.playbackPosition - 10, 0))
+                @unknown default:
+                    break
+                }
+            }
 
             HStack {
                 Text(formatTime(draggingProgress ? draggedValue * session.playbackDuration : session.playbackPosition))
