@@ -190,7 +190,7 @@ struct APKVerifiedBadge: View {
 struct APKSearchTrackRow: View {
     let track: TrackCandidate
     let onTap: () -> Void
-    var onMore: (() -> Void)? = nil
+    @State private var showActions = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -222,7 +222,7 @@ struct APKSearchTrackRow: View {
             .buttonStyle(.plain)
 
             Button {
-                onMore?()
+                showActions = true
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 18, weight: .semibold))
@@ -233,6 +233,117 @@ struct APKSearchTrackRow: View {
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+        .sheet(isPresented: $showActions) {
+            APKTrackActionsSheet(track: track)
+        }
+    }
+}
+
+// Lane Android presents track actions as a bottom sheet, not as an immediate
+// "add to queue" side effect when the overflow button is tapped.
+struct APKTrackActionsSheet: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
+    let track: TrackCandidate
+
+    @State private var choosingPlaylist = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.35))
+                        .frame(width: 40, height: 5)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 10)
+                        .padding(.bottom, 18)
+
+                    HStack(spacing: 14) {
+                        APKRemoteImage(url: track.coverURL, cornerRadius: 8)
+                            .frame(width: 58, height: 58)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(track.title)
+                                .font(.system(size: 17, weight: .bold))
+                                .lineLimit(1)
+                            Text(track.subtitle)
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(.bottom, 18)
+
+                    if choosingPlaylist {
+                        actionRow("Back to track", icon: "chevron.left") {
+                            choosingPlaylist = false
+                        }
+                        Text("Add to playlist")
+                            .font(.system(size: 20, weight: .bold))
+                            .padding(.vertical, 10)
+
+                        ForEach(Array(session.serverPlaylists.enumerated()), id: \.offset) { _, playlist in
+                            actionRow(playlist.playlistName ?? "Playlist", icon: "music.note.list") {
+                                session.addTrack(track, to: playlist)
+                                dismiss()
+                            }
+                        }
+                        ForEach(session.localPlaylists) { playlist in
+                            actionRow(playlist.name, icon: "music.note.list") {
+                                session.add(track, to: playlist.id)
+                                dismiss()
+                            }
+                        }
+                    } else {
+                        actionRow(session.isFavorite(track) ? "Remove from favorites" : "Add to favorites",
+                                  icon: session.isFavorite(track) ? "heart.fill" : "heart") {
+                            session.toggleFavorite(track)
+                            dismiss()
+                        }
+                        actionRow("Play next", icon: "text.insert") {
+                            session.playNext(track)
+                            dismiss()
+                        }
+                        actionRow("Add to queue", icon: "text.badge.plus") {
+                            session.addToQueue(track)
+                            dismiss()
+                        }
+                        actionRow("Add to playlist", icon: "music.note.list") {
+                            choosingPlaylist = true
+                        }
+                        actionRow("Download", icon: "arrow.down.circle") {
+                            session.downloadTrack(track)
+                            dismiss()
+                        }
+                    }
+                }
+                .padding(.horizontal, 22)
+                .padding(.bottom, 26)
+            }
+            .background(apkBackground.ignoresSafeArea())
+            .toolbar(.hidden, for: .navigationBar)
+        }
+        .preferredColorScheme(.dark)
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.hidden)
+    }
+
+    private func actionRow(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 18) {
+                Image(systemName: icon)
+                    .font(.system(size: 21, weight: .medium))
+                    .frame(width: 26)
+                    .foregroundStyle(apkPink)
+                Text(title)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+            }
+            .frame(height: 55)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -949,6 +1060,7 @@ private struct APKAlbumTrackRow: View {
     let index: Int
     let track: TrackCandidate
     let onTap: () -> Void
+    @State private var showActions = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -982,22 +1094,8 @@ private struct APKAlbumTrackRow: View {
                     .foregroundStyle(Color.white.opacity(0.42))
             }
 
-            Menu {
-                Button("Play next", systemImage: "text.insert") {
-                    session.playNext(track)
-                }
-                Button("Add to queue", systemImage: "text.badge.plus") {
-                    session.addToQueue(track)
-                }
-                Button(
-                    session.isFavorite(track) ? "Remove from favorites" : "Add to favorites",
-                    systemImage: session.isFavorite(track) ? "heart.slash" : "heart"
-                ) {
-                    session.toggleFavorite(track)
-                }
-                Button("Download", systemImage: "arrow.down.circle") {
-                    session.downloadTrack(track)
-                }
+            Button {
+                showActions = true
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 17, weight: .semibold))
@@ -1012,6 +1110,9 @@ private struct APKAlbumTrackRow: View {
                 .fill(Color.white.opacity(0.055))
                 .frame(height: 1)
                 .padding(.leading, 34)
+        }
+        .sheet(isPresented: $showActions) {
+            APKTrackActionsSheet(track: track)
         }
     }
 }
@@ -1531,6 +1632,7 @@ struct APKFullPlayerView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var showQueue = false
+    @State private var showTrackActions = false
     @State private var showComments = false
     @State private var showLyrics = false
     @State private var draggingProgress = false
@@ -1707,6 +1809,12 @@ struct APKFullPlayerView: View {
                 .environmentObject(session)
                 .presentationDetents([.medium, .large])
         }
+        .sheet(isPresented: $showTrackActions) {
+            if let track = session.currentTrack {
+                APKTrackActionsSheet(track: track)
+                    .environmentObject(session)
+            }
+        }
     }
 
     private var topBar: some View {
@@ -1731,12 +1839,8 @@ struct APKFullPlayerView: View {
 
             Spacer()
 
-            Menu {
-                if let track = session.currentTrack {
-                    Button("Play next", systemImage: "text.insert") { session.playNext(track) }
-                    Button("Add to queue", systemImage: "text.badge.plus") { session.addToQueue(track) }
-                    Button("Download", systemImage: "arrow.down.circle") { session.downloadTrack(track) }
-                }
+            Button {
+                showTrackActions = true
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 20, weight: .semibold))

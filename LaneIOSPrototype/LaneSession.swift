@@ -67,7 +67,9 @@ final class LaneSession: ObservableObject {
     @Published var searchResultItems: [LaneSearchResultItem] = []
     @Published var searchToken: String?
     @Published var searchMessage = ""
+    @Published var searchIsLoading = false
     @Published var trackResolveMessage = ""
+    private var searchTask: Task<Void, Never>?
 
     private func makeSearchRefID(query: String, results: [LaneSearchResultItem]) -> String {
         // Kotlin/Java List.hashCode() is deterministic. The original objects use
@@ -558,39 +560,52 @@ final class LaneSession: ObservableObject {
 
     // MARK: Search
 
+    private func clearSearchResults() {
+        searchToken = nil
+        searchResultItems = []
+        searchTracks = []
+        searchArtists = []
+        searchAlbums = []
+        searchPlaylists = []
+    }
+
     func search(_ text: String) {
         let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return }
+        searchTask?.cancel()
 
-        guard !isGuest else {
-            status = 401
-            output = "Sign in with Telegram before searching Lane."
-            searchMessage = "Sign in with Telegram to search."
-            searchTracks = []
-            searchArtists = []
-            searchAlbums = []
-            searchPlaylists = []
-            searchResultItems = []
+        guard !query.isEmpty else {
+            searchTask = nil
+            searchIsLoading = false
+            searchMessage = ""
+            clearSearchResults()
             return
         }
 
-        busy = true
-        output = "Searching Lane…"
+        guard !isGuest else {
+            searchTask = nil
+            searchIsLoading = false
+            searchMessage = "Sign in with Telegram to search."
+            clearSearchResults()
+            return
+        }
+
+        searchIsLoading = true
         searchMessage = ""
 
-        Task {
-            defer { busy = false }
-            await configureAPI()
+        // The APK debounces text input and uses one cancellable
+        // /platforms/search?q=...&platform=all&ver=1.0 request. Avoid stale
+        // responses and the old multi-version probing loop.
+        searchTask = Task {
+            defer {
+                if !Task.isCancelled { searchIsLoading = false }
+            }
+            do {
+                await configureAPI()
+                let response = try await LaneAPI.shared.search(token: token, query: query)
+                guard !Task.isCancelled else { return }
 
-            // Exact Android Lane 1.4.7 contract recovered from TrackRepositoryImpl:
-            // platform=all and ver=1.0.
-            if let response = try? await LaneAPI.shared.search(token: token, query: query) {
                 searchToken = response.searchToken
                 searchResultItems = response.results
-
-                // Android Lane 1.4.7 does not pass searchToken as stream refId.
-                // SearchViewModel.kt builds:
-                // "search:" + query + searchResultList.hashCode()
                 let searchRefID = makeSearchRefID(query: query, results: response.results)
                 searchTracks = response.results.compactMap { $0.track }.map {
                     TrackCandidate($0, refID: searchRefID)
@@ -598,70 +613,16 @@ final class LaneSession: ObservableObject {
                 searchArtists = response.results.compactMap { $0.artist }
                 searchAlbums = response.results.compactMap { $0.album }
                 searchPlaylists = response.results.compactMap { $0.playlist }
-
-                if !searchTracks.isEmpty || !searchArtists.isEmpty || !searchAlbums.isEmpty || !searchPlaylists.isEmpty {
-                    status = 200
-                    output = "Found \(response.results.count) results"
-                    searchMessage = ""
-                    return
-                }
-            }
-
-            // Compatibility probing for the API version value. This is deliberately
-            // limited to known/probable client values and finally omits `ver`.
-            let versions: [String?] = ["1.0", "1.4.7", "2", nil]
-            var lastMessage = "No results returned by Lane."
-
-            for version in versions {
-                do {
-                    let raw = try await LaneAPI.shared.searchRaw(token: token, query: query, version: version)
-                    status = raw.status
-                    lastMessage = "HTTP \(raw.status) · ver=\(version ?? "<omitted>")\n\(raw.pretty)"
-
-                    guard (200..<300).contains(raw.status) else { continue }
-
-                    let tracks = JSONProbe.tracks(raw.json)
-                    if !tracks.isEmpty {
-                        let fallbackRef = "search:\(query)\(javaStringHash(query))"
-                        searchTracks = tracks.map { track in
-                            TrackCandidate(
-                                id: track.id,
-                                title: track.title,
-                                subtitle: track.subtitle,
-                                trackID: track.trackID,
-                                refID: track.refID ?? fallbackRef,
-                                platform: track.platform,
-                                coverURL: track.coverURL,
-                                duration: track.duration,
-                                genre: track.genre,
-                                artistAvatars: track.artistAvatars
-                            )
-                        }
-                        output = "Found \(tracks.count) tracks · ver=\(version ?? "<omitted>")"
-                        searchMessage = ""
-                        return
-                    }
-                } catch {
-                    lastMessage = error.localizedDescription
-                }
-            }
-
-            searchTracks = []
-            searchArtists = []
-            searchAlbums = []
-            searchPlaylists = []
-            searchResultItems = []
-            output = lastMessage
-            if lastMessage.localizedCaseInsensitiveContains("HTTP 5") ||
-                lastMessage.localizedCaseInsensitiveContains("timed out") ||
-                lastMessage.localizedCaseInsensitiveContains("DATA_ACCESS_ERROR") {
+                status = 200
+                searchMessage = response.results.isEmpty ? "Try another query." : ""
+            } catch {
+                guard !Task.isCancelled else { return }
+                clearSearchResults()
+                output = error.localizedDescription
                 searchMessage = "Search is temporarily unavailable. Please try again."
-            } else {
-                searchMessage = "Try another query."
             }
         }
     }
-
     // MARK: Library
 
     func refreshLibrary() {

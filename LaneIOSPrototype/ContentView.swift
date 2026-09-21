@@ -60,18 +60,30 @@ struct ContentView: View {
     @EnvironmentObject private var session: LaneSession
     @State private var selectedTab = 0
     @State private var showPlayer = false
+    @State private var homeStackID = UUID()
+    @State private var searchStackID = UUID()
+    @State private var libraryStackID = UUID()
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            Group {
-                switch selectedTab {
-                case 1:
-                    SearchScreen(showPlayer: $showPlayer)
-                case 2:
-                    LibraryScreen(showPlayer: $showPlayer)
-                default:
-                    HomeScreen(showPlayer: $showPlayer)
-                }
+            ZStack {
+                HomeScreen(showPlayer: $showPlayer)
+                    .id(homeStackID)
+                    .opacity(selectedTab == 0 ? 1 : 0)
+                    .allowsHitTesting(selectedTab == 0)
+                    .accessibilityHidden(selectedTab != 0)
+
+                SearchScreen(showPlayer: $showPlayer, isActive: selectedTab == 1)
+                    .id(searchStackID)
+                    .opacity(selectedTab == 1 ? 1 : 0)
+                    .allowsHitTesting(selectedTab == 1)
+                    .accessibilityHidden(selectedTab != 1)
+
+                LibraryScreen(showPlayer: $showPlayer)
+                    .id(libraryStackID)
+                    .opacity(selectedTab == 2 ? 1 : 0)
+                    .allowsHitTesting(selectedTab == 2)
+                    .accessibilityHidden(selectedTab != 2)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(.bottom, 60)
@@ -83,7 +95,7 @@ struct ContentView: View {
                         .padding(.bottom, 2)
                 }
 
-                LaneBottomBar(selection: $selectedTab)
+                LaneBottomBar(selection: $selectedTab, onSelect: selectTab)
             }
         }
         .background(laneBackground.ignoresSafeArea())
@@ -98,10 +110,25 @@ struct ContentView: View {
             }
         }
     }
+
+    private func selectTab(_ index: Int) {
+        if selectedTab == index {
+            switch index {
+            case 0: homeStackID = UUID()
+            case 1: searchStackID = UUID()
+            default: libraryStackID = UUID()
+            }
+        } else {
+            withAnimation(.spring(response: 0.20, dampingFraction: 0.50)) {
+                selectedTab = index
+            }
+        }
+    }
 }
 
 private struct LaneBottomBar: View {
     @Binding var selection: Int
+    let onSelect: (Int) -> Void
 
     private let selectedColor = Color.white
     private let unselectedColor = Color(red: 102.0 / 255.0, green: 102.0 / 255.0, blue: 102.0 / 255.0)
@@ -136,9 +163,7 @@ private struct LaneBottomBar: View {
         let active = selection == index
 
         return Button {
-            withAnimation(.spring(response: 0.20, dampingFraction: 0.50)) {
-                selection = index
-            }
+            onSelect(index)
         } label: {
             APKTemplateIcon(
                 name: asset,
@@ -317,9 +342,11 @@ private struct TelegramLoginCard: View {
 private struct SearchScreen: View {
     @EnvironmentObject private var session: LaneSession
     @Binding var showPlayer: Bool
+    let isActive: Bool
 
     @State private var query = ""
     @State private var selectedFilter: SearchFilter = .all
+    @FocusState private var isSearchFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -349,11 +376,13 @@ private struct SearchScreen: View {
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .submitLabel(.search)
-                            .onSubmit { session.search(query) }
+                            .focused($isSearchFocused)
+                            .onSubmit { isSearchFocused = false }
 
                         if !query.isEmpty {
                             Button {
                                 query = ""
+                                selectedFilter = .all
                             } label: {
                                 Image(systemName: "xmark.circle.fill")
                                     .foregroundStyle(.secondary)
@@ -365,25 +394,28 @@ private struct SearchScreen: View {
                     .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 15))
                     .padding(.horizontal, 16)
 
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(SearchFilter.allCases) { filter in
-                                Button {
-                                    selectedFilter = filter
-                                } label: {
-                                    Text(filter.rawValue)
-                                        .font(.subheadline.weight(.semibold))
-                                        .padding(.horizontal, 14)
-                                        .padding(.vertical, 8)
-                                        .background(
-                                            selectedFilter == filter ? lanePink : Color.white.opacity(0.08),
-                                            in: Capsule()
-                                        )
-                                        .foregroundStyle(selectedFilter == filter ? Color.black : Color.white)
+                    if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(SearchFilter.allCases) { filter in
+                                    Button {
+                                        selectedFilter = filter
+                                    } label: {
+                                        Text(filter.rawValue)
+                                            .font(.subheadline.weight(.semibold))
+                                            .padding(.horizontal, 14)
+                                            .padding(.vertical, 8)
+                                            .background(
+                                                selectedFilter == filter ? lanePink : Color.white.opacity(0.08),
+                                                in: Capsule()
+                                            )
+                                            .foregroundStyle(selectedFilter == filter ? Color.black : Color.white)
+                                    }
+                                    .buttonStyle(.plain)
                                 }
                             }
+                            .padding(.horizontal, 16)
                         }
-                        .padding(.horizontal, 16)
                     }
                 }
                 .padding(.vertical, 10)
@@ -399,7 +431,9 @@ private struct SearchScreen: View {
                         TelegramLoginCard()
                     }
                     Spacer()
-                } else if session.busy && session.searchTracks.isEmpty {
+                } else if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    searchHistoryContent
+                } else if session.searchIsLoading {
                     Spacer()
                     ProgressView()
                         .tint(lanePink)
@@ -418,6 +452,65 @@ private struct SearchScreen: View {
             }
             .background(laneBackground)
             .toolbar(.hidden, for: .navigationBar)
+            .task(id: query) {
+                let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                if clean.isEmpty {
+                    session.search("")
+                } else {
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    guard !Task.isCancelled else { return }
+                    session.search(clean)
+                }
+            }
+            .onChange(of: isActive) { active in
+                if !active { isSearchFocused = false }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var searchHistoryContent: some View {
+        let history = (session.account?.searchHistory ?? []).filter { !$0.isEmpty }
+        if history.isEmpty {
+            Spacer()
+            EmptyLaneView(
+                icon: "magnifyingglass",
+                title: "What are we looking for today?",
+                subtitle: "A track, artist, or album?"
+            )
+            Spacer()
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    Text("Recent searches")
+                        .font(.system(size: 17, weight: .bold))
+                        .padding(.vertical, 12)
+
+                    ForEach(Array(history.reversed().prefix(20)), id: \.self) { item in
+                        Button {
+                            query = item
+                            isSearchFocused = false
+                        } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: "clock.arrow.circlepath")
+                                    .font(.system(size: 18))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 28)
+                                Text(item)
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+                                Spacer()
+                                Image(systemName: "arrow.up.left")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(height: 52)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 24)
+            }
         }
     }
 
@@ -463,9 +556,6 @@ private struct SearchScreen: View {
                     session.currentIndex = session.searchTracks.firstIndex(of: value)
                     session.requestStream(for: value)
                     showPlayer = true
-                },
-                onMore: {
-                    session.addToQueue(value)
                 }
             )
         } else if let artist = item.artist {
@@ -501,8 +591,7 @@ private struct SearchScreen: View {
                                     session.currentIndex = session.searchTracks.firstIndex(of: track)
                                     session.requestStream(for: track)
                                     showPlayer = true
-                                },
-                                onMore: { session.addToQueue(track) }
+                                }
                             )
                         }
 
@@ -543,8 +632,7 @@ private struct SearchScreen: View {
                                 session.currentIndex = session.searchTracks.firstIndex(of: track)
                                 session.requestStream(for: track)
                                 showPlayer = true
-                            },
-                            onMore: { session.addToQueue(track) }
+                            }
                         )
                     }
 
@@ -577,10 +665,34 @@ private struct SearchScreen: View {
 private enum LibraryFilter: String, CaseIterable, Identifiable {
     case all = "All"
     case playlists = "Playlists"
-    case albums = "Albums"
     case artists = "Artists"
+    case albums = "Albums"
 
     var id: String { rawValue }
+}
+
+private enum LibraryEntry: Identifiable {
+    case playlist(LanePlaylist)
+    case local(LocalPlaylist)
+    case artist(LaneArtist)
+    case album(LaneAlbum)
+
+    var id: String {
+        switch self {
+        case .playlist(let value): return "playlist:\(value.playlistId ?? value.playlistName ?? "unknown")"
+        case .local(let value): return "local:\(value.id.uuidString)"
+        case .artist(let value): return "artist:\(value.id ?? value.name ?? "unknown")"
+        case .album(let value): return "album:\(value.id ?? value.name ?? "unknown")"
+        }
+    }
+
+    func matches(_ filter: LibraryFilter) -> Bool {
+        switch (self, filter) {
+        case (_, .all), (.playlist, .playlists), (.local, .playlists),
+             (.artist, .artists), (.album, .albums): return true
+        default: return false
+        }
+    }
 }
 
 private struct LibraryScreen: View {
@@ -589,6 +701,9 @@ private struct LibraryScreen: View {
 
     @State private var filter: LibraryFilter = .all
     @State private var showCreatePlaylist = false
+    @State private var pinnedLibraryIDs = Set(
+        UserDefaults.standard.stringArray(forKey: "lane.libraryPinnedIDs") ?? []
+    )
 
     var body: some View {
         NavigationStack {
@@ -658,66 +773,37 @@ private struct LibraryScreen: View {
         }
     }
 
+    private var libraryEntries: [LibraryEntry] {
+        let entries: [LibraryEntry] =
+            session.serverPlaylists.map(LibraryEntry.playlist) +
+            session.localPlaylists.map(LibraryEntry.local) +
+            session.serverArtists.map(LibraryEntry.artist) +
+            session.serverAlbums.map(LibraryEntry.album)
+        return entries.filter { pinnedLibraryIDs.contains($0.id) } +
+            entries.filter { !pinnedLibraryIDs.contains($0.id) }
+    }
+
     @ViewBuilder
     private var libraryContents: some View {
         if filter == .all || filter == .playlists {
-            VStack(spacing: 2) {
-                NavigationLink {
-                    FavoriteTracksScreen(showPlayer: $showPlayer)
-                } label: {
-                    APKFavoritePlaylistCard(trackCount: session.favorites.count)
-                }
-                .buttonStyle(.plain)
-
-                ForEach(session.localPlaylists) { playlist in
-                    NavigationLink {
-                        LocalPlaylistDetailScreen(
-                            playlist: playlist,
-                            showPlayer: $showPlayer
-                        )
-                    } label: {
-                        LocalPlaylistRow(playlist: playlist)
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                ForEach(Array(session.serverPlaylists.enumerated()), id: \.offset) { _, playlist in
-                    NavigationLink {
-                        PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
-                    } label: {
-                        PlaylistRow(playlist: playlist)
-                    }
-                    .buttonStyle(.plain)
-                }
+            NavigationLink {
+                FavoriteTracksScreen(showPlayer: $showPlayer)
+            } label: {
+                APKFavoritePlaylistCard(trackCount: session.favorites.count)
             }
+            .buttonStyle(.plain)
         }
 
-        if filter == .all || filter == .albums {
-            if !session.serverAlbums.isEmpty {
-                LibrarySectionTitle(title: "Albums", count: session.serverAlbums.count)
-                    .padding(.top, 10)
-
-                VStack(spacing: 2) {
-                    ForEach(Array(session.serverAlbums.enumerated()), id: \.offset) { _, album in
-                        AlbumRow(album: album)
+        ForEach(libraryEntries.filter { $0.matches(filter) }) { entry in
+            libraryEntryRow(entry)
+                .contextMenu {
+                    Button(
+                        pinnedLibraryIDs.contains(entry.id) ? "Unpin" : "Pin to top",
+                        systemImage: pinnedLibraryIDs.contains(entry.id) ? "pin.slash" : "pin"
+                    ) {
+                        togglePinned(entry.id)
                     }
                 }
-                .padding(.horizontal, 8)
-            }
-        }
-
-        if filter == .all || filter == .artists {
-            if !session.serverArtists.isEmpty {
-                LibrarySectionTitle(title: "Artists", count: session.serverArtists.count)
-                    .padding(.top, 10)
-
-                VStack(spacing: 2) {
-                    ForEach(Array(session.serverArtists.enumerated()), id: \.offset) { _, artist in
-                        ArtistRow(artist: artist)
-                    }
-                }
-                .padding(.horizontal, 8)
-            }
         }
 
         if filter == .all && !session.recentTracks.isEmpty {
@@ -732,12 +818,8 @@ private struct LibraryScreen: View {
             .padding(.horizontal, 8)
         }
 
-        if session.localPlaylists.isEmpty &&
-            session.serverPlaylists.isEmpty &&
-            session.serverAlbums.isEmpty &&
-            session.serverArtists.isEmpty &&
-            session.recentTracks.isEmpty &&
-            session.favorites.isEmpty {
+        if filter != .all && filter != .playlists &&
+            libraryEntries.allSatisfy({ !$0.matches(filter) }) {
             EmptyLaneView(
                 icon: "square.stack",
                 title: "Your Library",
@@ -746,8 +828,43 @@ private struct LibraryScreen: View {
             .padding(.top, 30)
         }
     }
-}
 
+    @ViewBuilder
+    private func libraryEntryRow(_ entry: LibraryEntry) -> some View {
+        switch entry {
+        case .playlist(let playlist):
+            NavigationLink {
+                PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
+            } label: {
+                PlaylistRow(playlist: playlist)
+            }
+            .buttonStyle(.plain)
+
+        case .local(let playlist):
+            NavigationLink {
+                LocalPlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
+            } label: {
+                LocalPlaylistRow(playlist: playlist)
+            }
+            .buttonStyle(.plain)
+
+        case .artist(let artist):
+            ArtistRow(artist: artist)
+
+        case .album(let album):
+            AlbumRow(album: album)
+        }
+    }
+
+    private func togglePinned(_ id: String) {
+        if pinnedLibraryIDs.contains(id) {
+            pinnedLibraryIDs.remove(id)
+        } else {
+            pinnedLibraryIDs.insert(id)
+        }
+        UserDefaults.standard.set(Array(pinnedLibraryIDs), forKey: "lane.libraryPinnedIDs")
+    }
+}
 private struct LibraryHeader: View {
     @EnvironmentObject private var session: LaneSession
     @Binding var showCreatePlaylist: Bool
