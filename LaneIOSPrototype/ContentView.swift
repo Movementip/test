@@ -438,14 +438,16 @@ private struct SearchScreen: View {
                     ProgressView()
                         .tint(lanePink)
                     Spacer()
-                } else if hasSearchResults {
+                } else if hasFilteredSearchResults {
                     searchResults
                 } else {
                     Spacer()
                     EmptyLaneView(
                         icon: "magnifyingglass",
-                        title: query.isEmpty ? "What are we looking for today?" : "Nothing found",
-                        subtitle: query.isEmpty ? "A track, artist, or album?" : session.searchMessage
+                        title: "Nothing found",
+                        subtitle: session.searchMessage.isEmpty
+                            ? "Try another query or filter."
+                            : session.searchMessage
                     )
                     Spacer()
                 }
@@ -520,6 +522,23 @@ private struct SearchScreen: View {
         !session.searchArtists.isEmpty ||
         !session.searchAlbums.isEmpty ||
         !session.searchPlaylists.isEmpty
+    }
+
+    private var hasFilteredSearchResults: Bool {
+        switch selectedFilter {
+        case .all:
+            return hasSearchResults
+        case .spotify:
+            return session.searchResultItems.contains { matchesPlatform($0, "spotify") }
+        case .soundcloud:
+            return session.searchResultItems.contains { matchesPlatform($0, "soundcloud") }
+        case .tracks:
+            return !session.searchTracks.isEmpty
+        case .playlists:
+            return !session.searchPlaylists.isEmpty
+        case .albums:
+            return !session.searchAlbums.isEmpty
+        }
     }
 
     private func candidate(for track: TrackData) -> TrackCandidate {
