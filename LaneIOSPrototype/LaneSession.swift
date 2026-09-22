@@ -967,12 +967,13 @@ final class LaneSession: ObservableObject {
 
         if let playlists {
             let fetchedIDs = Set(playlists.compactMap(\.playlistId))
-            for id in pendingSavedPlaylists.keys where fetchedIDs.contains(id) {
+            let confirmedPendingIDs = pendingSavedPlaylists.keys.filter { fetchedIDs.contains($0) }
+            for id in confirmedPendingIDs {
                 pendingSavedPlaylists.removeValue(forKey: id)
             }
             let pending = pendingSavedPlaylists
                 .filter { !fetchedIDs.contains($0.key) }
-                .map(\.value)
+                .map { $0.value }
             serverPlaylists = playlists + pending
 
             let likedPlaylist = serverPlaylists.first(where: { $0.playlistId == "lane_likes" })
