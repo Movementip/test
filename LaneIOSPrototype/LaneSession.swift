@@ -129,6 +129,7 @@ final class LaneSession: ObservableObject {
     @Published var likedTracks: [TrackCandidate] = []
     private var favoriteMutationsInFlight: Set<String> = []
     private var pendingSavedPlaylists: [String: LanePlaylist] = [:]
+    private var pendingRemovedPlaylistIDs: Set<String> = []
     private var favoriteMigrationInProgress = false
     private let favoriteMigrationKey = "lane.favorites.serverMigrationCompleted"
     @Published var localPlaylists: [LocalPlaylist] = []
@@ -481,6 +482,7 @@ final class LaneSession: ObservableObject {
             likedTracks = []
             favoriteMutationsInFlight = []
             pendingSavedPlaylists = [:]
+            pendingRemovedPlaylistIDs = []
             favoriteMigrationInProgress = false
             UserDefaults.standard.removeObject(forKey: "lane.favorites")
             UserDefaults.standard.removeObject(forKey: favoriteMigrationKey)
@@ -509,6 +511,7 @@ final class LaneSession: ObservableObject {
         likedTracks = []
         favoriteMutationsInFlight = []
         pendingSavedPlaylists = [:]
+        pendingRemovedPlaylistIDs = []
         favoriteMigrationInProgress = false
         UserDefaults.standard.removeObject(forKey: "lane.favorites")
         UserDefaults.standard.removeObject(forKey: favoriteMigrationKey)
@@ -971,10 +974,17 @@ final class LaneSession: ObservableObject {
             for id in confirmedPendingIDs {
                 pendingSavedPlaylists.removeValue(forKey: id)
             }
+            let confirmedRemovals = pendingRemovedPlaylistIDs.filter { !fetchedIDs.contains($0) }
+            pendingRemovedPlaylistIDs.subtract(confirmedRemovals)
+
             let pending = pendingSavedPlaylists
-                .filter { !fetchedIDs.contains($0.key) }
+                .filter { !fetchedIDs.contains($0.key) && !pendingRemovedPlaylistIDs.contains($0.key) }
                 .map { $0.value }
-            serverPlaylists = playlists + pending
+            let visiblePlaylists = playlists.filter {
+                guard let id = $0.playlistId else { return true }
+                return !pendingRemovedPlaylistIDs.contains(id)
+            }
+            serverPlaylists = visiblePlaylists + pending
 
             let likedPlaylist = serverPlaylists.first(where: { $0.playlistId == "lane_likes" })
             let directLikedData = await loadPlaylistTrackCollection(
@@ -1214,7 +1224,13 @@ final class LaneSession: ObservableObject {
         let result = try await LaneAPI.shared.deletePlaylist(token: token, playlistId: id)
         status = result.status
         try result.requireSuccess()
-        output = result.pretty
+
+        pendingSavedPlaylists.removeValue(forKey: id)
+        pendingRemovedPlaylistIDs.insert(id)
+        serverPlaylists.removeAll { $0.playlistId == id }
+        playlistTrackCache.removeValue(forKey: id)
+        output = "Removed \(playlist.playlistName ?? "playlist") from Library."
+
         await loadLibrary()
     }
 
@@ -1259,6 +1275,7 @@ final class LaneSession: ObservableObject {
         status = result.status
         try result.requireSuccess()
 
+        pendingRemovedPlaylistIDs.remove(id)
         pendingSavedPlaylists[id] = playlist
         if !serverPlaylists.contains(where: { $0.playlistId == id }) {
             serverPlaylists.append(playlist)
