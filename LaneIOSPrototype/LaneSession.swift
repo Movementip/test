@@ -301,7 +301,12 @@ final class LaneSession: ObservableObject {
 
             // Preserve whatever is already present locally instead of showing
             // an empty detail page if the network resolver is unavailable.
-            let local = cached + history + searchTracks + queue + homeTracks + recentTracks
+            var local = cached
+            local.append(contentsOf: history)
+            local.append(contentsOf: searchTracks)
+            local.append(contentsOf: queue)
+            local.append(contentsOf: homeTracks)
+            local.append(contentsOf: recentTracks)
             let fallback = clean.compactMap { id in
                 local.first(where: { $0.trackID == id })
             }
