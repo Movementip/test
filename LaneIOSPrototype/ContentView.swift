@@ -2349,7 +2349,7 @@ private struct TrackInfoScreen: View {
                 Section("Actions") {
                     Button("Track stats") { session.loadTrackStats(track) }
                     Button("Lyrics") { session.loadLyrics(track) }
-                    Button("Recommendations") { session.loadRecommendations(track) }
+                    Button("Recommendations") { session.startWave(from: track) }
                 }
 
                 if !session.output.isEmpty {
