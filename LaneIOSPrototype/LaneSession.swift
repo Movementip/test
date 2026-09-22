@@ -417,8 +417,19 @@ final class LaneSession: ObservableObject {
     }
 
     var hasPremiumAccess: Bool {
-        guard let expiresAt = account?.premiumExpiresIn else { return false }
-        return expiresAt > Int64(Date().timeIntervalSince1970 * 1000.0)
+        if account?.isAutoRenewalActive == true {
+            return true
+        }
+        guard let expiresAt = account?.premiumExpiresIn, expiresAt > 0 else {
+            return false
+        }
+        // Lane currently serializes premiumExpiresIn as an epoch timestamp.
+        // Accept both milliseconds and seconds so account payload revisions do
+        // not incorrectly lock Premium import/audio features.
+        let expirySeconds = expiresAt > 10_000_000_000
+            ? Double(expiresAt) / 1000.0
+            : Double(expiresAt)
+        return expirySeconds > Date().timeIntervalSince1970
     }
 
     init() {
