@@ -2563,6 +2563,13 @@ final class LaneSession: ObservableObject {
     private func normalizedStreamURL(_ raw: String) -> URL? {
         let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // Apply the same CdnUrlInterceptor routing as Lane Android. Previously
+        // artwork used this rewrite but audio did not, which left AVPlayer
+        // talking to the blocked global CDN when the VPN was disabled.
+        if let routed = laneRoutedMediaURL(clean) {
+            return routed
+        }
+
         if let direct = URL(string: clean), direct.scheme != nil {
             return direct
         }
@@ -2714,6 +2721,18 @@ final class LaneSession: ObservableObject {
                 case .failed:
                     let detail = item.error?.localizedDescription ?? "Unable to play this stream"
 
+                    if self.connectivityError(item.error),
+                       !self.playerRetriedWithLocalDownload,
+                       !self.streamURL.isEmpty {
+                        self.playerRetriedWithLocalDownload = true
+                        self.downloadCompatibilityAudio(
+                            self.streamURL,
+                            requestID: requestID,
+                            track: track
+                        )
+                        return
+                    }
+
                     if !useCompatibilityHeaders,
                        !self.playerRetriedWithCompatibilityHeaders,
                        !self.streamURL.isEmpty {
@@ -2819,7 +2838,16 @@ final class LaneSession: ObservableObject {
                   self.playbackPosition < 0.25,
                   !self.streamURL.isEmpty else { return }
 
-            if !useCompatibilityHeaders && !self.playerRetriedWithCompatibilityHeaders {
+            if !self.playerRetriedWithLocalDownload,
+               let stalledURL = self.normalizedStreamURL(self.streamURL),
+               ["laneapi.com", "ru.laneapi.com", "cdn.laneapi.com"].contains(stalledURL.host ?? "") {
+                self.playerRetriedWithLocalDownload = true
+                self.downloadCompatibilityAudio(
+                    self.streamURL,
+                    requestID: requestID,
+                    track: track
+                )
+            } else if !useCompatibilityHeaders && !self.playerRetriedWithCompatibilityHeaders {
                 self.playerRetriedWithCompatibilityHeaders = true
                 try? self.play(
                     urlString: self.streamURL,
@@ -2854,6 +2882,48 @@ final class LaneSession: ObservableObject {
         updateNowPlaying()
     }
 
+    private func connectivityError(_ error: Error?) -> Bool {
+        guard let error else { return false }
+        let ns = error as NSError
+        let networkCodes: Set<Int> = [
+            NSURLErrorTimedOut,
+            NSURLErrorCannotFindHost,
+            NSURLErrorCannotConnectToHost,
+            NSURLErrorNetworkConnectionLost,
+            NSURLErrorNotConnectedToInternet,
+            NSURLErrorDNSLookupFailed
+        ]
+
+        if ns.domain == NSURLErrorDomain, networkCodes.contains(ns.code) {
+            return true
+        }
+        if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? Error {
+            return connectivityError(underlying)
+        }
+        return false
+    }
+
+    private func downloadMediaUsingLaneTransport(_ request: URLRequest) async throws -> (URL, HTTPURLResponse) {
+        do {
+            let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                throw URLError(.badServerResponse)
+            }
+            return (temporaryURL, http)
+        } catch {
+            // AVPlayer/URLSession can lose the carrier route to Lane's CDN
+            // without VPN even though the API itself is reachable. Reuse the
+            // Android-style direct TLS transport (DoH/IP + original SNI/Host)
+            // for the exact same selected-quality stream URL.
+            let direct = try await AndroidNetworkTransport.data(for: request, timeout: 60)
+            let temporaryURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("lane_direct_\(UUID().uuidString)")
+            try direct.data.write(to: temporaryURL, options: .atomic)
+            return (temporaryURL, direct.response)
+        }
+    }
+
     private func downloadStreamAndPlayLocally(
         _ urlString: String,
         requestID: UUID,
@@ -2885,7 +2955,7 @@ final class LaneSession: ObservableObject {
                     forHTTPHeaderField: "Accept-Language"
                 )
 
-                let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+                let (temporaryURL, response) = try await self.downloadMediaUsingLaneTransport(request)
 
                 guard self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else {
@@ -3007,7 +3077,7 @@ final class LaneSession: ObservableObject {
                     forHTTPHeaderField: "Accept-Language"
                 )
 
-                let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+                let (temporaryURL, response) = try await self.downloadMediaUsingLaneTransport(request)
 
                 guard self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else {
