@@ -120,6 +120,8 @@ final class LaneSession: ObservableObject {
     @Published var recentTracks: [TrackCandidate] = []
     @Published var favorites: Set<String> = []
     private var favoriteMutationsInFlight: Set<String> = []
+    private var favoriteMigrationInProgress = false
+    private let favoriteMigrationKey = "lane.favorites.serverMigrationCompleted"
     @Published var localPlaylists: [LocalPlaylist] = []
     @Published var history: [TrackCandidate] = []
     @Published var downloadedTrackIDs: Set<String> = []
@@ -448,7 +450,9 @@ final class LaneSession: ObservableObject {
         if token != clean {
             favorites = []
             favoriteMutationsInFlight = []
+            favoriteMigrationInProgress = false
             UserDefaults.standard.removeObject(forKey: "lane.favorites")
+            UserDefaults.standard.removeObject(forKey: favoriteMigrationKey)
         }
         token = clean
         persist()
@@ -467,7 +471,9 @@ final class LaneSession: ObservableObject {
         serverPlaylists = []
         favorites = []
         favoriteMutationsInFlight = []
+        favoriteMigrationInProgress = false
         UserDefaults.standard.removeObject(forKey: "lane.favorites")
+        UserDefaults.standard.removeObject(forKey: favoriteMigrationKey)
         resolvedTrackCache = [:]
         UserDefaults.standard.removeObject(forKey: "lane.cachedTrackMetadata")
         playlistTrackCache = [:]
@@ -836,8 +842,9 @@ final class LaneSession: ObservableObject {
 
         if let playlists {
             serverPlaylists = playlists
-            if let likedPlaylist = playlists.first(where: { $0.playlistId == "lane_likes" }) {
-                var likedIDs = likedPlaylist.playlistTracksIds
+            let likedPlaylist = playlists.first(where: { $0.playlistId == "lane_likes" })
+            var likedIDs = likedPlaylist?.playlistTracksIds
+            if let likedPlaylist {
                 if likedIDs == nil || (likedIDs?.isEmpty == true && (likedPlaylist.tracksCount ?? 0) > 0) {
                     let detail = try? await LaneAPI.shared.playlist(
                         token: requestToken,
@@ -847,15 +854,32 @@ final class LaneSession: ObservableObject {
                     likedIDs = detail?.playlistTracksIds ??
                         detail?.playlistTracks?.compactMap(\.songId)
                 }
-                if let likedIDs {
-                    let serverIDs = Set(likedIDs)
-                    favorites = serverIDs.subtracting(favoriteMutationsInFlight)
-                        .union(favorites.intersection(favoriteMutationsInFlight))
-                    UserDefaults.standard.set(Array(serverIDs), forKey: "lane.favorites")
-                }
             } else {
-                favorites = []
-                UserDefaults.standard.removeObject(forKey: "lane.favorites")
+                likedIDs = []
+            }
+            if let likedIDs {
+                let serverIDs = Set(likedIDs)
+                let needsMigration = !UserDefaults.standard.bool(forKey: favoriteMigrationKey)
+                let legacyIDs: Set<String> = needsMigration
+                    ? Set(favorites.subtracting(serverIDs).filter {
+                        !$0.isEmpty && !$0.contains("|") && $0.count < 200
+                    })
+                    : []
+                let pendingMigration = favoriteMigrationInProgress
+                    ? favorites.subtracting(serverIDs)
+                    : Set(legacyIDs)
+                favorites = serverIDs.subtracting(favoriteMutationsInFlight)
+                    .union(favorites.intersection(favoriteMutationsInFlight))
+                    .union(pendingMigration)
+                if needsMigration, !favoriteMigrationInProgress, !legacyIDs.isEmpty {
+                    favoriteMigrationInProgress = true
+                    Task { @MainActor in
+                        await migrateLegacyFavorites(Array(legacyIDs), token: requestToken)
+                    }
+                } else if needsMigration, legacyIDs.isEmpty, !favoriteMigrationInProgress {
+                    UserDefaults.standard.set(true, forKey: favoriteMigrationKey)
+                }
+                UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")
             }
         }
         if let albums { serverAlbums = albums }
@@ -2849,6 +2873,47 @@ final class LaneSession: ObservableObject {
     }
 
     // MARK: Favorites / local playlists
+
+    private func migrateLegacyFavorites(_ ids: [String], token requestToken: String) async {
+        defer {
+            if token == requestToken { favoriteMigrationInProgress = false }
+        }
+        var failed: [String] = []
+        let ordered = ids.sorted()
+        for start in stride(from: 0, to: ordered.count, by: 15) {
+            guard token == requestToken else { return }
+            let batch = Array(ordered[start..<min(start + 15, ordered.count)])
+            do {
+                _ = try await LaneAPI.shared.addTracks(
+                    token: requestToken,
+                    playlistId: "lane_likes",
+                    trackIds: batch
+                )
+            } catch {
+                // One obsolete local ID must not prevent the remaining likes
+                // from being saved to the account.
+                for id in batch {
+                    guard token == requestToken else { return }
+                    do {
+                        _ = try await LaneAPI.shared.addTracks(
+                            token: requestToken,
+                            playlistId: "lane_likes",
+                            trackIds: [id]
+                        )
+                    } catch {
+                        failed.append(id)
+                    }
+                }
+            }
+        }
+        guard token == requestToken else { return }
+        if failed.isEmpty {
+            UserDefaults.standard.set(true, forKey: favoriteMigrationKey)
+            await loadLibrary()
+        } else {
+            output = "Could not sync \(failed.count) older liked tracks to Lane. Please retry when the connection is stable."
+        }
+    }
 
     private func favoriteKey(_ track: TrackCandidate) -> String {
         track.trackID ?? track.id
