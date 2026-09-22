@@ -287,6 +287,18 @@ struct PaginatedResult<T: Decodable>: Decodable {
     }
 
     init(from decoder: Decoder) throws {
+        // Some Lane edges return a bare array for collection reads while the
+        // Android repository normally receives the paginated object shape.
+        // Accept both so playlist/library rendering is not tied to one edge.
+        if let direct = try? decoder.singleValueContainer().decode([T].self) {
+            items = direct
+            totalItems = Int64(direct.count)
+            page = 0
+            pageSize = direct.count
+            totalPages = direct.isEmpty ? 0 : 1
+            return
+        }
+
         let box = try decoder.container(keyedBy: CodingKeys.self)
 
         if box.contains(.items) {
