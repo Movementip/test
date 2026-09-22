@@ -1841,6 +1841,23 @@ final class LaneSession: ObservableObject {
         return existing
     }
 
+    private func canonicalImportBatch(_ sourceIDs: [String]) async throws -> [String] {
+        // ImportViewModel.loadPreviewTracks in Lane Android resolves the IDs
+        // returned by /user/import/preview through /user/tracks before adding
+        // them to a user playlist. SoundCloud/Yandex preview IDs are not
+        // guaranteed to already be canonical Lane songIds.
+        let tracks = try await resolveTrackDataResilient(
+            sourceIDs,
+            prefetch: false
+        )
+
+        var seen = Set<String>()
+        return tracks
+            .compactMap(\.songId)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
     private func addImportIDsBySplitting(
         _ ids: [String],
         into playlistID: String,
@@ -1888,64 +1905,95 @@ final class LaneSession: ObservableObject {
         progress: @escaping (_ completed: Int, _ total: Int, _ stage: String) -> Void = { _, _, _ in },
         importedBatch: @escaping ([String]) -> Void = { _ in }
     ) async throws -> Int {
-        var seen = Set<String>()
-        let clean = trackIDs.filter { !$0.isEmpty && seen.insert($0).inserted }
+        var sourceSeen = Set<String>()
+        let clean = trackIDs
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && sourceSeen.insert($0).inserted }
         guard !clean.isEmpty else { throw LaneAPIError.emptyResponse }
 
         await configureAPI()
         progress(0, clean.count, "Checking Lane playlist…")
 
-        // A previously interrupted import is resumed instead of starting from
-        // zero. This also makes a second tap safe and avoids duplicate tracks.
+        // Existing playlist IDs are canonical Lane songIds, so source-platform
+        // preview IDs must be resolved before duplicate checks.
         var existing = try await serverTrackIDs(in: playlistID)
-        var processed = 0
+        var canonicalSeen = Set<String>()
+        var processedSources = 0
         var imported = 0
 
-        // Match Android ImportViewModel: use IDs from /user/import/preview
-        // directly. /user/tracks enriches preview artwork but must not veto
-        // the import when that separate read endpoint cannot resolve an ID.
+        // Lane Android works with small TrackIds pages. Resolve each page first,
+        // then immediately commit it; a 1,000+ track import therefore starts
+        // making progress instead of resolving the whole source up front.
         for start in stride(from: 0, to: clean.count, by: 15) {
             try Task.checkCancellation()
             let end = min(start + 15, clean.count)
             let sourceBatch = Array(clean[start..<end])
-            let pending = sourceBatch.filter { !existing.contains($0) }
-            var confirmedIDs = Set(sourceBatch.filter { existing.contains($0) })
+
+            progress(
+                processedSources,
+                clean.count,
+                "Resolving \(start + 1)–\(end) of \(clean.count)…"
+            )
+
+            let resolved = try await canonicalImportBatch(sourceBatch)
+            let canonical = resolved.filter { canonicalSeen.insert($0).inserted }
+
+            if canonical.isEmpty {
+                throw LaneAPIError.decoding(
+                    "Lane could not resolve preview tracks \(start + 1)–\(end) through /user/tracks."
+                )
+            }
+
+            let alreadyPresent = canonical.filter { existing.contains($0) }
+            let pending = canonical.filter { !existing.contains($0) }
+            var confirmed = Set(alreadyPresent)
 
             if !pending.isEmpty {
-                progress(processed, clean.count, "Adding \(start + 1)–\(end) of \(clean.count)…")
+                progress(
+                    processedSources,
+                    clean.count,
+                    "Adding \(start + 1)–\(end) of \(clean.count)…"
+                )
+
                 var checked = 0
                 let added = try await addImportIDsBySplitting(
-                    pending, into: playlistID
+                    pending,
+                    into: playlistID
                 ) { count in
                     checked += count
                     progress(
-                        processed,
+                        processedSources,
                         clean.count,
-                        "Checking \(checked)/\(pending.count) Lane IDs in this batch…"
+                        "Checking \(checked)/\(pending.count) Lane tracks in this batch…"
                     )
                 }
+
                 if added.isEmpty {
                     throw LaneAPIError.decoding(
-                        "Lane rejected all \(pending.count) preview track IDs individually in /user/playlist/add-tracks. No tracks from this batch were added."
+                        "Lane resolved this preview batch, but rejected all \(pending.count) canonical track IDs in /user/playlist/add-tracks."
                     )
                 }
-                confirmedIDs.formUnion(added)
+                confirmed.formUnion(added)
             }
 
-            let confirmed = sourceBatch.filter { confirmedIDs.contains($0) }
-            existing.formUnion(confirmed)
-            imported += confirmed.count
-            processed += sourceBatch.count
-            importedBatch(confirmed)
-            progress(processed, clean.count, "")
+            let confirmedInOrder = canonical.filter { confirmed.contains($0) }
+            existing.formUnion(confirmedInOrder)
+            imported += confirmedInOrder.count
+            processedSources += sourceBatch.count
+            importedBatch(confirmedInOrder)
+            progress(processedSources, clean.count, "")
 
             if end < clean.count {
-                // Keep mutations ordered and stay below burst-rate limits.
+                // Keep mutations ordered and stay below Lane burst-rate limits.
                 try await Task.sleep(nanoseconds: 250_000_000)
             }
         }
 
-        output = "\(imported) of \(clean.count) Lane preview tracks are in the playlist"
+        guard imported > 0 else {
+            throw LaneAPIError.decoding("Lane did not import any tracks from the preview.")
+        }
+
+        output = "\(imported) Lane tracks are now in the playlist"
         await loadLibrary()
         return imported
     }
