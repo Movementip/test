@@ -27,6 +27,12 @@ struct APIResult {
     var json: Any? {
         try? JSONSerialization.jsonObject(with: data)
     }
+
+    func requireSuccess() throws {
+        guard (200..<300).contains(status) else {
+            throw LaneAPIError.http(status, pretty)
+        }
+    }
 }
 
 enum LaneAPIError: LocalizedError {
@@ -487,9 +493,19 @@ actor LaneAPI {
                     lastResult = result
 
                     if (200..<400).contains(http.statusCode) {
-                        if signingConfiguration.mode == .official {
+                        // A regional edge can have album metadata while its
+                        // track index still answers [] for the same IDs. This
+                        // POST is read-only in the APK, so a fresh signed read
+                        // against the other official edge is safe. Do not
+                        // remember an empty response as a working catalog.
+                        let emptyTrackResolution = normalizedPath == "/user/tracks" &&
+                            ((try? JSONSerialization.jsonObject(with: data)) as? [Any])?.isEmpty == true
+                        if emptyTrackResolution, index + 1 < candidates.count {
+                            continue
+                        }
+                        if signingConfiguration.mode == .official, !emptyTrackResolution {
                             rememberWorkingRegionalBase(targetBase)
-                        } else {
+                        } else if signingConfiguration.mode != .official {
                             base = targetBase
                         }
                         return result
@@ -774,8 +790,11 @@ actor LaneAPI {
         )
     }
 
-    func recommendations(token: String, trackId: String, platform: String) async throws -> APIResult {
-        try await request(
+    // Android TracksApi.c decodes this endpoint as LanePlaylistItem, not a
+    // track array. The returned playlist ID is the destination of Wave.
+    func wavePlaylist(token: String, trackId: String, platform: String) async throws -> LanePlaylist {
+        try await decoded(
+            LanePlaylist.self,
             path: "/platforms/recommendations",
             token: token,
             query: [

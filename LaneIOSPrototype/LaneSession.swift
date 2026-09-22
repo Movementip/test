@@ -52,9 +52,10 @@ final class LaneSession: ObservableObject {
     // MARK: Account / API
     @Published var token = KeychainStore.load(account: "bearer") ?? ""
     @Published var baseURL = UserDefaults.standard.string(forKey: "lane.base") ?? "https://laneapi.com"
-    // Keep the user's choice. If a particular stream rejects it, playback
-    // retries that request in BASIC without rewriting the saved preference.
-    @Published var streamQuality = UserDefaults.standard.string(forKey: "lane.quality") ?? AudioQualityChoice.high.rawValue
+    // Keep the selected tier across launches and request exactly that tier.
+    @Published var streamQuality = UserDefaults.standard.string(forKey: "lane.quality") ?? AudioQualityChoice.basic.rawValue {
+        didSet { UserDefaults.standard.set(streamQuality, forKey: "lane.quality") }
+    }
     @Published var backendMode = LaneBackendMode(rawValue: UserDefaults.standard.string(forKey: "lane.backendMode") ?? "official") ?? .official
     @Published var apiKeyHeader = UserDefaults.standard.string(forKey: "lane.apiKeyHeader") ?? "X-API-Key"
     @Published var apiKey = KeychainStore.load(account: "lane.customApiKey") ?? ""
@@ -78,6 +79,12 @@ final class LaneSession: ObservableObject {
     @Published var searchToken: String?
     @Published var searchMessage = ""
     @Published var searchIsLoading = false
+    @Published var wavePlaylist: LanePlaylist?
+    @Published var waveIsLoading = false
+    @Published var waveError: String?
+    @Published var waveSourceCoverURL: String?
+    private var waveTask: Task<Void, Never>?
+    private var waveRequestID = UUID()
     @Published var trackResolveMessage = ""
     private var resolvedTrackCache: [String: TrackCandidate] = [:]
     private var searchTask: Task<Void, Never>?
@@ -205,8 +212,14 @@ final class LaneSession: ObservableObject {
     }
 
     private func rememberResolvedTracks(_ tracks: [TrackCandidate]) {
+        guard !tracks.isEmpty else { return }
         for track in tracks {
             guard let id = track.trackID, !id.isEmpty else { continue }
+            if let existing = resolvedTrackCache[id],
+               (existing.coverURL != nil && track.coverURL == nil ||
+                existing.title != "Unknown track" && track.title == "Unknown track") {
+                continue
+            }
             resolvedTrackCache[id] = TrackCandidate(
                 id: track.id,
                 title: track.title,
@@ -247,6 +260,7 @@ final class LaneSession: ObservableObject {
             // is skipped without discarding the rest of the playlist.
             guard ids.count > 1 else {
                 output = "Skipped an unresolved source track: \(ids[0])"
+                trackResolveMessage = "Lane rejected a listed track ID (INVALID_TRACK_IDS_BODY). Try again."
                 return []
             }
 
@@ -294,13 +308,26 @@ final class LaneSession: ObservableObject {
             }
             let candidates = tracks.map { TrackCandidate($0) }
             rememberResolvedTracks(candidates)
-            if candidates.isEmpty && !cached.isEmpty {
-                return cached
+            var byID: [String: TrackCandidate] = [:]
+            for track in cached {
+                if let id = track.trackID { byID[id] = track }
             }
-            return applyingRefID(refID, to: candidates)
+            for track in candidates {
+                if let id = track.trackID { byID[id] = track }
+            }
+            let ordered = clean.compactMap { byID[$0] }
+            let withoutID = candidates.filter { $0.trackID == nil }
+            if ordered.isEmpty && withoutID.isEmpty && trackResolveMessage.isEmpty {
+                trackResolveMessage = "Lane returned no track details for \(clean.count) listed IDs. Try again."
+            }
+            return applyingRefID(refID, to: ordered + withoutID)
         } catch {
             output = "Track resolve error: \(error.localizedDescription)"
-            trackResolveMessage = "Tracks are temporarily unavailable. Reopen the album to try again."
+            if case let LaneAPIError.http(status, _) = error {
+                trackResolveMessage = "Lane could not load these tracks (HTTP \(status)). Try again."
+            } else {
+                trackResolveMessage = "Tracks are temporarily unavailable. Try again."
+            }
 
             // Preserve whatever is already present locally instead of showing
             // an empty detail page if the network resolver is unavailable.
@@ -464,6 +491,11 @@ final class LaneSession: ObservableObject {
     }
 
     func clearAccount() {
+        waveTask?.cancel()
+        waveRequestID = UUID()
+        wavePlaylist = nil
+        waveIsLoading = false
+        waveError = nil
         token = ""
         KeychainStore.delete(account: "bearer")
         account = nil
@@ -624,6 +656,7 @@ final class LaneSession: ObservableObject {
             output = result.pretty
             homeSections = JSONProbe.homeSections(result.json)
             homeTracks = JSONProbe.tracks(result.json)
+            rememberResolvedTracks(homeTracks)
 
             if !homeSections.isEmpty {
                 output = "Loaded \(homeSections.count) Lane home sections."
@@ -799,6 +832,7 @@ final class LaneSession: ObservableObject {
                 searchTracks = response.results.compactMap { $0.track }.map {
                     TrackCandidate($0, refID: searchRefID)
                 }
+                rememberResolvedTracks(searchTracks)
                 searchArtists = response.results.compactMap { $0.artist }
                 searchAlbums = response.results.compactMap { $0.album }
                 searchPlaylists = response.results.compactMap { $0.playlist }
@@ -854,8 +888,20 @@ final class LaneSession: ObservableObject {
                     likedIDs = detail?.playlistTracksIds ??
                         detail?.playlistTracks?.compactMap(\.songId)
                 }
-            } else {
-                likedIDs = []
+            }
+            // The summary can omit IDs (or even the hidden likes playlist).
+            // Never replace the complete local set with one partial page.
+            if let count = likedPlaylist?.tracksCount,
+               count > (likedIDs?.count ?? 0) {
+                likedIDs = nil
+            }
+            if likedIDs == nil {
+                likedIDs = await loadAllLikedTrackIDs(token: requestToken)
+                guard token == requestToken else { return }
+            }
+            if let count = likedPlaylist?.tracksCount,
+               count > (likedIDs?.count ?? 0) {
+                likedIDs = nil
             }
             if let likedIDs {
                 let serverIDs = Set(likedIDs)
@@ -901,12 +947,31 @@ final class LaneSession: ObservableObject {
                     artistAvatars: track.artistAvatars
                 )
             }
+            rememberResolvedTracks(recentTracks)
         }
+    }
+
+    private func loadAllLikedTrackIDs(token requestToken: String) async -> [String]? {
+        var ids: [String] = []
+        for pageNumber in 1...100 {
+            guard let page = try? await LaneAPI.shared.playlistTracks(
+                token: requestToken,
+                playlistId: "lane_likes",
+                page: pageNumber,
+                pageSize: 100
+            ) else { return nil }
+            ids.append(contentsOf: page.items.compactMap(\.songId))
+            if let total = page.totalItems, Int64(ids.count) >= total { return ids }
+            if let totalPages = page.totalPages, pageNumber >= totalPages { return ids }
+            if page.items.count < 100 { return ids }
+        }
+        return nil
     }
 
     private func rememberPlaylistTracks(_ tracks: [TrackCandidate], playlistID: String) {
         guard !tracks.isEmpty else { return }
         playlistTrackCache[playlistID] = tracks
+        rememberResolvedTracks(tracks)
         playlistLoadMessages[playlistID] = nil
         if playlistTrackCache.count > 64, let oldest = playlistTrackCache.keys.first {
             playlistTrackCache.removeValue(forKey: oldest)
@@ -1002,10 +1067,14 @@ final class LaneSession: ObservableObject {
                 .compactMap { $0 }
                 .first { !$0.isEmpty } ?? []
             guard !ids.isEmpty else {
-                let isKnownEmpty = page?.totalItems == 0 ||
-                    details?.tracksCount == 0 ||
-                    libraryCopy?.tracksCount == 0 ||
-                    playlist.tracksCount == 0
+                // A regional page may report zero while the detail metadata
+                // knows this playlist has tracks. Keep the existing cache and
+                // show a retry state rather than erasing the user's list.
+                let counts = [details?.tracksCount, libraryCopy?.tracksCount, playlist.tracksCount]
+                    .compactMap { $0 }
+                let hasTracksAccordingToMetadata = counts.contains { $0 > 0 }
+                let isKnownEmpty = !hasTracksAccordingToMetadata &&
+                    (page?.totalItems == 0 || counts.contains(0))
                 if isKnownEmpty {
                     playlistTrackCache.removeValue(forKey: id)
                     if let data = try? JSONEncoder().encode(playlistTrackCache) {
@@ -1047,37 +1116,29 @@ final class LaneSession: ObservableObject {
         }
     }
 
-    func createServerPlaylist(name: String, description: String = "", trackIDs: [String] = []) {
+    func createServerPlaylist(name: String, description: String = "", trackIDs: [String] = []) async throws {
         let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty, !isGuest else { return }
+        guard !clean.isEmpty, !isGuest else { throw LaneAPIError.decoding("Sign in and enter a playlist name") }
 
         busy = true
-        Task {
-            defer { busy = false }
-            do {
-                if account == nil {
-                    await loadAccount()
-                }
-                guard let creator = account?.laneId, !creator.isEmpty else {
-                    output = "Lane account ID is unavailable"
-                    return
-                }
-                await configureAPI()
-                let result = try await LaneAPI.shared.createPlaylist(
-                    token: token,
-                    imageURL: "",
-                    name: clean,
-                    description: description,
-                    tracks: trackIDs,
-                    creatorLid: creator
-                )
-                status = result.status
-                output = result.pretty
-                await loadLibrary()
-            } catch {
-                output = error.localizedDescription
-            }
+        defer { busy = false }
+        if account == nil { await loadAccount() }
+        guard let creator = account?.laneId, !creator.isEmpty else {
+            throw LaneAPIError.decoding("Lane account ID is unavailable")
         }
+        await configureAPI()
+        let result = try await LaneAPI.shared.createPlaylist(
+            token: token,
+            imageURL: "",
+            name: clean,
+            description: description,
+            tracks: trackIDs,
+            creatorLid: creator
+        )
+        status = result.status
+        try result.requireSuccess()
+        output = result.pretty
+        await loadLibrary()
     }
 
     func deleteServerPlaylist(_ playlist: LanePlaylist) async throws {
@@ -1085,6 +1146,7 @@ final class LaneSession: ObservableObject {
         await configureAPI()
         let result = try await LaneAPI.shared.deletePlaylist(token: token, playlistId: id)
         status = result.status
+        try result.requireSuccess()
         output = result.pretty
         await loadLibrary()
     }
@@ -1104,6 +1166,7 @@ final class LaneSession: ObservableObject {
             description: description
         )
         status = result.status
+        try result.requireSuccess()
         output = result.pretty
         await loadLibrary()
     }
@@ -1117,6 +1180,7 @@ final class LaneSession: ObservableObject {
             visibility: visibility
         )
         status = result.status
+        try result.requireSuccess()
         output = result.pretty
         await loadLibrary()
     }
@@ -1126,6 +1190,7 @@ final class LaneSession: ObservableObject {
         await configureAPI()
         let result = try await LaneAPI.shared.addPlaylistToLibrary(token: token, playlistId: id)
         status = result.status
+        try result.requireSuccess()
         output = result.pretty
         await loadLibrary()
     }
@@ -1775,48 +1840,42 @@ final class LaneSession: ObservableObject {
         }
     }
 
-    func loadRecommendations(_ track: TrackCandidate) {
-        guard let id = track.trackID else { return }
-        Task {
-            do {
-                await configureAPI()
-                let result = try await LaneAPI.shared.recommendations(
-                    token: token,
-                    trackId: id,
-                    platform: track.platform.isEmpty ? "all" : track.platform
-                )
-                let recommended = JSONProbe.tracks(result.json)
-                if !recommended.isEmpty {
-                    queue = recommended
-                    currentIndex = nil
-                }
-                output = result.pretty
-            } catch {
-                output = error.localizedDescription
-            }
-        }
-    }
-
     func startWave(from track: TrackCandidate) {
-        guard let id = track.trackID else { return }
-        Task {
+        guard let id = track.trackID, !id.isEmpty else {
+            waveError = "This track has no Lane ID."
+            return
+        }
+        waveTask?.cancel()
+        let requestID = UUID()
+        waveRequestID = requestID
+        wavePlaylist = nil
+        waveError = nil
+        waveSourceCoverURL = track.coverURL
+        waveIsLoading = true
+        let requestToken = token
+        waveTask = Task { @MainActor in
+            defer { if waveRequestID == requestID { waveIsLoading = false } }
             do {
                 await configureAPI()
-                let result = try await LaneAPI.shared.recommendations(
-                    token: token,
+                try Task.checkCancellation()
+                let playlist = try await LaneAPI.shared.wavePlaylist(
+                    token: requestToken,
                     trackId: id,
                     platform: track.platform.isEmpty ? "all" : track.platform
                 )
-                let recommended = JSONProbe.tracks(result.json)
-                guard let first = recommended.first else {
-                    output = "No tracks found for this wave"
-                    return
+                guard !Task.isCancelled, token == requestToken,
+                      waveRequestID == requestID else { return }
+                guard let playlistID = playlist.playlistId, !playlistID.isEmpty else {
+                    throw LaneAPIError.decoding("Lane returned a wave without a playlist ID")
                 }
-                queue = recommended
-                currentIndex = 0
-                requestStream(for: first)
+                wavePlaylist = playlist
+                output = "Wave ready: \(playlist.playlistName ?? playlistID)"
+            } catch is CancellationError {
+                return
             } catch {
-                output = error.localizedDescription
+                guard !Task.isCancelled, waveRequestID == requestID else { return }
+                waveError = error.localizedDescription
+                output = "Wave error: \(error.localizedDescription)"
             }
         }
     }
@@ -1866,37 +1925,6 @@ final class LaneSession: ObservableObject {
         return networkError.domain == NSURLErrorDomain
     }
 
-    private func resolvedPlaybackStream(
-        trackID: String,
-        refID: String?,
-        preferredQuality: String
-    ) async throws -> (result: TrackStreamingResult, quality: String) {
-        do {
-            let result = try await resolvedStream(
-                trackID: trackID,
-                refID: refID,
-                quality: preferredQuality
-            )
-            return (result, preferredQuality)
-        } catch {
-            // The Android client sends the selected tier. If an obsolete
-            // HIGH/ULTRA preference now maps to a retired paid tier, BASIC is
-            // the only legitimate compatibility retry. Keep the original
-            // /track/stream endpoint and refId intact.
-            guard isPremiumRequired(error),
-                  preferredQuality != AudioQualityChoice.basic.rawValue else {
-                throw error
-            }
-
-            let result = try await resolvedStream(
-                trackID: trackID,
-                refID: refID,
-                quality: AudioQualityChoice.basic.rawValue
-            )
-            return (result, AudioQualityChoice.basic.rawValue)
-        }
-    }
-
     private func isPremiumRequired(_ error: Error) -> Bool {
         error.localizedDescription.localizedCaseInsensitiveContains("PREMIUM_REQUIRED")
     }
@@ -1905,7 +1933,7 @@ final class LaneSession: ObservableObject {
         let detail = error.localizedDescription
         let code = playbackDiagnosticCode(error)
         if isPremiumRequired(error) {
-            return "The audio stream is unavailable. Try again or choose another track. [\(code)]"
+            return "This quality requires Lane Premium. Choose Basic in Audio quality. [\(code)]"
         }
         if detail.localizedCaseInsensitiveContains("timed out") ||
             detail.localizedCaseInsensitiveContains("HTTP 5") ||
@@ -2012,13 +2040,12 @@ final class LaneSession: ObservableObject {
                 guard self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
 
-                let resolved = try await self.resolvedPlaybackStream(
+                let requestedQuality = self.streamQuality
+                var result = try await self.resolvedStream(
                     trackID: trackID,
                     refID: track.refID,
-                    preferredQuality: self.streamQuality
+                    quality: requestedQuality
                 )
-                var requestedQuality = resolved.quality
-                var result = resolved.result
 
                 try Task.checkCancellation()
                 guard self.playbackRequestID == requestID,
@@ -2884,22 +2911,24 @@ final class LaneSession: ObservableObject {
             guard token == requestToken else { return }
             let batch = Array(ordered[start..<min(start + 15, ordered.count)])
             do {
-                _ = try await LaneAPI.shared.addTracks(
+                let result = try await LaneAPI.shared.addTracks(
                     token: requestToken,
                     playlistId: "lane_likes",
                     trackIds: batch
                 )
+                try result.requireSuccess()
             } catch {
                 // One obsolete local ID must not prevent the remaining likes
                 // from being saved to the account.
                 for id in batch {
                     guard token == requestToken else { return }
                     do {
-                        _ = try await LaneAPI.shared.addTracks(
+                        let result = try await LaneAPI.shared.addTracks(
                             token: requestToken,
                             playlistId: "lane_likes",
                             trackIds: [id]
                         )
+                        try result.requireSuccess()
                     } catch {
                         failed.append(id)
                     }
@@ -2952,17 +2981,19 @@ final class LaneSession: ObservableObject {
             do {
                 await configureAPI()
                 if wasLiked {
-                    _ = try await LaneAPI.shared.removeTrack(
+                    let result = try await LaneAPI.shared.removeTrack(
                         token: requestToken,
                         playlistId: "lane_likes",
                         trackId: trackID
                     )
+                    try result.requireSuccess()
                 } else {
-                    _ = try await LaneAPI.shared.addTracks(
+                    let result = try await LaneAPI.shared.addTracks(
                         token: requestToken,
                         playlistId: "lane_likes",
                         trackIds: [trackID]
                     )
+                    try result.requireSuccess()
                 }
                 if token == requestToken {
                     UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")

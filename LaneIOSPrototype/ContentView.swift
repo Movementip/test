@@ -60,30 +60,45 @@ struct ContentView: View {
     @EnvironmentObject private var session: LaneSession
     @State private var selectedTab = 0
     @State private var showPlayer = false
-    @State private var homeStackID = UUID()
-    @State private var searchStackID = UUID()
-    @State private var libraryStackID = UUID()
+    @State private var displayedWavePlaylist: LanePlaylist?
 
     var body: some View {
         ZStack(alignment: .bottom) {
             ZStack {
                 HomeScreen(showPlayer: $showPlayer)
-                    .id(homeStackID)
                     .opacity(selectedTab == 0 ? 1 : 0)
-                    .allowsHitTesting(selectedTab == 0)
-                    .accessibilityHidden(selectedTab != 0)
+                    .allowsHitTesting(selectedTab == 0 && displayedWavePlaylist == nil)
+                    .accessibilityHidden(selectedTab != 0 || displayedWavePlaylist != nil)
 
                 SearchScreen(showPlayer: $showPlayer, isActive: selectedTab == 1)
-                    .id(searchStackID)
                     .opacity(selectedTab == 1 ? 1 : 0)
-                    .allowsHitTesting(selectedTab == 1)
-                    .accessibilityHidden(selectedTab != 1)
+                    .allowsHitTesting(selectedTab == 1 && displayedWavePlaylist == nil)
+                    .accessibilityHidden(selectedTab != 1 || displayedWavePlaylist != nil)
 
-                LibraryScreen(showPlayer: $showPlayer)
-                    .id(libraryStackID)
+                LibraryScreen(showPlayer: $showPlayer, onSearch: { selectTab(1) })
                     .opacity(selectedTab == 2 ? 1 : 0)
-                    .allowsHitTesting(selectedTab == 2)
-                    .accessibilityHidden(selectedTab != 2)
+                    .allowsHitTesting(selectedTab == 2 && displayedWavePlaylist == nil)
+                    .accessibilityHidden(selectedTab != 2 || displayedWavePlaylist != nil)
+
+                if let displayedWavePlaylist {
+                    PlaylistDetailScreen(
+                        playlist: displayedWavePlaylist,
+                        showPlayer: $showPlayer,
+                        onBack: closeWave
+                    )
+                    .background(laneBackground)
+                    .transition(.move(edge: .trailing))
+                    .zIndex(1)
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 30)
+                            .onEnded { value in
+                                guard value.startLocation.x < 32,
+                                      value.translation.width > 100,
+                                      abs(value.translation.width) > abs(value.translation.height) * 1.3 else { return }
+                                closeWave()
+                            }
+                    )
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(.bottom, session.currentTrack == nil ? 48 : 108)
@@ -97,12 +112,41 @@ struct ContentView: View {
 
                 LaneBottomBar(selection: $selectedTab, onSelect: selectTab)
             }
+
+            if session.waveIsLoading {
+                APKWaveLoadingToast(coverURL: session.waveSourceCoverURL)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, session.currentTrack == nil ? 62 : 126)
+                    .transition(.opacity)
+            }
         }
         .background(laneBackground.ignoresSafeArea())
         .preferredColorScheme(.dark)
         .fullScreenCover(isPresented: $showPlayer) {
             APKFullPlayerView()
                 .environmentObject(session)
+        }
+        .onChange(of: session.wavePlaylist) { playlist in
+            guard let playlist else {
+                displayedWavePlaylist = nil
+                return
+            }
+            showPlayer = false
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard session.wavePlaylist?.playlistId == playlist.playlistId else { return }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    displayedWavePlaylist = playlist
+                }
+            }
+        }
+        .alert("Wave", isPresented: Binding(
+            get: { session.waveError != nil && !showPlayer },
+            set: { if !$0 { session.waveError = nil } }
+        )) {
+            Button("OK", role: .cancel) { session.waveError = nil }
+        } message: {
+            Text(session.waveError ?? "Could not create a wave.")
         }
         .task {
             if !session.isGuest && session.homeTracks.isEmpty {
@@ -112,16 +156,18 @@ struct ContentView: View {
     }
 
     private func selectTab(_ index: Int) {
-        if selectedTab == index {
-            switch index {
-            case 0: homeStackID = UUID()
-            case 1: searchStackID = UUID()
-            default: libraryStackID = UUID()
-            }
-        } else {
+        if selectedTab != index {
+            closeWave()
             withAnimation(.spring(response: 0.20, dampingFraction: 0.50)) {
                 selectedTab = index
             }
+        }
+    }
+
+    private func closeWave() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            displayedWavePlaylist = nil
+            session.wavePlaylist = nil
         }
     }
 }
@@ -799,6 +845,7 @@ private enum LibraryEntry: Identifiable {
 private struct LibraryScreen: View {
     @EnvironmentObject private var session: LaneSession
     @Binding var showPlayer: Bool
+    let onSearch: () -> Void
 
     @State private var filter: LibraryFilter = .all
     @State private var showCreatePlaylist = false
@@ -810,7 +857,7 @@ private struct LibraryScreen: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    LibraryHeader(showCreatePlaylist: $showCreatePlaylist)
+                    LibraryHeader(showCreatePlaylist: $showCreatePlaylist, onSearch: onSearch)
                         .padding(.bottom, 10)
 
                     if session.isGuest {
@@ -913,18 +960,6 @@ private struct LibraryScreen: View {
                 }
         }
 
-        if filter == .all && !session.recentTracks.isEmpty {
-            LibrarySectionTitle(title: "Recently played", count: session.recentTracks.count)
-                .padding(.top, 10)
-
-            VStack(spacing: 2) {
-                ForEach(session.recentTracks.prefix(12)) { track in
-                    TrackRow(track: track, showPlayer: $showPlayer)
-                }
-            }
-            .padding(.horizontal, 8)
-        }
-
         if filter != .all && filter != .playlists &&
             libraryEntries.allSatisfy({ !$0.matches(filter) }) {
             EmptyLaneView(
@@ -975,6 +1010,7 @@ private struct LibraryScreen: View {
 private struct LibraryHeader: View {
     @EnvironmentObject private var session: LaneSession
     @Binding var showCreatePlaylist: Bool
+    let onSearch: () -> Void
 
     var body: some View {
         HStack(spacing: 0) {
@@ -990,6 +1026,14 @@ private struct LibraryHeader: View {
             APKLaneHeaderTitle(subtitle: "Library")
 
             Spacer()
+
+            Button(action: onSearch) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+            }
+            .buttonStyle(.plain)
 
             Button {
                 showCreatePlaylist = true
@@ -1318,7 +1362,7 @@ private struct FullPlayerView: View {
                                 showComments = true
                             }
                             PlayerAction(icon: "waveform", title: "Wave") {
-                                session.loadRecommendations(track)
+                                session.startWave(from: track)
                             }
                             PlayerAction(
                                 icon: session.isDownloaded(track) ? "checkmark.circle.fill" : "arrow.down.circle",
@@ -1585,6 +1629,7 @@ struct PlaylistDetailScreen: View {
     @Environment(\.dismiss) private var dismiss
     let playlist: LanePlaylist
     @Binding var showPlayer: Bool
+    var onBack: (() -> Void)? = nil
 
     @State private var tracks: [TrackCandidate] = []
     @State private var loading = true
@@ -1873,7 +1918,9 @@ struct PlaylistDetailScreen: View {
         .toolbar(.hidden, for: .navigationBar)
         .safeAreaInset(edge: .top, spacing: 0) {
             HStack(spacing: 0) {
-                APKImportBackButton { dismiss() }
+                APKImportBackButton {
+                    if let onBack { onBack() } else { dismiss() }
+                }
 
                 Text(visibleName)
                     .font(.system(size: 17, weight: .bold))
@@ -2323,6 +2370,7 @@ private struct TrackInfoScreen: View {
 private struct ProfileScreen: View {
     @EnvironmentObject private var session: LaneSession
     @State private var showEditProfile = false
+    @State private var showPremiumQualityNotice = false
     @State private var showPlayer = false
 
     private var profileName: String {
@@ -2566,17 +2614,38 @@ private struct ProfileScreen: View {
                         .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 16))
                         .padding(.horizontal, 16)
 
-                        Picker("Streaming quality", selection: $session.streamQuality) {
+                        HStack(spacing: 0) {
                             ForEach(AudioQualityChoice.allCases) { quality in
-                                Text("\(quality.title) · \(quality.detail)")
-                                    .tag(quality.rawValue)
+                                let locked = quality != .basic && !session.hasPremiumAccess
+                                Button {
+                                    if locked {
+                                        showPremiumQualityNotice = true
+                                    } else {
+                                        session.streamQuality = quality.rawValue
+                                    }
+                                } label: {
+                                    HStack(spacing: 3) {
+                                        if locked { Image(systemName: "lock.fill").font(.system(size: 10)) }
+                                        Text("\(quality.title) · \(quality.detail)")
+                                            .font(.system(size: 11, weight: .medium))
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.8)
+                                    }
+                                    .foregroundStyle(locked ? Color.white.opacity(0.45) : .white)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 35)
+                                    .background(
+                                        session.streamQuality == quality.rawValue
+                                            ? Color.white.opacity(0.2) : Color.clear,
+                                        in: RoundedRectangle(cornerRadius: 7)
+                                    )
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
-                        .pickerStyle(.segmented)
+                        .padding(3)
+                        .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
                         .padding(.horizontal, 16)
-                        .onChange(of: session.streamQuality) { _ in
-                            session.persistStreamQualitySelection()
-                        }
 
                         Button(role: .destructive) {
                             session.clearAccount()
@@ -2605,6 +2674,11 @@ private struct ProfileScreen: View {
         .sheet(isPresented: $showEditProfile) {
             EditProfileSheet()
                 .environmentObject(session)
+        }
+        .alert("Lane Premium required", isPresented: $showPremiumQualityNotice) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("High and Ultra quality require an active Lane subscription. Basic quality remains available.")
         }
         .fullScreenCover(isPresented: $showPlayer) {
             APKFullPlayerView()
@@ -3279,6 +3353,8 @@ private struct CreatePlaylistSheet: View {
 
     @State private var name = ""
     @State private var description = ""
+    @State private var saving = false
+    @State private var errorMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -3297,6 +3373,10 @@ private struct CreatePlaylistSheet: View {
                     TextField("Playlist name", text: $name)
                     TextField("Playlist description", text: $description, axis: .vertical)
                 }
+                if let errorMessage {
+                    Text(errorMessage)
+                        .foregroundStyle(lanePink)
+                }
             }
             .navigationTitle("Create Playlist")
             .toolbar {
@@ -3305,10 +3385,20 @@ private struct CreatePlaylistSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") {
-                        session.createServerPlaylist(name: name, description: description)
-                        dismiss()
+                        guard !saving else { return }
+                        saving = true
+                        errorMessage = nil
+                        Task {
+                            do {
+                                try await session.createServerPlaylist(name: name, description: description)
+                                dismiss()
+                            } catch {
+                                errorMessage = error.localizedDescription
+                            }
+                            saving = false
+                        }
                     }
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
@@ -4132,7 +4222,7 @@ private struct WaveScreen: View {
 
             if let current = session.currentTrack {
                 Button("Start wave from this song") {
-                    session.loadRecommendations(current)
+                    session.startWave(from: current)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(lanePink)

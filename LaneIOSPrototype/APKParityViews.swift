@@ -1941,6 +1941,28 @@ struct APKCommentsScreen: View {
     }
 }
 
+struct APKWaveLoadingToast: View {
+    let coverURL: String?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            APKRemoteImage(url: coverURL, cornerRadius: 6)
+                .frame(width: 38, height: 38)
+            Text("Finding a wave…")
+                .font(.system(size: 14, weight: .semibold))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            ProgressView()
+                .tint(apkPink)
+        }
+        .padding(8)
+        .background(Color(red: 0.14, green: 0.14, blue: 0.14), in: RoundedRectangle(cornerRadius: 13))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        }
+    }
+}
+
 struct APKFullPlayerView: View {
     @EnvironmentObject private var session: LaneSession
     @Environment(\.dismiss) private var dismiss
@@ -2125,6 +2147,21 @@ struct APKFullPlayerView: View {
                 APKTrackActionsSheet(track: track)
                     .environmentObject(session)
             }
+        }
+        .overlay(alignment: .bottom) {
+            if session.waveIsLoading {
+                APKWaveLoadingToast(coverURL: session.waveSourceCoverURL)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 18)
+            }
+        }
+        .alert("Wave", isPresented: Binding(
+            get: { session.waveError != nil },
+            set: { if !$0 { session.waveError = nil } }
+        )) {
+            Button("OK", role: .cancel) { session.waveError = nil }
+        } message: {
+            Text(session.waveError ?? "Could not create a wave.")
         }
     }
 
