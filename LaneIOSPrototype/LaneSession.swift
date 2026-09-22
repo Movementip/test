@@ -167,19 +167,45 @@ final class LaneSession: ObservableObject {
         return cachedArtistDetails[id]
     }
 
+    private func mergedAlbumDetail(_ preferred: LaneAlbum, fallback: LaneAlbum) -> LaneAlbum {
+        let preferredTracks = preferred.tracks ?? []
+        let fallbackTracks = fallback.tracks ?? []
+        let tracks = preferredTracks.count >= fallbackTracks.count ? preferredTracks : fallbackTracks
+
+        return LaneAlbum(
+            name: preferred.name ?? fallback.name,
+            id: preferred.id ?? fallback.id,
+            platform: preferred.platform ?? fallback.platform,
+            type: preferred.type ?? fallback.type,
+            coverUrl: preferred.coverUrl ?? fallback.coverUrl,
+            year: preferred.year ?? fallback.year,
+            artists: preferred.artists ?? fallback.artists,
+            artistsDisplayedName: preferred.artistsDisplayedName ?? fallback.artistsDisplayedName,
+            tracks: tracks,
+            lastUpdated: max(preferred.lastUpdated ?? 0, fallback.lastUpdated ?? 0)
+        )
+    }
+
     func fetchAlbumDetailStrict(_ album: LaneAlbum) async throws -> LaneAlbum {
         guard let id = album.id, !id.isEmpty else {
             throw LaneAPIError.decoding("Album ID is missing")
         }
         await configureAPI()
         let detail = try await LaneAPI.shared.albumDetail(token: token, albumId: id)
-        if let ids = detail.tracks, !ids.isEmpty {
-            cachedAlbumDetails[id] = detail
+        let fallback =
+            cachedAlbumDetails[id] ??
+            serverAlbums.first(where: { $0.id == id }) ??
+            searchAlbums.first(where: { $0.id == id }) ??
+            album
+        let merged = mergedAlbumDetail(detail, fallback: fallback)
+
+        if let ids = merged.tracks, !ids.isEmpty {
+            cachedAlbumDetails[id] = merged
             if let data = try? JSONEncoder().encode(cachedAlbumDetails) {
                 UserDefaults.standard.set(data, forKey: "lane.cachedAlbumDetails")
             }
         }
-        return detail
+        return merged
     }
 
     func cachedAlbumDetail(for album: LaneAlbum) -> LaneAlbum? {
