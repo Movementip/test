@@ -1391,9 +1391,12 @@ final class LaneSession: ObservableObject {
             try result.requireSuccess()
             output = "Added \(playlist.playlistName ?? "playlist") to Library."
 
-            // The server can be eventually consistent. pendingSavedPlaylists
-            // keeps the card visible until /user/playlists confirms it.
-            await loadLibrary()
+            // The server can be eventually consistent. Keep the optimistic
+            // card visible and reconcile asynchronously instead of blocking
+            // the save action on a full Library + likes refresh.
+            Task { @MainActor in
+                await loadLibrary()
+            }
         } catch {
             pendingSavedPlaylists.removeValue(forKey: id)
             serverPlaylists = previous
