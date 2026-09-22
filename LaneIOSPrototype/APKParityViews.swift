@@ -1261,43 +1261,62 @@ struct APKAlbumDetailScreen: View {
     }
 
     private func loadAlbum() async {
+        let cachedDetail = session.cachedAlbumDetail(for: seed)
         let previouslyKnownIDs = !(seed.tracks ?? []).isEmpty
             ? (seed.tracks ?? [])
-            : (session.cachedAlbumDetail(for: seed)?.tracks ?? [])
+            : (cachedDetail?.tracks ?? [])
+        let refID = seed.id.map { "album:\($0)" }
+
         let cachedTracks = session.cachedTracksForIDs(
             previouslyKnownIDs,
-            refID: seed.id.map { "album:\($0)" }
+            refID: refID
         )
         if !cachedTracks.isEmpty {
             tracks = cachedTracks
         }
+
         loading = tracks.isEmpty
         albumLoadMessage = ""
-        let detail: LaneAlbum
-        do {
-            detail = try await session.fetchAlbumDetailStrict(seed)
-        } catch {
-            session.output = "Album detail error: \(error.localizedDescription)"
-            albumLoadMessage = "Could not load this album. Try again."
-            detail = session.cachedAlbumDetail(for: seed) ?? seed
+
+        // Start metadata refresh and track resolution together. Artist cards
+        // already carry the album's track IDs, so waiting for /platforms/album
+        // before resolving them only added a full network round-trip.
+        async let detailRequest: LaneAlbum? = try? session.fetchAlbumDetailStrict(seed)
+        async let initialTrackRequest: [TrackCandidate] = session.resolveTracksByIDs(
+            previouslyKnownIDs,
+            prefetch: false,
+            refID: refID
+        )
+
+        let initialTracks = await initialTrackRequest
+        if !initialTracks.isEmpty {
+            tracks = initialTracks
+            loading = false
         }
+
+        let detail = await detailRequest ?? cachedDetail ?? seed
         album = detail
-        let trackIDs = !(detail.tracks ?? []).isEmpty
+
+        let detailIDs = !(detail.tracks ?? []).isEmpty
             ? (detail.tracks ?? [])
-            : (session.cachedAlbumDetail(for: seed)?.tracks ?? seed.tracks ?? [])
-        guard !trackIDs.isEmpty else {
-            if tracks.isEmpty && albumLoadMessage.isEmpty {
+            : previouslyKnownIDs
+        guard !detailIDs.isEmpty else {
+            if tracks.isEmpty {
                 albumLoadMessage = "Lane returned no tracks for this album. Try again."
             }
             loading = false
             return
         }
-        let resolved = await session.resolveTracksByIDs(
-            trackIDs,
-            prefetch: false,
-            refID: detail.id.map { "album:\($0)" }
-        )
-        if !resolved.isEmpty { tracks = resolved }
+
+        if detailIDs != previouslyKnownIDs || tracks.isEmpty {
+            let resolved = await session.resolveTracksByIDs(
+                detailIDs,
+                prefetch: false,
+                refID: detail.id.map { "album:\($0)" }
+            )
+            if !resolved.isEmpty { tracks = resolved }
+        }
+
         if tracks.isEmpty {
             albumLoadMessage = session.trackResolveMessage.isEmpty
                 ? "Could not resolve this album's tracks. Try again."
