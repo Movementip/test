@@ -1052,6 +1052,36 @@ actor LaneAPI {
         )
     }
 
+    func reorderPlaylist(token: String, playlistId: String, newOrder: [String]) async throws -> APIResult {
+        // ReorderPlaylistRequest recovered from Lane Android 1.4.7:
+        // { playlistId: String, newOrder: List<String> }.
+        try await request(
+            path: "/playlist/reorder",
+            method: "POST",
+            token: token,
+            json: [
+                "playlistId": playlistId,
+                "newOrder": newOrder
+            ]
+        )
+    }
+
+    func playlistCollaborators(token: String, playlistId: String) async throws -> [UserInfoDTO] {
+        try await decoded(
+            [UserInfoDTO].self,
+            path: "/playlist/\(playlistId)/collaborators",
+            token: token
+        )
+    }
+
+    func removePlaylistCollaborator(token: String, playlistId: String, userId: String) async throws -> APIResult {
+        try await request(
+            path: "/playlist/\(playlistId)/collaborators/\(userId)",
+            method: "DELETE",
+            token: token
+        )
+    }
+
     func addTracks(token: String, playlistId: String, trackIds: [String]) async throws -> APIResult {
         // The Android UserApi.M signature is @Body List<String>. Retrying a
         // rejected mutation with guessed object shapes only sends extra POSTs
