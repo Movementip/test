@@ -3800,7 +3800,6 @@ private struct ImportTracksScreen: View {
     @State private var message = ""
     @State private var loading = false
     @State private var localSaving = false
-    @State private var showImportLimitAlert = false
     @State private var importCompleted = 0
     @State private var importTotal = 0
     @State private var importStage = ""
@@ -3855,14 +3854,6 @@ private struct ImportTracksScreen: View {
             importTask = nil
         }
         .toolbar(.hidden, for: .navigationBar)
-        .alert("Lane Premium", isPresented: $showImportLimitAlert) {
-            Button("Import first 15 tracks") {
-                performImport(Array(importTrackIDs.prefix(15)))
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Lane for Android limits a standard account to 15 imported tracks per operation. Premium can import the complete preview.")
-        }
     }
 
     private var importTopBar: some View {
@@ -4316,10 +4307,7 @@ private struct ImportTracksScreen: View {
     }
 
     private var importButtonTitle: String {
-        if !session.hasPremiumAccess, importSourceCount > 15 {
-            return "Import first 15 of \(importSourceCount) to Lane"
-        }
-        return "Import all \(importSourceCount) to Lane"
+        "Import all \(importSourceCount) to Lane"
     }
 
     private var importSourceCount: Int {
@@ -4439,10 +4427,6 @@ private struct ImportTracksScreen: View {
     }
 
     private func importPreviewTracks() {
-        if !session.hasPremiumAccess, importTrackIDs.count > 15 {
-            showImportLimitAlert = true
-            return
-        }
         performImport(importTrackIDs)
     }
 
@@ -4498,11 +4482,7 @@ private struct ImportTracksScreen: View {
                     importedTrackIDs.append(contentsOf: batch)
                 }
                 if imported >= importTotal {
-                    if importTotal < importSourceCount {
-                        message = "Added the first \(imported) of \(importSourceCount) preview tracks. Premium is required for the complete import."
-                    } else {
-                        message = "All \(imported) tracks are now in the Lane playlist."
-                    }
+                    message = "All \(imported) tracks are now in the Lane playlist."
                 } else {
                     message = "Added \(imported) of \(importTotal) Lane preview tracks. Lane rejected \(importTotal - imported) IDs."
                 }
