@@ -79,6 +79,7 @@ final class LaneSession: ObservableObject {
     @Published var searchMessage = ""
     @Published var searchIsLoading = false
     @Published var trackResolveMessage = ""
+    private var resolvedTrackCache: [String: TrackCandidate] = [:]
     private var searchTask: Task<Void, Never>?
 
     private func makeSearchRefID(query: String, results: [LaneSearchResultItem]) -> String {
@@ -115,6 +116,7 @@ final class LaneSession: ObservableObject {
     @Published var serverAlbums: [LaneAlbum] = []
     private var cachedAlbumDetails: [String: LaneAlbum] = [:]
     @Published var serverArtists: [LaneArtist] = []
+    private var cachedArtistDetails: [String: LaneArtist] = [:]
     @Published var recentTracks: [TrackCandidate] = []
     @Published var favorites: Set<String> = []
     @Published var localPlaylists: [LocalPlaylist] = []
@@ -128,11 +130,21 @@ final class LaneSession: ObservableObject {
         guard let id = artist.id, !id.isEmpty else { return artist }
         do {
             await configureAPI()
-            return try await LaneAPI.shared.artistDetail(token: token, artistId: id)
+            let detail = try await LaneAPI.shared.artistDetail(token: token, artistId: id)
+            cachedArtistDetails[id] = detail
+            if let data = try? JSONEncoder().encode(cachedArtistDetails) {
+                UserDefaults.standard.set(data, forKey: "lane.cachedArtistDetails")
+            }
+            return detail
         } catch {
             output = error.localizedDescription
-            return artist
+            return cachedArtistDetails[id] ?? artist
         }
+    }
+
+    func cachedArtistDetail(for artist: LaneArtist) -> LaneArtist? {
+        guard let id = artist.id, !id.isEmpty else { return nil }
+        return cachedArtistDetails[id]
     }
 
     func fetchAlbumDetailStrict(_ album: LaneAlbum) async throws -> LaneAlbum {
@@ -185,6 +197,30 @@ final class LaneSession: ObservableObject {
         }
     }
 
+    func cachedTracksForIDs(_ ids: [String], refID: String? = nil) -> [TrackCandidate] {
+        applyingRefID(refID, to: ids.compactMap { resolvedTrackCache[$0] })
+    }
+
+    private func rememberResolvedTracks(_ tracks: [TrackCandidate]) {
+        for track in tracks {
+            guard let id = track.trackID, !id.isEmpty else { continue }
+            resolvedTrackCache[id] = TrackCandidate(
+                id: track.id,
+                title: track.title,
+                subtitle: track.subtitle,
+                trackID: id,
+                platform: track.platform,
+                coverURL: track.coverURL,
+                duration: track.duration,
+                genre: track.genre,
+                artistAvatars: track.artistAvatars
+            )
+        }
+        if let data = try? JSONEncoder().encode(resolvedTrackCache) {
+            UserDefaults.standard.set(data, forKey: "lane.cachedTrackMetadata")
+        }
+    }
+
     private func resolveTrackDataResilient(
         _ ids: [String],
         prefetch: Bool
@@ -231,6 +267,11 @@ final class LaneSession: ObservableObject {
     ) async -> [TrackCandidate] {
         let clean = ids.filter { !$0.isEmpty }
         guard !clean.isEmpty, !isGuest else { return [] }
+        let cached = cachedTracksForIDs(clean, refID: refID)
+        if !prefetch && cached.count == clean.count {
+            trackResolveMessage = ""
+            return cached
+        }
 
         do {
             await configureAPI()
@@ -248,18 +289,22 @@ final class LaneSession: ObservableObject {
                 )
                 tracks.append(contentsOf: batch)
             }
-            return applyingRefID(refID, to: tracks.map { TrackCandidate($0) })
+            let candidates = tracks.map { TrackCandidate($0) }
+            rememberResolvedTracks(candidates)
+            if candidates.isEmpty && !cached.isEmpty {
+                return cached
+            }
+            return applyingRefID(refID, to: candidates)
         } catch {
             output = "Track resolve error: \(error.localizedDescription)"
             trackResolveMessage = "Tracks are temporarily unavailable. Reopen the album to try again."
 
             // Preserve whatever is already present locally instead of showing
             // an empty detail page if the network resolver is unavailable.
-            let local = history + searchTracks + queue + homeTracks + recentTracks
-            var seen = Set<String>()
+            let local = cached + history + searchTracks + queue + homeTracks + recentTracks
             let fallback = clean.compactMap { id in
                 local.first(where: { $0.trackID == id })
-            }.filter { seen.insert($0.id).inserted }
+            }
 
             return applyingRefID(refID, to: fallback)
         }
@@ -337,6 +382,10 @@ final class LaneSession: ObservableObject {
             KeychainStore.save(legacy, account: "bearer")
         }
         loadLocalState()
+        if let data = UserDefaults.standard.data(forKey: "lane.cachedTrackMetadata"),
+           let cache = try? JSONDecoder().decode([String: TrackCandidate].self, from: data) {
+            resolvedTrackCache = cache
+        }
         if let data = UserDefaults.standard.data(forKey: "lane.cachedPlaylistTracks"),
            let cache = try? JSONDecoder().decode([String: [TrackCandidate]].self, from: data) {
             playlistTrackCache = cache
@@ -344,6 +393,10 @@ final class LaneSession: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: "lane.cachedAlbumDetails"),
            let cache = try? JSONDecoder().decode([String: LaneAlbum].self, from: data) {
             cachedAlbumDetails = cache
+        }
+        if let data = UserDefaults.standard.data(forKey: "lane.cachedArtistDetails"),
+           let cache = try? JSONDecoder().decode([String: LaneArtist].self, from: data) {
+            cachedArtistDetails = cache
         }
         configureRemoteCommands()
     }
@@ -401,6 +454,8 @@ final class LaneSession: ObservableObject {
         account = nil
         publicProfile = nil
         serverPlaylists = []
+        resolvedTrackCache = [:]
+        UserDefaults.standard.removeObject(forKey: "lane.cachedTrackMetadata")
         playlistTrackCache = [:]
         playlistLoadMessages = [:]
         UserDefaults.standard.removeObject(forKey: "lane.cachedPlaylistTracks")
@@ -408,6 +463,8 @@ final class LaneSession: ObservableObject {
         cachedAlbumDetails = [:]
         UserDefaults.standard.removeObject(forKey: "lane.cachedAlbumDetails")
         serverArtists = []
+        cachedArtistDetails = [:]
+        UserDefaults.standard.removeObject(forKey: "lane.cachedArtistDetails")
         homeSections = []
         friends = []
         comments = []

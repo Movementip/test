@@ -1217,7 +1217,17 @@ struct APKAlbumDetailScreen: View {
     }
 
     private func loadAlbum() async {
-        loading = true
+        let previouslyKnownIDs = !(seed.tracks ?? []).isEmpty
+            ? (seed.tracks ?? [])
+            : (session.cachedAlbumDetail(for: seed)?.tracks ?? [])
+        let cachedTracks = session.cachedTracksForIDs(
+            previouslyKnownIDs,
+            refID: seed.id.map { "album:\($0)" }
+        )
+        if !cachedTracks.isEmpty {
+            tracks = cachedTracks
+        }
+        loading = tracks.isEmpty
         albumLoadMessage = ""
         let detail: LaneAlbum
         do {
@@ -1232,18 +1242,18 @@ struct APKAlbumDetailScreen: View {
             ? (detail.tracks ?? [])
             : (session.cachedAlbumDetail(for: seed)?.tracks ?? seed.tracks ?? [])
         guard !trackIDs.isEmpty else {
-            tracks = []
-            if albumLoadMessage.isEmpty {
+            if tracks.isEmpty && albumLoadMessage.isEmpty {
                 albumLoadMessage = "Lane returned no tracks for this album. Try again."
             }
             loading = false
             return
         }
-        tracks = await session.resolveTracksByIDs(
+        let resolved = await session.resolveTracksByIDs(
             trackIDs,
             prefetch: false,
             refID: detail.id.map { "album:\($0)" }
         )
+        if !resolved.isEmpty { tracks = resolved }
         if tracks.isEmpty {
             albumLoadMessage = session.trackResolveMessage.isEmpty
                 ? "Could not resolve this album's tracks. Try again."
@@ -1523,6 +1533,13 @@ struct APKArtistDetailScreen: View {
         .background(apkBackground.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .task {
+            if let cached = session.cachedArtistDetail(for: seed) {
+                artist = cached
+                let context = cached.id.map { "artist:\($0)" }
+                topTracks = session.cachedTracksForIDs(cached.topTracks ?? [], refID: context)
+                recentTracks = session.cachedTracksForIDs(cached.recentTracks ?? [], refID: context)
+                loading = false
+            }
             let detail = await session.fetchArtistDetail(seed)
             artist = detail
 

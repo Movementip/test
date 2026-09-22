@@ -124,14 +124,14 @@ struct YandexImportTrack: Identifiable, Hashable, Sendable {
     var artistText: String { artists.joined(separator: ", ") }
 }
 
-struct LaneRelatedArtist: Decodable, Hashable {
+struct LaneRelatedArtist: Codable, Hashable {
     let id: String?
     let name: String?
     let avatarUrl: String?
     let platform: String?
 }
 
-struct LaneArtist: Decodable, Hashable {
+struct LaneArtist: Codable, Hashable {
     let name: String?
     let id: String?
     let platform: String?

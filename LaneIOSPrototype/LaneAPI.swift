@@ -506,7 +506,12 @@ actor LaneAPI {
 
                     // Safe reads may move to the other regional edge. Mutation
                     // requests never enter this branch, so they remain single-shot.
-                    if canFailOverRegionalHost, transient, index + 1 < candidates.count {
+                    let definitiveStreamRejection = normalizedPath == "/track/stream" &&
+                        http.statusCode == 403 &&
+                        result.pretty.localizedCaseInsensitiveContains("PREMIUM_REQUIRED")
+                    if canFailOverRegionalHost,
+                       !definitiveStreamRejection,
+                       index + 1 < candidates.count {
                         continue
                     }
 
