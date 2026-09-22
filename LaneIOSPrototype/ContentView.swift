@@ -1932,12 +1932,12 @@ struct PlaylistDetailScreen: View {
             .background(laneBackground.opacity(0.96))
         }
         .onAppear { reloadTracks() }
-        .alert("Delete playlist?", isPresented: $confirmDelete) {
-            Button("Delete", role: .destructive) {
+        .alert(isOwner ? "Delete playlist?" : "Remove from Library?", isPresented: $confirmDelete) {
+            Button(isOwner ? "Delete" : "Remove", role: .destructive) {
                 Task {
                     do {
                         try await session.deleteServerPlaylist(playlist)
-                        dismiss()
+                        if let onBack { onBack() } else { dismiss() }
                     } catch {
                         actionError = error.localizedDescription
                     }
@@ -1945,7 +1945,9 @@ struct PlaylistDetailScreen: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This action cannot be undone.")
+            Text(isOwner
+                ? "This action cannot be undone."
+                : "The playlist will be removed from your Library.")
         }
         .sheet(item: $actionTrack) { track in
             APKTrackActionsSheet(track: track)
