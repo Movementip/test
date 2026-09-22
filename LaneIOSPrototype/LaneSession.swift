@@ -1969,18 +1969,10 @@ final class LaneSession: ObservableObject {
 
         await configureAPI()
 
-        // Exact Android flow:
-        // preview.tracksIdsOnly -> UserRepository.getTracksByIds(...)
-        // -> TrackData.songId -> PlaylistRepository.addTracksToPlaylist(...).
-        // Do not gate the import on an extra target-playlist read: the APK does
-        // not do that, and a transient playlist-card failure must not prevent
-        // importing otherwise valid tracks.
         var imported = 0
         var processedSources = 0
         var skippedSources = 0
-        var canonicalSeen = Set<String>()
-
-        progress(0, clean.count, "Resolving Lane tracks…")
+        var importedCanonical = Set<String>()
 
         for start in stride(from: 0, to: clean.count, by: 15) {
             try Task.checkCancellation()
@@ -1990,59 +1982,86 @@ final class LaneSession: ObservableObject {
             progress(
                 processedSources,
                 clean.count,
-                "Resolving \(start + 1)–\(end) of \(clean.count)…"
-            )
-
-            let resolved = try await canonicalImportBatch(sourceBatch)
-            let canonical = resolved.filter { canonicalSeen.insert($0).inserted }
-
-            if canonical.isEmpty {
-                skippedSources += sourceBatch.count
-                processedSources += sourceBatch.count
-                progress(processedSources, clean.count, "")
-                continue
-            }
-
-            progress(
-                processedSources,
-                clean.count,
                 "Adding \(start + 1)–\(end) of \(clean.count)…"
             )
 
+            // The import preview is already produced by Lane. Most builds
+            // return IDs that /user/playlist/add-tracks accepts directly, so
+            // do not add an unnecessary /user/tracks round-trip for every
+            // batch. This restores the much faster Android-style import path.
             var checked = 0
-            let added = try await addImportIDsBySplitting(
-                canonical,
+            var added = try await addImportIDsBySplitting(
+                sourceBatch,
                 into: playlistID
             ) { count in
                 checked += count
                 progress(
                     processedSources,
                     clean.count,
-                    "Adding Lane tracks \(checked)/\(canonical.count)…"
+                    "Adding \(checked)/\(sourceBatch.count) tracks…"
                 )
             }
 
-            imported += added.count
-            skippedSources += max(0, sourceBatch.count - added.count)
+            let directAdded = Set(added)
+            let rejectedSource = sourceBatch.filter { !directAdded.contains($0) }
+
+            // Some platform previews contain source IDs rather than canonical
+            // Lane songIds. Resolve only the rejected subset, then retry those
+            // canonical IDs instead of resolving every track up front.
+            if !rejectedSource.isEmpty {
+                progress(
+                    processedSources,
+                    clean.count,
+                    "Resolving \(rejectedSource.count) unmatched tracks…"
+                )
+
+                let canonical = try await canonicalImportBatch(rejectedSource)
+                    .filter { importedCanonical.insert($0).inserted }
+
+                if !canonical.isEmpty {
+                    var canonicalChecked = 0
+                    let canonicalAdded = try await addImportIDsBySplitting(
+                        canonical,
+                        into: playlistID
+                    ) { count in
+                        canonicalChecked += count
+                        progress(
+                            processedSources,
+                            clean.count,
+                            "Adding resolved tracks \(canonicalChecked)/\(canonical.count)…"
+                        )
+                    }
+                    added.append(contentsOf: canonicalAdded)
+                }
+            }
+
+            let uniqueAdded = Array(Set(added))
+            imported += uniqueAdded.count
+            skippedSources += max(0, sourceBatch.count - uniqueAdded.count)
             processedSources += sourceBatch.count
-            importedBatch(added)
+            importedBatch(uniqueAdded)
             progress(processedSources, clean.count, "")
 
             if end < clean.count {
-                try await Task.sleep(nanoseconds: 180_000_000)
+                try await Task.sleep(nanoseconds: 120_000_000)
             }
         }
 
         guard imported > 0 else {
             throw LaneAPIError.decoding(
-                "Lane resolved the import preview, but no tracks were accepted by the target playlist."
+                "Lane did not accept any tracks from the import preview."
             )
         }
 
         output = skippedSources > 0
             ? "Imported \(imported) tracks; skipped \(skippedSources)."
             : "Imported all \(imported) tracks to Lane."
-        await loadLibrary()
+
+        // Reconcile in the background so the UI does not wait for a complete
+        // library/likes refresh before reporting a successful import.
+        Task { @MainActor in
+            await loadLibrary()
+        }
         return imported
     }
 
