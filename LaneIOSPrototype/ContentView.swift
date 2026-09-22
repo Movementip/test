@@ -1633,6 +1633,8 @@ struct PlaylistDetailScreen: View {
     @State private var actionTrack: TrackCandidate?
     @State private var showPlaylistActions = false
     @State private var showEditPlaylist = false
+    @State private var showReorderPlaylist = false
+    @State private var showCollaborators = false
     @State private var showInvitePlaylist = false
     @State private var shareItem: LaneShareURL?
     @State private var actionError: String?
@@ -1966,6 +1968,16 @@ struct PlaylistDetailScreen: View {
                         showEditPlaylist = true
                     }
                 },
+                onReorder: {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        showReorderPlaylist = true
+                    }
+                },
+                onCollaborators: {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        showCollaborators = true
+                    }
+                },
                 onInvite: {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                         showInvitePlaylist = true
@@ -1993,6 +2005,20 @@ struct PlaylistDetailScreen: View {
                     editedDescription = description
                 }
             )
+        }
+        .sheet(isPresented: $showReorderPlaylist) {
+            APKPlaylistOrderSheet(
+                playlist: playlist,
+                initialTracks: tracks,
+                onChange: { updated in
+                    tracks = updated
+                }
+            )
+            .environmentObject(session)
+        }
+        .sheet(isPresented: $showCollaborators) {
+            APKPlaylistCollaboratorsSheet(playlist: playlist)
+                .environmentObject(session)
         }
         .sheet(isPresented: $showInvitePlaylist) {
             APKInvitePlaylistUsersSheet(playlist: playlist)
@@ -2123,6 +2149,277 @@ private struct APKEditPlaylistSheet: View {
         }
         .preferredColorScheme(.dark)
         .presentationDetents([.large])
+    }
+}
+
+private struct APKPlaylistOrderSheet: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
+
+    let playlist: LanePlaylist
+    let onChange: ([TrackCandidate]) -> Void
+
+    @State private var tracks: [TrackCandidate]
+    @State private var editMode: EditMode = .active
+    @State private var saving = false
+    @State private var removingIDs: Set<String> = []
+    @State private var errorMessage: String?
+
+    init(
+        playlist: LanePlaylist,
+        initialTracks: [TrackCandidate],
+        onChange: @escaping ([TrackCandidate]) -> Void
+    ) {
+        self.playlist = playlist
+        self.onChange = onChange
+        _tracks = State(initialValue: initialTracks)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
+                    HStack(spacing: 12) {
+                        Text("\(index + 1)")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 24)
+
+                        ArtworkView(url: track.coverURL, size: 44, radius: 5)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(track.title)
+                                .font(.system(size: 15, weight: .semibold))
+                                .lineLimit(1)
+                            Text(track.subtitle)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+
+                        Spacer()
+
+                        if let id = track.trackID, removingIDs.contains(id) {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            remove(track)
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                        }
+                    }
+                }
+                .onMove { source, destination in
+                    tracks.move(fromOffsets: source, toOffset: destination)
+                }
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.system(size: 12))
+                        .foregroundStyle(lanePink)
+                }
+            }
+            .environment(\.editMode, $editMode)
+            .scrollContentBackground(.hidden)
+            .background(laneBackground)
+            .navigationTitle("Track order")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(saving ? "Saving…" : "Save") {
+                        save()
+                    }
+                    .disabled(saving || !removingIDs.isEmpty)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .presentationDetents([.large])
+    }
+
+    private func save() {
+        guard !saving else { return }
+        saving = true
+        errorMessage = nil
+
+        Task {
+            defer { saving = false }
+            do {
+                try await session.reorderPlaylistTracks(tracks, in: playlist)
+                onChange(tracks)
+                dismiss()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func remove(_ track: TrackCandidate) {
+        guard let id = track.trackID, !removingIDs.contains(id) else { return }
+        removingIDs.insert(id)
+        errorMessage = nil
+
+        Task {
+            defer { removingIDs.remove(id) }
+            do {
+                try await session.removeTrack(track, from: playlist)
+                tracks.removeAll { $0.trackID == id }
+                onChange(tracks)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
+private struct APKPlaylistCollaboratorsSheet: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
+
+    let playlist: LanePlaylist
+
+    @State private var collaborators: [UserInfoDTO] = []
+    @State private var loading = true
+    @State private var showInvite = false
+    @State private var removingIDs: Set<String> = []
+    @State private var errorMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Button {
+                    showInvite = true
+                } label: {
+                    Label("Add member", systemImage: "person.badge.plus")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: 52)
+                        .padding(.horizontal, 18)
+                        .background(laneCard, in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+                .padding(16)
+
+                if loading {
+                    Spacer()
+                    ProgressView().tint(lanePink)
+                    Spacer()
+                } else if collaborators.isEmpty {
+                    Spacer()
+                    EmptyLaneView(
+                        icon: "person.2",
+                        title: "No collaborators",
+                        subtitle: "Invite people to edit this playlist together."
+                    )
+                    Spacer()
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(collaborators.enumerated()), id: \.offset) { _, user in
+                                HStack(spacing: 12) {
+                                    AvatarView(url: user.avatarUrl, size: 46)
+
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(user.displayedName ?? user.userName ?? "Lane user")
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .foregroundStyle(.white)
+                                        if let name = user.userName, !name.isEmpty {
+                                            Text("@\(name)")
+                                                .font(.system(size: 12))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+
+                                    Spacer()
+
+                                    if let id = user.laneId, removingIDs.contains(id) {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                            .tint(.white)
+                                            .frame(width: 42)
+                                    } else {
+                                        Button(role: .destructive) {
+                                            remove(user)
+                                        } label: {
+                                            Image(systemName: "person.badge.minus")
+                                                .font(.system(size: 18, weight: .semibold))
+                                                .foregroundStyle(.red)
+                                                .frame(width: 42, height: 42)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .padding(.horizontal, 18)
+                                .frame(minHeight: 64)
+
+                                Divider()
+                                    .padding(.leading, 76)
+                            }
+                        }
+                    }
+                }
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.system(size: 12))
+                        .foregroundStyle(lanePink)
+                        .multilineTextAlignment(.center)
+                        .padding(16)
+                }
+            }
+            .background(laneBackground.ignoresSafeArea())
+            .navigationTitle("Collaborators")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .task { await reload() }
+            .sheet(isPresented: $showInvite, onDismiss: {
+                Task { await reload() }
+            }) {
+                APKInvitePlaylistUsersSheet(playlist: playlist)
+                    .environmentObject(session)
+            }
+        }
+        .preferredColorScheme(.dark)
+        .presentationDetents([.large])
+    }
+
+    @MainActor
+    private func reload() async {
+        loading = true
+        defer { loading = false }
+        do {
+            collaborators = try await session.playlistCollaborators(for: playlist)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func remove(_ user: UserInfoDTO) {
+        guard let id = user.laneId, !removingIDs.contains(id) else { return }
+        removingIDs.insert(id)
+        errorMessage = nil
+
+        Task {
+            defer { removingIDs.remove(id) }
+            do {
+                try await session.removePlaylistCollaborator(user, from: playlist)
+                collaborators.removeAll { $0.laneId == id }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 }
 
