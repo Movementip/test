@@ -11,29 +11,29 @@ private struct LaneInteractivePopGestureEnabler: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
-        uiViewController.enableLaneInteractivePop()
+        uiViewController.enableLaneInteractivePopFromHierarchy()
     }
 }
 
 private final class LaneInteractivePopController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        enableLaneInteractivePop()
+        activateLaneInteractivePop()
     }
 
     override func didMove(toParent parent: UIViewController?) {
         super.didMove(toParent: parent)
-        enableLaneInteractivePop()
+        activateLaneInteractivePop()
     }
 
-    func enableLaneInteractivePop() {
+    func activateLaneInteractivePop() {
         navigationController?.interactivePopGestureRecognizer?.isEnabled = true
         navigationController?.interactivePopGestureRecognizer?.delegate = nil
     }
 }
 
 private extension UIViewController {
-    func enableLaneInteractivePop() {
+    func enableLaneInteractivePopFromHierarchy() {
         var controller: UIViewController? = self
         while let current = controller {
             if let navigation = current.navigationController {
