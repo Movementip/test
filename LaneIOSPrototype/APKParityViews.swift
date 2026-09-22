@@ -437,6 +437,8 @@ struct APKPlaylistActionsSheet: View {
     let isSaved: Bool
     let visibility: String
     let onEdit: () -> Void
+    let onReorder: () -> Void
+    let onCollaborators: () -> Void
     let onInvite: () -> Void
     let onShare: () -> Void
     let onToggleVisibility: () -> Void
@@ -469,6 +471,8 @@ struct APKPlaylistActionsSheet: View {
 
                 if isOwner {
                     action("Edit", icon: "pencil", asset: nil, perform: onEdit)
+                    action("Edit track order", icon: "line.3.horizontal", asset: nil, perform: onReorder)
+                    action("Collaborators", icon: "person.2", asset: nil, perform: onCollaborators)
                     action("Invite collaborators", icon: "person.badge.plus", asset: nil, perform: onInvite)
                 } else if !isSaved {
                     action("Add to Library", icon: "square.stack", asset: "ic_lib_outline", perform: onSave)
