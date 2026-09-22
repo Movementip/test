@@ -1831,25 +1831,20 @@ final class LaneSession: ObservableObject {
             return []
         }
 
-        // Some older Lane playlist responses expose only tracksCount. Read the
-        // paginated track endpoint so resuming an interrupted import remains
-        // duplicate-safe.
-        var existing = Set<String>()
-        var pageNumber = 1
-        while true {
-            let page = try await LaneAPI.shared.playlistTracks(
-                token: token,
-                playlistId: playlistID,
-                page: pageNumber,
-                pageSize: 50
-            )
-            existing.formUnion(page.items.compactMap(\.songId).filter { !$0.isEmpty })
-
-            guard let totalPages = page.totalPages,
-                  pageNumber < totalPages else { break }
-            pageNumber += 1
+        // Some Lane edges expose only tracksCount. Reuse the same resilient
+        // 0/1-based paging loader as the playlist screen so import resume does
+        // not miss an existing first page and accidentally create duplicates.
+        if let loaded = await loadPlaylistTrackCollection(
+            token: token,
+            playlistId: playlistID,
+            pageSize: 100
+        ) {
+            return Set(loaded.compactMap(\.songId).filter { !$0.isEmpty })
         }
-        return existing
+
+        throw LaneAPIError.decoding(
+            "Lane could not read the target playlist before importing."
+        )
     }
 
     private func canonicalImportBatch(_ sourceIDs: [String]) async throws -> [String] {
