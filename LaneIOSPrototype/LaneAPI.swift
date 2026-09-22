@@ -63,6 +63,7 @@ actor LaneAPI {
     private var serviceLDI = ""
     private var signingConfiguration = LaneSigningConfiguration.official
     private var timeOffsetMilliseconds: Int64 = 0
+    private var lastRegionalProbeAt: Date?
     private let lastWorkingRegionalBaseKey = "lane.lastWorkingRegionalBase"
 
     func setBase(_ value: String) {
@@ -207,6 +208,7 @@ actor LaneAPI {
             if let server = try? await probeOfficialServer(candidate) {
                 timeOffsetMilliseconds = server.timestamp - Int64(Date().timeIntervalSince1970 * 1000.0)
                 rememberWorkingRegionalBase(candidate)
+                lastRegionalProbeAt = Date()
                 let resolved = currentBaseURL()
                 return resolved
             }
@@ -434,7 +436,16 @@ actor LaneAPI {
         // host. This is what makes likes/library actions survive VPN changes
         // without risking duplicate writes.
         if signingConfiguration.mode == .official, !canFailOverRegionalHost {
-            _ = await prepareRegionalHost()
+            // Mutations are single-shot, so verify the region before writing.
+            // Keep that verification briefly: a 1,000-track import can issue
+            // dozens of add-tracks mutations and probing /time before every one
+            // would add seconds of avoidable latency.
+            let probeIsFresh = lastRegionalProbeAt.map {
+                Date().timeIntervalSince($0) < 15
+            } ?? false
+            if !probeIsFresh {
+                _ = await prepareRegionalHost()
+            }
         }
 
         let candidates: [URL]
