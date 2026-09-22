@@ -1003,6 +1003,10 @@ final class LaneSession: ObservableObject {
             }
         }
 
+        if playlists == nil && effectivePlaylists.isEmpty {
+            effectivePlaylists = serverPlaylists
+        }
+
         do {
             let playlists = effectivePlaylists
             let fetchedIDs = Set(playlists.compactMap(\.playlistId))
