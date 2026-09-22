@@ -111,6 +111,7 @@ final class LaneSession: ObservableObject {
     // MARK: Library
     @Published var serverPlaylists: [LanePlaylist] = []
     @Published var serverAlbums: [LaneAlbum] = []
+    private var cachedAlbumDetails: [String: LaneAlbum] = [:]
     @Published var serverArtists: [LaneArtist] = []
     @Published var recentTracks: [TrackCandidate] = []
     @Published var favorites: Set<String> = []
@@ -132,14 +133,34 @@ final class LaneSession: ObservableObject {
         }
     }
 
+    func fetchAlbumDetailStrict(_ album: LaneAlbum) async throws -> LaneAlbum {
+        guard let id = album.id, !id.isEmpty else {
+            throw LaneAPIError.decoding("Album ID is missing")
+        }
+        await configureAPI()
+        let detail = try await LaneAPI.shared.albumDetail(token: token, albumId: id)
+        if let ids = detail.tracks, !ids.isEmpty {
+            cachedAlbumDetails[id] = detail
+            if let data = try? JSONEncoder().encode(cachedAlbumDetails) {
+                UserDefaults.standard.set(data, forKey: "lane.cachedAlbumDetails")
+            }
+        }
+        return detail
+    }
+
+    func cachedAlbumDetail(for album: LaneAlbum) -> LaneAlbum? {
+        guard let id = album.id, !id.isEmpty else { return nil }
+        return cachedAlbumDetails[id]
+            ?? serverAlbums.first(where: { $0.id == id && !($0.tracks ?? []).isEmpty })
+            ?? searchAlbums.first(where: { $0.id == id && !($0.tracks ?? []).isEmpty })
+    }
+
     func fetchAlbumDetail(_ album: LaneAlbum) async -> LaneAlbum {
-        guard let id = album.id, !id.isEmpty else { return album }
         do {
-            await configureAPI()
-            return try await LaneAPI.shared.albumDetail(token: token, albumId: id)
+            return try await fetchAlbumDetailStrict(album)
         } catch {
             output = error.localizedDescription
-            return album
+            return cachedAlbumDetail(for: album) ?? album
         }
     }
 
@@ -288,6 +309,7 @@ final class LaneSession: ObservableObject {
     private var playerItemStatusObserver: NSKeyValueObservation?
     private var playerTimeControlObserver: NSKeyValueObservation?
     private var periodicTimeObserver: Any?
+    private var playbackEndObserver: NSObjectProtocol?
     private var playerRetriedWithCompatibilityHeaders = false
     private var playerRetriedWithLocalDownload = false
     private var playbackRequestID = UUID()
@@ -313,6 +335,10 @@ final class LaneSession: ObservableObject {
             KeychainStore.save(legacy, account: "bearer")
         }
         loadLocalState()
+        if let data = UserDefaults.standard.data(forKey: "lane.cachedAlbumDetails"),
+           let cache = try? JSONDecoder().decode([String: LaneAlbum].self, from: data) {
+            cachedAlbumDetails = cache
+        }
         configureRemoteCommands()
     }
 
@@ -1715,7 +1741,12 @@ final class LaneSession: ObservableObject {
         lyricsError = ""
         loadTrackStats(track)
 
-        if let index = queue.firstIndex(of: track) {
+        if let currentIndex,
+           queue.indices.contains(currentIndex),
+           queue[currentIndex] == track {
+            // A queue may contain the same track more than once. The caller's
+            // selected position must win over firstIndex(of:).
+        } else if let index = queue.firstIndex(of: track) {
             currentIndex = index
         } else {
             if queue.isEmpty {
@@ -1860,6 +1891,11 @@ final class LaneSession: ObservableObject {
     }
 
     private func teardownPlayerObservers() {
+        if let playbackEndObserver {
+            NotificationCenter.default.removeObserver(playbackEndObserver)
+        }
+        playbackEndObserver = nil
+
         playerItemStatusObserver?.invalidate()
         playerItemStatusObserver = nil
 
@@ -1870,6 +1906,43 @@ final class LaneSession: ObservableObject {
             player.removeTimeObserver(periodicTimeObserver)
         }
         periodicTimeObserver = nil
+    }
+
+    private func observePlaybackEnd(
+        of item: AVPlayerItem,
+        requestID: UUID,
+        track: TrackCandidate
+    ) {
+        playbackEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self, weak item] _ in
+            Task { @MainActor in
+                guard let self, let item,
+                      self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id,
+                      self.player?.currentItem === item else { return }
+                self.advanceAfterPlaybackEnd()
+            }
+        }
+    }
+
+    private func advanceAfterPlaybackEnd() {
+        if repeatMode == 2, let currentTrack {
+            requestStream(for: currentTrack)
+            return
+        }
+
+        let nextIndex = (currentIndex ?? -1) + 1
+        if queue.isEmpty || (nextIndex >= queue.count && repeatMode != 1) {
+            isPlaying = false
+            isBuffering = false
+            updatePlaybackState(false)
+            return
+        }
+
+        next()
     }
 
     private func play(
@@ -1919,6 +1992,7 @@ final class LaneSession: ObservableObject {
         let newPlayer = AVPlayer(playerItem: item)
         newPlayer.automaticallyWaitsToMinimizeStalling = true
         player = newPlayer
+        observePlaybackEnd(of: item, requestID: requestID, track: track)
 
         playerItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             Task { @MainActor in
@@ -2146,6 +2220,7 @@ final class LaneSession: ObservableObject {
                 let localPlayer = AVPlayer(playerItem: item)
                 localPlayer.automaticallyWaitsToMinimizeStalling = false
                 player = localPlayer
+                observePlaybackEnd(of: item, requestID: requestID, track: track)
 
                 playerItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
                     Task { @MainActor in
@@ -2290,6 +2365,7 @@ final class LaneSession: ObservableObject {
         let localPlayer = AVPlayer(playerItem: item)
         localPlayer.automaticallyWaitsToMinimizeStalling = false
         player = localPlayer
+        observePlaybackEnd(of: item, requestID: requestID, track: track)
 
         playerItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             Task { @MainActor in
@@ -2494,11 +2570,6 @@ final class LaneSession: ObservableObject {
 
     func next() {
         guard !queue.isEmpty else { return }
-
-        if repeatMode == 2, let currentTrack {
-            requestStream(for: currentTrack)
-            return
-        }
 
         let current = currentIndex ?? -1
         var nextIndex = current + 1

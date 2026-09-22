@@ -177,7 +177,7 @@ struct LaneArtist: Decodable, Hashable {
     }
 }
 
-struct LaneAlbum: Decodable, Hashable {
+struct LaneAlbum: Codable, Hashable {
     let name: String?
     let id: String?
     let platform: String?

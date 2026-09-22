@@ -71,8 +71,8 @@ struct APKLaneWordmark: View {
         Group {
             if let url = Bundle.main.url(forResource: "lane", withExtension: "png"),
                let image = UIImage(contentsOfFile: url.path) {
-                // APK source res/2m.png is 2187×464. Preserve the original
-                // 4.713:1 aspect instead of clipping it in a fixed container.
+                // The original APK wordmark includes the full lower strokes.
+                // Keep its native aspect without clipping the header image.
                 Image(uiImage: image.withRenderingMode(.alwaysOriginal))
                     .resizable()
                     .interpolation(.high)
@@ -1031,6 +1031,7 @@ struct APKAlbumDetailScreen: View {
     @State private var album: LaneAlbum?
     @State private var tracks: [TrackCandidate] = []
     @State private var loading = true
+    @State private var albumLoadMessage = ""
     @State private var showPlayer = false
 
     private var value: LaneAlbum { album ?? seed }
@@ -1125,7 +1126,7 @@ struct APKAlbumDetailScreen: View {
                             Image(systemName: "music.note.list")
                                 .font(.system(size: 31, weight: .medium))
                                 .foregroundStyle(.secondary)
-                            Text(session.trackResolveMessage.isEmpty ? "No tracks" : session.trackResolveMessage)
+                            Text(albumLoadMessage.isEmpty ? "No tracks" : albumLoadMessage)
                                 .font(.system(size: 13))
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
@@ -1208,19 +1209,46 @@ struct APKAlbumDetailScreen: View {
         if let year = value.year, !year.isEmpty {
             pieces.append(year)
         }
-        pieces.append(tracks.count == 1 ? "1 track" : "\(tracks.count) tracks")
+        let knownCount = !tracks.isEmpty ? tracks.count : (value.tracks ?? seed.tracks)?.count
+        if let knownCount {
+            pieces.append(knownCount == 1 ? "1 track" : "\(knownCount) tracks")
+        }
         return pieces.joined(separator: " • ")
     }
 
     private func loadAlbum() async {
         loading = true
-        let detail = await session.fetchAlbumDetail(seed)
+        albumLoadMessage = ""
+        let detail: LaneAlbum
+        do {
+            detail = try await session.fetchAlbumDetailStrict(seed)
+        } catch {
+            session.output = "Album detail error: \(error.localizedDescription)"
+            albumLoadMessage = "Could not load this album. Try again."
+            detail = session.cachedAlbumDetail(for: seed) ?? seed
+        }
         album = detail
+        let trackIDs = !(detail.tracks ?? []).isEmpty
+            ? (detail.tracks ?? [])
+            : (session.cachedAlbumDetail(for: seed)?.tracks ?? seed.tracks ?? [])
+        guard !trackIDs.isEmpty else {
+            tracks = []
+            if albumLoadMessage.isEmpty {
+                albumLoadMessage = "Lane returned no tracks for this album. Try again."
+            }
+            loading = false
+            return
+        }
         tracks = await session.resolveTracksByIDs(
-            detail.tracks ?? [],
+            trackIDs,
             prefetch: false,
             refID: detail.id.map { "album:\($0)" }
         )
+        if tracks.isEmpty {
+            albumLoadMessage = session.trackResolveMessage.isEmpty
+                ? "Could not resolve this album's tracks. Try again."
+                : session.trackResolveMessage
+        }
         loading = false
     }
 
