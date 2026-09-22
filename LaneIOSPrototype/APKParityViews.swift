@@ -288,8 +288,15 @@ struct APKTrackActionsSheet: View {
 
                         ForEach(Array(session.serverPlaylists.enumerated()), id: \.offset) { _, playlist in
                             actionRow(playlist.playlistName ?? "Playlist", icon: "music.note.list") {
-                                session.addTrack(track, to: playlist)
-                                dismiss()
+                                actionError = nil
+                                Task {
+                                    do {
+                                        try await session.addTrack(track, to: playlist)
+                                        dismiss()
+                                    } catch {
+                                        actionError = error.localizedDescription
+                                    }
+                                }
                             }
                         }
                         ForEach(session.localPlaylists) { playlist in
