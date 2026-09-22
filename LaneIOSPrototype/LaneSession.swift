@@ -1963,20 +1963,25 @@ final class LaneSession: ObservableObject {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && sourceSeen.insert($0).inserted }
         guard !clean.isEmpty else { throw LaneAPIError.emptyResponse }
+        guard !playlistID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw LaneAPIError.invalidURL
+        }
 
         await configureAPI()
-        progress(0, clean.count, "Checking Lane playlist…")
 
-        // Existing playlist IDs are canonical Lane songIds, so source-platform
-        // preview IDs must be resolved before duplicate checks.
-        var existing = try await serverTrackIDs(in: playlistID)
-        var canonicalSeen = Set<String>()
-        var processedSources = 0
+        // Exact Android flow:
+        // preview.tracksIdsOnly -> UserRepository.getTracksByIds(...)
+        // -> TrackData.songId -> PlaylistRepository.addTracksToPlaylist(...).
+        // Do not gate the import on an extra target-playlist read: the APK does
+        // not do that, and a transient playlist-card failure must not prevent
+        // importing otherwise valid tracks.
         var imported = 0
+        var processedSources = 0
+        var skippedSources = 0
+        var canonicalSeen = Set<String>()
 
-        // Lane Android works with small TrackIds pages. Resolve each page first,
-        // then immediately commit it; a 1,000+ track import therefore starts
-        // making progress instead of resolving the whole source up front.
+        progress(0, clean.count, "Resolving Lane tracks…")
+
         for start in stride(from: 0, to: clean.count, by: 15) {
             try Task.checkCancellation()
             let end = min(start + 15, clean.count)
@@ -1992,61 +1997,51 @@ final class LaneSession: ObservableObject {
             let canonical = resolved.filter { canonicalSeen.insert($0).inserted }
 
             if canonical.isEmpty {
-                throw LaneAPIError.decoding(
-                    "Lane could not resolve preview tracks \(start + 1)–\(end) through /user/tracks."
-                )
+                skippedSources += sourceBatch.count
+                processedSources += sourceBatch.count
+                progress(processedSources, clean.count, "")
+                continue
             }
 
-            let alreadyPresent = canonical.filter { existing.contains($0) }
-            let pending = canonical.filter { !existing.contains($0) }
-            var confirmed = Set(alreadyPresent)
+            progress(
+                processedSources,
+                clean.count,
+                "Adding \(start + 1)–\(end) of \(clean.count)…"
+            )
 
-            if !pending.isEmpty {
+            var checked = 0
+            let added = try await addImportIDsBySplitting(
+                canonical,
+                into: playlistID
+            ) { count in
+                checked += count
                 progress(
                     processedSources,
                     clean.count,
-                    "Adding \(start + 1)–\(end) of \(clean.count)…"
+                    "Adding Lane tracks \(checked)/\(canonical.count)…"
                 )
-
-                var checked = 0
-                let added = try await addImportIDsBySplitting(
-                    pending,
-                    into: playlistID
-                ) { count in
-                    checked += count
-                    progress(
-                        processedSources,
-                        clean.count,
-                        "Checking \(checked)/\(pending.count) Lane tracks in this batch…"
-                    )
-                }
-
-                if added.isEmpty {
-                    throw LaneAPIError.decoding(
-                        "Lane resolved this preview batch, but rejected all \(pending.count) canonical track IDs in /user/playlist/add-tracks."
-                    )
-                }
-                confirmed.formUnion(added)
             }
 
-            let confirmedInOrder = canonical.filter { confirmed.contains($0) }
-            existing.formUnion(confirmedInOrder)
-            imported += confirmedInOrder.count
+            imported += added.count
+            skippedSources += max(0, sourceBatch.count - added.count)
             processedSources += sourceBatch.count
-            importedBatch(confirmedInOrder)
+            importedBatch(added)
             progress(processedSources, clean.count, "")
 
             if end < clean.count {
-                // Keep mutations ordered and stay below Lane burst-rate limits.
-                try await Task.sleep(nanoseconds: 250_000_000)
+                try await Task.sleep(nanoseconds: 180_000_000)
             }
         }
 
         guard imported > 0 else {
-            throw LaneAPIError.decoding("Lane did not import any tracks from the preview.")
+            throw LaneAPIError.decoding(
+                "Lane resolved the import preview, but no tracks were accepted by the target playlist."
+            )
         }
 
-        output = "\(imported) Lane tracks are now in the playlist"
+        output = skippedSources > 0
+            ? "Imported \(imported) tracks; skipped \(skippedSources)."
+            : "Imported all \(imported) tracks to Lane."
         await loadLibrary()
         return imported
     }
