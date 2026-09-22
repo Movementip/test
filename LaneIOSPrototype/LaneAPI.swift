@@ -915,6 +915,36 @@ actor LaneAPI {
         try await decoded([LanePlaylist].self, path: "/user/playlists", token: token)
     }
 
+    private func idempotentLibraryAction(
+        path: String,
+        method: String = "GET",
+        token: String,
+        query: [URLQueryItem] = []
+    ) async throws -> APIResult {
+        do {
+            let first = try await request(
+                path: path,
+                method: method,
+                token: token,
+                query: query
+            )
+            if first.status < 500 {
+                return first
+            }
+        } catch {
+            // Subscribe/save/unsubscribe actions are idempotent, so a retry on
+            // the currently reachable regional edge cannot create duplicates.
+        }
+
+        _ = await prepareRegionalHost()
+        return try await request(
+            path: path,
+            method: method,
+            token: token,
+            query: query
+        )
+    }
+
     func userAlbums(token: String) async throws -> [LaneAlbum] {
         try await decoded([LaneAlbum].self, path: "/user/albums", token: token)
     }
@@ -926,7 +956,7 @@ actor LaneAPI {
 
     // Exact library subscription endpoints recovered from Lane Android 1.4.7.
     func subscribeArtist(token: String, artistId: String) async throws -> APIResult {
-        try await request(
+        try await idempotentLibraryAction(
             path: "/user/subscribe/artist/\(artistId)",
             method: "POST",
             token: token
@@ -934,7 +964,7 @@ actor LaneAPI {
     }
 
     func unsubscribeArtist(token: String, artistId: String) async throws -> APIResult {
-        try await request(
+        try await idempotentLibraryAction(
             path: "/user/unsubscribe/artist/\(artistId)",
             method: "DELETE",
             token: token
@@ -942,7 +972,7 @@ actor LaneAPI {
     }
 
     func subscribeAlbum(token: String, albumId: String) async throws -> APIResult {
-        try await request(
+        try await idempotentLibraryAction(
             path: "/user/subscribe/album/\(albumId)",
             method: "POST",
             token: token
@@ -950,7 +980,7 @@ actor LaneAPI {
     }
 
     func unsubscribeAlbum(token: String, albumId: String) async throws -> APIResult {
-        try await request(
+        try await idempotentLibraryAction(
             path: "/user/unsubscribe/album/\(albumId)",
             method: "DELETE",
             token: token
@@ -1080,7 +1110,11 @@ actor LaneAPI {
     }
 
     func addPlaylistToLibrary(token: String, playlistId: String) async throws -> APIResult {
-        try await request(path: "/user/playlist/add", token: token, query: [.init(name: "playlistId", value: playlistId)])
+        try await idempotentLibraryAction(
+            path: "/user/playlist/add",
+            token: token,
+            query: [.init(name: "playlistId", value: playlistId)]
+        )
     }
 
     func setPlaylistVisibility(token: String, playlistId: String, visibility: String) async throws -> APIResult {
