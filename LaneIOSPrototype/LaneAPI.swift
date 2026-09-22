@@ -64,6 +64,7 @@ actor LaneAPI {
     private var signingConfiguration = LaneSigningConfiguration.official
     private var timeOffsetMilliseconds: Int64 = 0
     private var lastRegionalProbeAt: Date?
+    private var directRequiredHosts: Set<String> = []
     private let lastWorkingRegionalBaseKey = "lane.lastWorkingRegionalBase"
 
     func setBase(_ value: String) {
@@ -138,15 +139,32 @@ actor LaneAPI {
         let url = candidate.appendingPathComponent("time")
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.timeoutInterval = 3
+        request.timeoutInterval = 2.5
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("close", forHTTPHeaderField: "Connection")
 
-        let (data, http) = try await performOfficialRequest(request, directTimeout: 5)
-        guard (200..<300).contains(http.statusCode) else {
-            throw LaneAPIError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
+        let host = candidate.host ?? ""
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw LaneAPIError.nonHTTP
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                throw LaneAPIError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
+            }
+            directRequiredHosts.remove(host)
+            return try JSONDecoder().decode(LaneServerTimeResponse.self, from: data)
+        } catch {
+            let direct = try await AndroidNetworkTransport.data(for: request, timeout: 4)
+            guard (200..<300).contains(direct.response.statusCode) else {
+                throw LaneAPIError.http(
+                    direct.response.statusCode,
+                    String(data: direct.data, encoding: .utf8) ?? ""
+                )
+            }
+            if !host.isEmpty { directRequiredHosts.insert(host) }
+            return try JSONDecoder().decode(LaneServerTimeResponse.self, from: direct.data)
         }
-        return try JSONDecoder().decode(LaneServerTimeResponse.self, from: data)
     }
 
     /// URLSession is kept as the normal path. When the carrier's resolver or
@@ -157,11 +175,21 @@ actor LaneAPI {
         directTimeout: TimeInterval
     ) async throws -> (Data, HTTPURLResponse) {
         let isBNITSigned = request.value(forHTTPHeaderField: "X-Core-Token") != nil
+        let host = request.url?.host ?? ""
 
-        // Use URLSession first. It keeps HTTP/2/TLS connections warm and is
-        // substantially faster for the many small requests made by album,
-        // artist, library and artwork screens. Earlier builds forced every RU
-        // API call through a new NWConnection, which regressed load times.
+        // A /time probe records hosts that are reachable only through the
+        // Android-style DoH/direct-TLS path. Use that path from the outset for
+        // signed mutations too; otherwise likes/import/library saves would fail
+        // without VPN even though the probe had already proven the host works.
+        if isBNITSigned, directRequiredHosts.contains(host) {
+            let direct = try await AndroidNetworkTransport.data(
+                for: request,
+                timeout: directTimeout
+            )
+            return (direct.data, direct.response)
+        }
+
+        // Normal case: pooled URLSession/HTTP2 is faster.
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else {
@@ -169,8 +197,9 @@ actor LaneAPI {
             }
             return (data, http)
         } catch {
-            // Do not replay an already-signed request over a second transport.
-            // Safe reads are rebuilt and re-signed by the outer regional loop.
+            // Do not replay an already-signed request after an ambiguous
+            // transport failure. Safe requests are rebuilt/re-signed by the
+            // regional loop; mutations will re-probe before the next attempt.
             guard signingConfiguration.mode == .official, !isBNITSigned else {
                 throw error
             }
