@@ -428,6 +428,15 @@ actor LaneAPI {
             (upperMethod == "GET" && !mutatingGETPaths.contains(normalizedPath)) ||
             (upperMethod == "POST" && readOnlyPOSTPaths.contains(normalizedPath))
 
+        // Mutations cannot be blindly retried because the first request may
+        // already have committed. Instead, probe the official regions before
+        // sending a mutation and issue it once against the currently reachable
+        // host. This is what makes likes/library actions survive VPN changes
+        // without risking duplicate writes.
+        if signingConfiguration.mode == .official, !canFailOverRegionalHost {
+            _ = await prepareRegionalHost()
+        }
+
         let candidates: [URL]
         if signingConfiguration.mode == .official, canFailOverRegionalHost {
             // Re-evaluate region ordering for every safe read so switching VPN
@@ -870,6 +879,40 @@ actor LaneAPI {
 
     func userArtists(token: String) async throws -> [LaneArtist] {
         try await decoded([LaneArtist].self, path: "/user/artists", token: token)
+    }
+
+
+    // Exact library subscription endpoints recovered from Lane Android 1.4.7.
+    func subscribeArtist(token: String, artistId: String) async throws -> APIResult {
+        try await request(
+            path: "/user/subscribe/artist/\(artistId)",
+            method: "POST",
+            token: token
+        )
+    }
+
+    func unsubscribeArtist(token: String, artistId: String) async throws -> APIResult {
+        try await request(
+            path: "/user/unsubscribe/artist/\(artistId)",
+            method: "DELETE",
+            token: token
+        )
+    }
+
+    func subscribeAlbum(token: String, albumId: String) async throws -> APIResult {
+        try await request(
+            path: "/user/subscribe/album/\(albumId)",
+            method: "POST",
+            token: token
+        )
+    }
+
+    func unsubscribeAlbum(token: String, albumId: String) async throws -> APIResult {
+        try await request(
+            path: "/user/unsubscribe/album/\(albumId)",
+            method: "DELETE",
+            token: token
+        )
     }
 
     // Exact Lane Android 1.4.7 contract recovered from the APK:
