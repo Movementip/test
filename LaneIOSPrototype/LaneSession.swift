@@ -1374,22 +1374,32 @@ final class LaneSession: ObservableObject {
     }
 
     func savePlaylistToLibrary(_ playlist: LanePlaylist) async throws {
-        guard let id = playlist.playlistId else { throw LaneAPIError.invalidURL }
-        await configureAPI()
-        let result = try await LaneAPI.shared.addPlaylistToLibrary(token: token, playlistId: id)
-        status = result.status
-        try result.requireSuccess()
+        guard let id = playlist.playlistId, !id.isEmpty else { throw LaneAPIError.invalidURL }
 
+        let previous = serverPlaylists
         pendingRemovedPlaylistIDs.remove(id)
         pendingSavedPlaylists[id] = playlist
         if !serverPlaylists.contains(where: { $0.playlistId == id }) {
             serverPlaylists.append(playlist)
         }
-        output = "Added \(playlist.playlistName ?? "playlist") to Library."
 
-        // Reconcile with the account, but keep the optimistic item visible
-        // until the backend's /user/playlists read reflects the mutation.
-        await loadLibrary()
+        do {
+            await configureAPI()
+            // Exact APK contract: GET /user/playlist/add?playlistId=...
+            let result = try await LaneAPI.shared.addPlaylistToLibrary(token: token, playlistId: id)
+            status = result.status
+            try result.requireSuccess()
+            output = "Added \(playlist.playlistName ?? "playlist") to Library."
+
+            // The server can be eventually consistent. pendingSavedPlaylists
+            // keeps the card visible until /user/playlists confirms it.
+            await loadLibrary()
+        } catch {
+            pendingSavedPlaylists.removeValue(forKey: id)
+            serverPlaylists = previous
+            output = "Could not add playlist to Library: \(error.localizedDescription)"
+            throw error
+        }
     }
 
     func isArtistSaved(_ artist: LaneArtist) -> Bool {
@@ -1622,18 +1632,29 @@ final class LaneSession: ObservableObject {
         output = "Collaborator removed."
     }
 
-    func addTrack(_ track: TrackCandidate, to playlist: LanePlaylist) {
-        guard let playlistID = playlist.playlistId, let trackID = track.trackID else { return }
-        Task {
-            do {
-                await configureAPI()
-                let result = try await LaneAPI.shared.addTracks(token: token, playlistId: playlistID, trackIds: [trackID])
-                status = result.status
-                output = result.pretty
-            } catch {
-                output = error.localizedDescription
-            }
+    func addTrack(_ track: TrackCandidate, to playlist: LanePlaylist) async throws {
+        guard let playlistID = playlist.playlistId,
+              let trackID = track.trackID,
+              !playlistID.isEmpty,
+              !trackID.isEmpty else {
+            throw LaneAPIError.invalidURL
         }
+
+        await configureAPI()
+        let result = try await LaneAPI.shared.addTracks(
+            token: token,
+            playlistId: playlistID,
+            trackIds: [trackID]
+        )
+        status = result.status
+        try result.requireSuccess()
+
+        if var cached = playlistTrackCache[playlistID],
+           !cached.contains(where: { $0.trackID == trackID }) {
+            cached.append(applyingRefID(playlistID, to: [track]).first ?? track)
+            rememberPlaylistTracks(cached, playlistID: playlistID)
+        }
+        output = "Added \(track.title) to \(playlist.playlistName ?? "playlist")."
     }
 
     // MARK: Music import
