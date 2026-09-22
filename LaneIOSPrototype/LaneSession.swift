@@ -407,6 +407,7 @@ final class LaneSession: ObservableObject {
     private var playbackRequestID = UUID()
     private var streamResolveTask: Task<Void, Never>?
     private var playbackWatchdogTask: Task<Void, Never>?
+    private var streamResolutionCache: [String: (result: TrackStreamingResult, expiresAt: Date)] = [:]
     private var didConfigureAPIBase = false
     private var didPrepareRegionalHost = false
     private var configuredBackendMode: LaneBackendMode?
@@ -507,6 +508,7 @@ final class LaneSession: ObservableObject {
             favoriteMutationsInFlight = []
             pendingSavedPlaylists = [:]
             pendingRemovedPlaylistIDs = []
+            streamResolutionCache = [:]
             favoriteMigrationInProgress = false
             UserDefaults.standard.removeObject(forKey: "lane.favorites")
             UserDefaults.standard.removeObject(forKey: favoriteMigrationKey)
@@ -550,6 +552,8 @@ final class LaneSession: ObservableObject {
         serverArtists = []
         cachedArtistDetails = [:]
         UserDefaults.standard.removeObject(forKey: "lane.cachedArtistDetails")
+        streamResolutionCache = [:]
+        activeStreamQuality = nil
         homeSections = []
         friends = []
         comments = []
@@ -2213,21 +2217,64 @@ final class LaneSession: ObservableObject {
 
     // MARK: Player
 
+    private func streamCacheKey(trackID: String, refID: String?, quality: String) -> String {
+        "\(trackID)|\(refID ?? "")|\(quality)"
+    }
+
+    private func streamExpiry(from ttl: Int64?) -> Date {
+        guard let ttl, ttl > 0 else {
+            // Keep an unannotated signed URL only briefly. This still makes
+            // previous/next/replay instantaneous without risking a stale URL.
+            return Date().addingTimeInterval(60)
+        }
+
+        let now = Date()
+        if ttl > 10_000_000_000 {
+            return Date(timeIntervalSince1970: Double(ttl) / 1000.0)
+        }
+        if ttl > 1_000_000_000 {
+            return Date(timeIntervalSince1970: Double(ttl))
+        }
+        return now.addingTimeInterval(Double(ttl))
+    }
+
     private func resolvedStream(
         trackID: String,
         refID: String?,
         quality: String
     ) async throws -> TrackStreamingResult {
-        // Lane Android passes the saved AudioQuality directly to /track/stream.
-        // Do exactly one resolver operation here. LaneAPI already performs the
-        // safe regional-host failover for this GET, so another player-layer
-        // retry only repeats the same selected tier and delays first audio.
-        try await LaneAPI.shared.stream(
+        // Lane Android freezes AudioQuality for the request and keeps a
+        // TrackStreamCacheManager. Cache by track + context + quality so a URL
+        // resolved for BASIC can never be reused for HIGH/ULTRA (or vice versa).
+        let cacheKey = streamCacheKey(trackID: trackID, refID: refID, quality: quality)
+        if let cached = streamResolutionCache[cacheKey],
+           cached.expiresAt.timeIntervalSinceNow > 5 {
+            return cached.result
+        }
+        streamResolutionCache.removeValue(forKey: cacheKey)
+
+        // Exactly one selected quality goes to /track/stream. LaneAPI may use
+        // the other official regional edge after a transport failure, but it
+        // never changes streamQuality.
+        let result = try await LaneAPI.shared.stream(
             token: token,
             trackId: trackID,
             refId: refID,
             quality: quality
         )
+        streamResolutionCache[cacheKey] = (
+            result: result,
+            expiresAt: streamExpiry(from: result.ttl)
+        )
+
+        if streamResolutionCache.count > 80 {
+            let now = Date()
+            streamResolutionCache = streamResolutionCache.filter { $0.value.expiresAt > now }
+            if streamResolutionCache.count > 80 {
+                streamResolutionCache.removeValue(forKey: streamResolutionCache.keys.first!)
+            }
+        }
+        return result
     }
 
     private func isPremiumRequired(_ error: Error) -> Bool {
