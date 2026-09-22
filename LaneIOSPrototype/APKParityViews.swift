@@ -1032,9 +1032,11 @@ struct APKAlbumDetailScreen: View {
     @State private var tracks: [TrackCandidate] = []
     @State private var loading = true
     @State private var albumLoadMessage = ""
+    @State private var libraryActionError: String?
     @State private var showPlayer = false
 
     private var value: LaneAlbum { album ?? seed }
+    private var isSavedToLibrary: Bool { session.isAlbumSaved(value) }
 
     var body: some View {
         ScrollView {
@@ -1103,6 +1105,30 @@ struct APKAlbumDetailScreen: View {
                         .disabled(tracks.isEmpty)
 
                         Button {
+                            Task {
+                                do {
+                                    libraryActionError = nil
+                                    try await session.setAlbumSaved(value, saved: !isSavedToLibrary)
+                                } catch {
+                                    libraryActionError = error.localizedDescription
+                                }
+                            }
+                        } label: {
+                            Group {
+                                if isSavedToLibrary {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 20, weight: .bold))
+                                } else {
+                                    APKTemplateIcon(name: "ic_lib_outline", size: 23, color: .white)
+                                }
+                            }
+                            .frame(width: 48, height: 48)
+                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(isSavedToLibrary ? "Remove album from Library" : "Add album to Library")
+
+                        Button {
                             play(shuffled: true)
                         } label: {
                             APKTemplateIcon(name: "shuffle", size: 22, color: .white)
@@ -1113,6 +1139,12 @@ struct APKAlbumDetailScreen: View {
                         .disabled(tracks.isEmpty)
                     }
                     .padding(.top, 6)
+
+                    if let libraryActionError {
+                        Text(libraryActionError)
+                            .font(.system(size: 12))
+                            .foregroundStyle(apkPink)
+                    }
 
                     if loading {
                         HStack {
@@ -1342,9 +1374,11 @@ struct APKArtistDetailScreen: View {
     @State private var topTracks: [TrackCandidate] = []
     @State private var recentTracks: [TrackCandidate] = []
     @State private var loading = true
+    @State private var libraryActionError: String?
     @State private var showPlayer = false
 
     private var value: LaneArtist { artist ?? seed }
+    private var isSavedToLibrary: Bool { session.isArtistSaved(value) }
 
     var body: some View {
         ScrollView {
@@ -1399,7 +1433,7 @@ struct APKArtistDetailScreen: View {
                             .frame(maxWidth: .infinity)
                     }
 
-                    if !topTracks.isEmpty {
+                    if !topTracks.isEmpty || value.id != nil {
                         HStack(spacing: 12) {
                             Button {
                                 play(topTracks, shuffled: false)
@@ -1415,6 +1449,31 @@ struct APKArtistDetailScreen: View {
                                     .background(apkPink, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                             }
                             .buttonStyle(.plain)
+                            .disabled(topTracks.isEmpty)
+
+                            Button {
+                                Task {
+                                    do {
+                                        libraryActionError = nil
+                                        try await session.setArtistSaved(value, saved: !isSavedToLibrary)
+                                    } catch {
+                                        libraryActionError = error.localizedDescription
+                                    }
+                                }
+                            } label: {
+                                Group {
+                                    if isSavedToLibrary {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 19, weight: .bold))
+                                    } else {
+                                        APKTemplateIcon(name: "ic_lib_outline", size: 22, color: .white)
+                                    }
+                                }
+                                .frame(width: 46, height: 46)
+                                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(isSavedToLibrary ? "Remove artist from Library" : "Add artist to Library")
 
                             Button {
                                 play(topTracks, shuffled: true)
@@ -1424,6 +1483,13 @@ struct APKArtistDetailScreen: View {
                                     .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                             }
                             .buttonStyle(.plain)
+                            .disabled(topTracks.isEmpty)
+                        }
+
+                        if let libraryActionError {
+                            Text(libraryActionError)
+                                .font(.system(size: 12))
+                                .foregroundStyle(apkPink)
                         }
                     }
 
