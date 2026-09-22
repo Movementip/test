@@ -406,7 +406,8 @@ actor LaneAPI {
         token: String? = nil,
         query: [URLQueryItem] = [],
         headers: [String: String] = [:],
-        json: Any? = nil
+        json: Any? = nil,
+        candidateBases: [URL]? = nil
     ) async throws -> APIResult {
         let upperMethod = method.uppercased()
         let normalizedPath = "/" + path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -449,7 +450,9 @@ actor LaneAPI {
         }
 
         let candidates: [URL]
-        if signingConfiguration.mode == .official, canFailOverRegionalHost {
+        if let candidateBases, !candidateBases.isEmpty {
+            candidates = candidateBases
+        } else if signingConfiguration.mode == .official, canFailOverRegionalHost {
             // Re-evaluate region ordering for every safe read so switching VPN
             // state does not leave the app pinned to a stale global endpoint.
             candidates = officialRegionalBases(preferCurrent: true)
@@ -462,7 +465,8 @@ actor LaneAPI {
         // Stream resolution already has endpoint/quality compatibility
         // fallbacks at the player layer. One pass over both regional hosts is
         // enough here and prevents the UI appearing to load forever offline.
-        let retryRounds = canFailOverRegionalHost &&
+        let retryRounds = candidateBases == nil &&
+            canFailOverRegionalHost &&
             normalizedPath != "/track/stream" &&
             normalizedPath != "/user/tracks" ? 2 : 1
         let longReadPaths: Set<String> = [
@@ -829,7 +833,43 @@ actor LaneAPI {
     }
 
     func albumDetail(token: String, albumId: String) async throws -> LaneAlbum {
-        try await decoded(LaneAlbum.self, path: "/platforms/album", token: token, query: [.init(name: "albumId", value: albumId)])
+        let query = [URLQueryItem(name: "albumId", value: albumId)]
+        let firstResult = try await request(
+            path: "/platforms/album",
+            token: token,
+            query: query
+        )
+        try firstResult.requireSuccess()
+        let first = try JSONDecoder().decode(LaneAlbum.self, from: firstResult.data)
+
+        // A regional edge can occasionally expose stale album metadata with a
+        // single track while the other official edge has the complete album.
+        // Android can move between those edges as network/VPN state changes.
+        // Probe the alternate edge only for suspiciously sparse albums.
+        guard signingConfiguration.mode == .official,
+              (first.tracks?.count ?? 0) <= 1 else {
+            return first
+        }
+
+        let firstHost = base.host
+        var best = first
+        for candidate in officialRegionalBases(preferCurrent: true)
+            where candidate.host != firstHost {
+            guard let result = try? await request(
+                path: "/platforms/album",
+                token: token,
+                query: query,
+                candidateBases: [candidate]
+            ),
+            (200..<300).contains(result.status),
+            let alternate = try? JSONDecoder().decode(LaneAlbum.self, from: result.data)
+            else { continue }
+
+            if (alternate.tracks?.count ?? 0) > (best.tracks?.count ?? 0) {
+                best = alternate
+            }
+        }
+        return best
     }
 
     func artist(token: String, artistId: String) async throws -> APIResult {
