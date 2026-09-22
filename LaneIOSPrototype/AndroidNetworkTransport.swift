@@ -68,21 +68,13 @@ enum AndroidNetworkTransport {
     static func imageData(from url: URL) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.timeoutInterval = 6
+        request.timeoutInterval = 3
         request.setValue("image/avif,image/webp,image/apng,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
         request.setValue("LaneMusic/1.0 (Android; Mobile)", forHTTPHeaderField: "User-Agent")
 
-        // The APK sends Russian users straight to the RU CDN. Try that route
-        // through its resolved address immediately instead of waiting for the
-        // iOS resolver timeout first.
-        if url.host == "ru.laneapi.com" {
-            if let direct = try? await data(for: request, timeout: 8),
-               (200..<300).contains(direct.response.statusCode),
-               !direct.data.isEmpty {
-                return direct.data
-            }
-        }
-
+        // Prefer URLSession so image loads reuse the system HTTP/2/TLS pool.
+        // The previous direct-first path opened a fresh NWConnection for each
+        // artwork and made artist/album grids visibly slower.
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse,
@@ -92,7 +84,7 @@ enum AndroidNetworkTransport {
             }
             return data
         } catch {
-            let direct = try await data(for: request, timeout: 8)
+            let direct = try await data(for: request, timeout: 5)
             guard (200..<300).contains(direct.response.statusCode),
                   !direct.data.isEmpty else {
                 throw URLError(.badServerResponse)
