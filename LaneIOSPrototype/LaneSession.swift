@@ -54,8 +54,15 @@ final class LaneSession: ObservableObject {
     @Published var baseURL = UserDefaults.standard.string(forKey: "lane.base") ?? "https://laneapi.com"
     // Keep the selected tier across launches and request exactly that tier.
     @Published var streamQuality = UserDefaults.standard.string(forKey: "lane.quality") ?? AudioQualityChoice.basic.rawValue {
-        didSet { UserDefaults.standard.set(streamQuality, forKey: "lane.quality") }
+        didSet {
+            if AudioQualityChoice(rawValue: streamQuality) == nil {
+                streamQuality = AudioQualityChoice.basic.rawValue
+                return
+            }
+            UserDefaults.standard.set(streamQuality, forKey: "lane.quality")
+        }
     }
+    @Published private(set) var activeStreamQuality: String?
     @Published var backendMode = LaneBackendMode(rawValue: UserDefaults.standard.string(forKey: "lane.backendMode") ?? "official") ?? .official
     @Published var apiKeyHeader = UserDefaults.standard.string(forKey: "lane.apiKeyHeader") ?? "X-API-Key"
     @Published var apiKey = KeychainStore.load(account: "lane.customApiKey") ?? ""
@@ -466,7 +473,24 @@ final class LaneSession: ObservableObject {
     }
 
     func persistStreamQualitySelection() {
+        if AudioQualityChoice(rawValue: streamQuality) == nil {
+            streamQuality = AudioQualityChoice.basic.rawValue
+        }
         persist()
+    }
+
+    @discardableResult
+    func selectStreamQuality(_ quality: AudioQualityChoice) -> Bool {
+        if quality != .basic && !hasPremiumAccess {
+            output = "Lane Premium is required for (quality.title) audio quality."
+            return false
+        }
+        streamQuality = quality.rawValue
+        return true
+    }
+
+    private func selectedPlaybackQuality() -> String {
+        AudioQualityChoice(rawValue: streamQuality)?.rawValue ?? AudioQualityChoice.basic.rawValue
     }
 
     func acceptLaneToken(_ value: String, serverBaseURL: String? = nil) {
@@ -2075,42 +2099,16 @@ final class LaneSession: ObservableObject {
         refID: String?,
         quality: String
     ) async throws -> TrackStreamingResult {
-        // ResolvingMediaSource in the Android APK resolves normal playback
-        // only through /track/stream with the MediaItem context as refId.
-        // It retries that same operation; /track/download belongs exclusively
-        // to the explicit offline-download flow and must not replace the real
-        // playback error with an unrelated 401.
-        var lastError: Error = LaneAPIError.emptyResponse
-        for attempt in 0..<3 {
-            do {
-                return try await LaneAPI.shared.stream(
-                    token: token,
-                    trackId: trackID,
-                    refId: refID,
-                    quality: quality
-                )
-            } catch {
-                lastError = error
-                // A rejected quality tier, missing track or auth error will
-                // not improve by repeating the same signed request. Return it
-                // immediately so BASIC quality can be tried without a 3 s
-                // backoff and two redundant regional round trips.
-                guard attempt < 2, isTransientStreamResolutionError(error) else { break }
-                try Task.checkCancellation()
-                try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 250_000_000)
-            }
-        }
-        throw lastError
-    }
-
-    private func isTransientStreamResolutionError(_ error: Error) -> Bool {
-        if case let LaneAPIError.http(status, body) = error {
-            return status == 408 || status == 425 || status == 429 ||
-                (500...599).contains(status) ||
-                (status == 401 && body.contains("REPLAY_ATTACK_DETECTED"))
-        }
-        let networkError = error as NSError
-        return networkError.domain == NSURLErrorDomain
+        // Lane Android passes the saved AudioQuality directly to /track/stream.
+        // Do exactly one resolver operation here. LaneAPI already performs the
+        // safe regional-host failover for this GET, so another player-layer
+        // retry only repeats the same selected tier and delays first audio.
+        try await LaneAPI.shared.stream(
+            token: token,
+            trackId: trackID,
+            refId: refID,
+            quality: quality
+        )
     }
 
     private func isPremiumRequired(_ error: Error) -> Bool {
@@ -2165,7 +2163,6 @@ final class LaneSession: ObservableObject {
         trackStats = nil
         currentLyrics = nil
         lyricsError = ""
-        loadTrackStats(track)
 
         if let currentIndex,
            queue.indices.contains(currentIndex),
@@ -2190,8 +2187,14 @@ final class LaneSession: ObservableObject {
 
         busy = true
         isBuffering = true
+        activeStreamQuality = nil
         playerRetriedWithCompatibilityHeaders = false
         playerRetriedWithLocalDownload = false
+
+        // Freeze the user's saved tier at the moment playback is requested.
+        // Changing the setting while this track is loading affects only the
+        // next track, exactly like Android's persisted AudioQuality flow.
+        let requestedQuality = selectedPlaybackQuality()
 
         playbackWatchdogTask = Task { [weak self] in
             do {
@@ -2228,7 +2231,6 @@ final class LaneSession: ObservableObject {
                 guard self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
 
-                let requestedQuality = self.streamQuality
                 var result = try await self.resolvedStream(
                     trackID: trackID,
                     refID: track.refID,
@@ -2273,6 +2275,7 @@ final class LaneSession: ObservableObject {
                 }
 
                 self.playbackWatchdogTask?.cancel()
+                self.activeStreamQuality = requestedQuality
                 self.streamURL = result.url
                 try self.play(
                     urlString: result.url,
@@ -2431,6 +2434,13 @@ final class LaneSession: ObservableObject {
                 case .readyToPlay:
                     self.playerError = ""
                     self.isBuffering = false
+
+                    // Statistics are not part of playback resolution in the APK.
+                    // Fetch them only after audio is ready so this secondary API
+                    // request cannot compete with /track/stream during startup.
+                    if self.trackStats == nil {
+                        self.loadTrackStats(track)
+                    }
 
                     let seconds = item.duration.seconds
                     if seconds.isFinite && seconds > 0 {
@@ -3341,8 +3351,9 @@ final class LaneSession: ObservableObject {
 
     private func persistDownloadedTrack(_ track: TrackCandidate) async throws {
         guard let trackID = track.trackID else { throw LaneAPIError.invalidURL }
+        let downloadQuality = selectedPlaybackQuality()
         let stream = try await LaneAPI.shared.downloadURL(
-            token: token, trackId: trackID, quality: streamQuality
+            token: token, trackId: trackID, quality: downloadQuality
         )
         guard let remoteURL = URL(string: stream.url) else {
             throw LaneAPIError.invalidURL
