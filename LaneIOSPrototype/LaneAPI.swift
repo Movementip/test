@@ -1083,15 +1083,16 @@ actor LaneAPI {
     }
 
     func addTracks(token: String, playlistId: String, trackIds: [String]) async throws -> APIResult {
-        // The Android UserApi.M signature is @Body List<String>. Retrying a
-        // rejected mutation with guessed object shapes only sends extra POSTs
-        // and obscures whether a particular track ID is invalid.
+        // Exact Lane Android 1.4.7 Retrofit signature recovered from the APK:
+        // k(TrackIds, String, Continuation) -> /user/playlist/add-tracks.
+        // TrackIds is the same serializable model used by /user/tracks, so the
+        // JSON body is {"trackIds":[...]} — NOT a raw string array.
         try await request(
             path: "/user/playlist/add-tracks",
             method: "POST",
             token: token,
             query: [.init(name: "playlistId", value: playlistId)],
-            json: trackIds
+            json: ["trackIds": trackIds]
         )
     }
 
