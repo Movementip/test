@@ -937,11 +937,7 @@ private struct LibraryScreen: View {
     private var libraryContents: some View {
         if filter == .all || filter == .playlists {
             NavigationLink {
-                if let liked = session.serverPlaylists.first(where: { $0.playlistId == "lane_likes" }) {
-                    PlaylistDetailScreen(playlist: liked, showPlayer: $showPlayer)
-                } else {
-                    FavoriteTracksScreen(showPlayer: $showPlayer)
-                }
+                FavoriteTracksScreen(showPlayer: $showPlayer)
             } label: {
                 APKFavoritePlaylistCard(trackCount: session.favorites.count)
             }
@@ -3294,10 +3290,11 @@ private struct FavoriteTracksScreen: View {
     @Binding var showPlayer: Bool
 
     private var tracks: [TrackCandidate] {
-        let all = session.history + session.searchTracks + session.queue + session.homeTracks + session.recentTracks
         var seen = Set<String>()
-        return all.filter {
-            session.isFavorite($0) && seen.insert($0.id).inserted
+        return session.likedTracks.filter {
+            guard session.isFavorite($0) else { return false }
+            let key = $0.trackID ?? $0.id
+            return seen.insert(key).inserted
         }
     }
 
@@ -3307,14 +3304,35 @@ private struct FavoriteTracksScreen: View {
                 EmptyLaneView(icon: "heart", title: "Favorite Tracks", subtitle: "Tap the heart on a track to save it.")
                     .listRowBackground(Color.clear)
             } else {
-                ForEach(tracks) { track in
+                ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
                     TrackRow(track: track, showPlayer: $showPlayer)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                session.toggleFavorite(track)
+                            } label: {
+                                Label("Unlike", systemImage: "heart.slash")
+                            }
+                        }
+                        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                            Button {
+                                session.queue = tracks
+                                session.currentIndex = index
+                                session.requestStream(for: track)
+                                showPlayer = true
+                            } label: {
+                                Label("Play", systemImage: "play.fill")
+                            }
+                            .tint(lanePink)
+                        }
                 }
             }
         }
         .scrollContentBackground(.hidden)
         .background(laneBackground)
         .navigationTitle("Liked tracks")
+        .refreshable {
+            session.refreshLibrary()
+        }
     }
 }
 
