@@ -1462,6 +1462,125 @@ final class LaneSession: ObservableObject {
         output = result.pretty
     }
 
+    func reorderPlaylistTracks(_ tracks: [TrackCandidate], in playlist: LanePlaylist) async throws {
+        guard let playlistID = playlist.playlistId, !playlistID.isEmpty else {
+            throw LaneAPIError.invalidURL
+        }
+        let ids = tracks.compactMap(\.trackID)
+        guard ids.count == tracks.count else {
+            throw LaneAPIError.decoding("One or more tracks have no Lane ID")
+        }
+
+        let previous = playlistTrackCache[playlistID]
+        rememberPlaylistTracks(tracks, playlistID: playlistID)
+
+        do {
+            await configureAPI()
+            let result = try await LaneAPI.shared.reorderPlaylist(
+                token: token,
+                playlistId: playlistID,
+                newOrder: ids
+            )
+            status = result.status
+            try result.requireSuccess()
+            output = "Playlist order updated."
+        } catch {
+            if let previous {
+                rememberPlaylistTracks(previous, playlistID: playlistID)
+            }
+            throw error
+        }
+    }
+
+    func removeTrack(_ track: TrackCandidate, from playlist: LanePlaylist) async throws {
+        guard let playlistID = playlist.playlistId,
+              let trackID = track.trackID,
+              !playlistID.isEmpty,
+              !trackID.isEmpty else {
+            throw LaneAPIError.invalidURL
+        }
+
+        let previous = playlistTrackCache[playlistID]
+        if let previous {
+            let next = previous.filter { $0.trackID != trackID }
+            playlistTrackCache[playlistID] = next
+            if let data = try? JSONEncoder().encode(playlistTrackCache) {
+                UserDefaults.standard.set(data, forKey: "lane.cachedPlaylistTracks")
+            }
+        }
+
+        do {
+            await configureAPI()
+            let result = try await LaneAPI.shared.removeTrack(
+                token: token,
+                playlistId: playlistID,
+                trackId: trackID
+            )
+            status = result.status
+            try result.requireSuccess()
+            output = "Track removed from playlist."
+        } catch {
+            if let previous {
+                rememberPlaylistTracks(previous, playlistID: playlistID)
+            }
+            throw error
+        }
+    }
+
+    func playlistCollaborators(for playlist: LanePlaylist) async throws -> [UserInfoDTO] {
+        guard let playlistID = playlist.playlistId, !playlistID.isEmpty else {
+            throw LaneAPIError.invalidURL
+        }
+        await configureAPI()
+
+        // The detail payload carries the same collaborator IDs used by the
+        // Android collaborator screen. Resolve user cards through /user-info so
+        // this remains compatible with servers that return IDs rather than full
+        // user objects from the collaborators endpoint.
+        let detail = try? await LaneAPI.shared.playlist(
+            token: token,
+            playlistId: playlistID,
+            platform: playlist.platform
+        )
+        let ids = detail?.collaboratorIds ?? playlist.collaboratorIds ?? []
+        guard !ids.isEmpty else { return [] }
+
+        return await withTaskGroup(of: UserInfoDTO?.self) { group in
+            for id in ids where id != account?.laneId {
+                group.addTask {
+                    try? await LaneAPI.shared.userInfo(token: self.token, laneId: id)
+                }
+            }
+
+            var result: [UserInfoDTO] = []
+            for await user in group {
+                if let user { result.append(user) }
+            }
+            return result.sorted {
+                ($0.displayedName ?? $0.userName ?? "") <
+                ($1.displayedName ?? $1.userName ?? "")
+            }
+        }
+    }
+
+    func removePlaylistCollaborator(_ user: UserInfoDTO, from playlist: LanePlaylist) async throws {
+        guard let playlistID = playlist.playlistId,
+              let userID = user.laneId,
+              !playlistID.isEmpty,
+              !userID.isEmpty else {
+            throw LaneAPIError.invalidURL
+        }
+        await configureAPI()
+        let result = try await LaneAPI.shared.removePlaylistCollaborator(
+            token: token,
+            playlistId: playlistID,
+            userId: userID
+        )
+        status = result.status
+        try result.requireSuccess()
+        output = "Collaborator removed."
+    }
+
     func addTrack(_ track: TrackCandidate, to playlist: LanePlaylist) {
         guard let playlistID = playlist.playlistId, let trackID = track.trackID else { return }
         Task {
