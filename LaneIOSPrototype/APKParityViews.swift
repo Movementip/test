@@ -1148,7 +1148,6 @@ struct APKAlbumDetailScreen: View {
                                         session.queue = tracks
                                         session.currentIndex = index
                                         session.requestStream(for: track)
-                                        showPlayer = true
                                     }
                                 )
                             }
@@ -1268,7 +1267,6 @@ struct APKAlbumDetailScreen: View {
         session.queue = list
         session.currentIndex = 0
         session.requestStream(for: list[0])
-        showPlayer = true
     }
 }
 
@@ -1591,7 +1589,6 @@ struct APKArtistDetailScreen: View {
                             session.queue = tracks
                             session.currentIndex = index
                             session.requestStream(for: track)
-                            showPlayer = true
                         }
                     )
                 }
@@ -1605,7 +1602,6 @@ struct APKArtistDetailScreen: View {
         session.queue = list
         session.currentIndex = 0
         session.requestStream(for: list[0])
-        showPlayer = true
     }
 }
 
@@ -1623,7 +1619,6 @@ private struct APKArtistTracksScreen: View {
                         session.queue = tracks
                         session.currentIndex = index
                         session.requestStream(for: track)
-                        showPlayer = true
                     }
                 }
             }
@@ -3115,7 +3110,6 @@ private struct APKHomeChartCard: View {
                         session.queue = tracks
                         session.currentIndex = index
                         session.requestStream(for: track)
-                        showPlayer = true
                     } label: {
                         HStack(spacing: 10) {
                             Text("\(index + 1)")

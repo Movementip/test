@@ -119,6 +119,7 @@ final class LaneSession: ObservableObject {
     private var cachedArtistDetails: [String: LaneArtist] = [:]
     @Published var recentTracks: [TrackCandidate] = []
     @Published var favorites: Set<String> = []
+    private var favoriteMutationsInFlight: Set<String> = []
     @Published var localPlaylists: [LocalPlaylist] = []
     @Published var history: [TrackCandidate] = []
     @Published var downloadedTrackIDs: Set<String> = []
@@ -444,6 +445,11 @@ final class LaneSession: ObservableObject {
             baseURL = serverBaseURL
         }
 
+        if token != clean {
+            favorites = []
+            favoriteMutationsInFlight = []
+            UserDefaults.standard.removeObject(forKey: "lane.favorites")
+        }
         token = clean
         persist()
         output = "Telegram authorization completed."
@@ -459,6 +465,9 @@ final class LaneSession: ObservableObject {
         account = nil
         publicProfile = nil
         serverPlaylists = []
+        favorites = []
+        favoriteMutationsInFlight = []
+        UserDefaults.standard.removeObject(forKey: "lane.favorites")
         resolvedTrackCache = [:]
         UserDefaults.standard.removeObject(forKey: "lane.cachedTrackMetadata")
         playlistTrackCache = [:]
@@ -811,10 +820,11 @@ final class LaneSession: ObservableObject {
         guard !isGuest else { return }
 
         await configureAPI()
-        async let playlistsRequest = try? LaneAPI.shared.userPlaylists(token: token)
-        async let albumsRequest = try? LaneAPI.shared.userAlbums(token: token)
-        async let artistsRequest = try? LaneAPI.shared.userArtists(token: token)
-        async let recentRequest = try? LaneAPI.shared.recentRaw(token: token)
+        let requestToken = token
+        async let playlistsRequest = try? LaneAPI.shared.userPlaylists(token: requestToken)
+        async let albumsRequest = try? LaneAPI.shared.userAlbums(token: requestToken)
+        async let artistsRequest = try? LaneAPI.shared.userArtists(token: requestToken)
+        async let recentRequest = try? LaneAPI.shared.recentRaw(token: requestToken)
 
         let (playlists, albums, artists, recent) = await (
             playlistsRequest,
@@ -822,8 +832,32 @@ final class LaneSession: ObservableObject {
             artistsRequest,
             recentRequest
         )
+        guard token == requestToken else { return }
 
-        if let playlists { serverPlaylists = playlists }
+        if let playlists {
+            serverPlaylists = playlists
+            if let likedPlaylist = playlists.first(where: { $0.playlistId == "lane_likes" }) {
+                var likedIDs = likedPlaylist.playlistTracksIds
+                if likedIDs == nil || (likedIDs?.isEmpty == true && (likedPlaylist.tracksCount ?? 0) > 0) {
+                    let detail = try? await LaneAPI.shared.playlist(
+                        token: requestToken,
+                        playlistId: "lane_likes"
+                    )
+                    guard token == requestToken else { return }
+                    likedIDs = detail?.playlistTracksIds ??
+                        detail?.playlistTracks?.compactMap(\.songId)
+                }
+                if let likedIDs {
+                    let serverIDs = Set(likedIDs)
+                    favorites = serverIDs.subtracting(favoriteMutationsInFlight)
+                        .union(favorites.intersection(favoriteMutationsInFlight))
+                    UserDefaults.standard.set(Array(serverIDs), forKey: "lane.favorites")
+                }
+            } else {
+                favorites = []
+                UserDefaults.standard.removeObject(forKey: "lane.favorites")
+            }
+        }
         if let albums { serverAlbums = albums }
         if let artists { serverArtists = artists }
 
@@ -2825,13 +2859,59 @@ final class LaneSession: ObservableObject {
     }
 
     func toggleFavorite(_ track: TrackCandidate) {
-        let key = favoriteKey(track)
-        if favorites.contains(key) {
-            favorites.remove(key)
-        } else {
-            favorites.insert(key)
+        guard !isGuest else {
+            output = "Sign in to save liked tracks to Lane."
+            return
         }
-        UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")
+        guard let trackID = track.trackID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trackID.isEmpty else {
+            output = "This track has no Lane ID and cannot be liked."
+            return
+        }
+        guard favoriteMutationsInFlight.insert(trackID).inserted else { return }
+
+        let requestToken = token
+        let wasLiked = favorites.contains(trackID)
+        if wasLiked {
+            favorites.remove(trackID)
+        } else {
+            favorites.insert(trackID)
+        }
+
+        Task { @MainActor in
+            defer {
+                if token == requestToken {
+                    favoriteMutationsInFlight.remove(trackID)
+                }
+            }
+            do {
+                await configureAPI()
+                if wasLiked {
+                    _ = try await LaneAPI.shared.removeTrack(
+                        token: requestToken,
+                        playlistId: "lane_likes",
+                        trackId: trackID
+                    )
+                } else {
+                    _ = try await LaneAPI.shared.addTracks(
+                        token: requestToken,
+                        playlistId: "lane_likes",
+                        trackIds: [trackID]
+                    )
+                }
+                if token == requestToken {
+                    UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")
+                }
+            } catch {
+                guard token == requestToken else { return }
+                if wasLiked {
+                    favorites.insert(trackID)
+                } else {
+                    favorites.remove(trackID)
+                }
+                output = "Could not update liked tracks: \(error.localizedDescription)"
+            }
+        }
     }
 
     func toggleFavoriteCurrent() {

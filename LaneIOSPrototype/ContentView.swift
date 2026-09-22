@@ -540,7 +540,6 @@ private struct SearchScreen: View {
                         session.queue = historyTracks.isEmpty ? [candidate] : historyTracks
                         session.currentIndex = session.queue.firstIndex(of: candidate)
                         session.requestStream(for: candidate)
-                        showPlayer = true
                         Task { await session.bumpSearchHistoryItem(item) }
                     } label: {
                         historyRowLabel(item)
@@ -660,7 +659,6 @@ private struct SearchScreen: View {
                     session.queue = session.searchTracks
                     session.currentIndex = session.searchTracks.firstIndex(of: value)
                     session.requestStream(for: value)
-                    showPlayer = true
                 }
             )
         } else if let artist = item.artist {
@@ -695,7 +693,6 @@ private struct SearchScreen: View {
                                     session.queue = session.searchTracks
                                     session.currentIndex = session.searchTracks.firstIndex(of: track)
                                     session.requestStream(for: track)
-                                    showPlayer = true
                                 }
                             )
                         }
@@ -736,7 +733,6 @@ private struct SearchScreen: View {
                                 session.queue = session.searchTracks
                                 session.currentIndex = session.searchTracks.firstIndex(of: track)
                                 session.requestStream(for: track)
-                                showPlayer = true
                             }
                         )
                     }
@@ -880,7 +876,9 @@ private struct LibraryScreen: View {
 
     private var libraryEntries: [LibraryEntry] {
         let entries: [LibraryEntry] =
-            session.serverPlaylists.map(LibraryEntry.playlist) +
+            session.serverPlaylists
+                .filter { $0.playlistId != "lane_likes" }
+                .map(LibraryEntry.playlist) +
             session.localPlaylists.map(LibraryEntry.local) +
             session.serverArtists.map(LibraryEntry.artist) +
             session.serverAlbums.map(LibraryEntry.album)
@@ -892,7 +890,11 @@ private struct LibraryScreen: View {
     private var libraryContents: some View {
         if filter == .all || filter == .playlists {
             NavigationLink {
-                FavoriteTracksScreen(showPlayer: $showPlayer)
+                if let liked = session.serverPlaylists.first(where: { $0.playlistId == "lane_likes" }) {
+                    PlaylistDetailScreen(playlist: liked, showPlayer: $showPlayer)
+                } else {
+                    FavoriteTracksScreen(showPlayer: $showPlayer)
+                }
             } label: {
                 APKFavoritePlaylistCard(trackCount: session.favorites.count)
             }
@@ -1468,7 +1470,6 @@ private struct TrackRow: View {
         .contentShape(Rectangle())
         .onTapGesture {
             session.requestStream(for: track)
-            showPlayer = true
         }
     }
 }
@@ -1599,6 +1600,7 @@ struct PlaylistDetailScreen: View {
     @State private var editedVisibility: String?
 
     private var isOwner: Bool {
+        if playlist.playlistId == "lane_likes" { return false }
         guard let creator = playlist.creatorLid,
               let accountID = session.account?.laneId else { return false }
         return creator == accountID
@@ -1609,7 +1611,8 @@ struct PlaylistDetailScreen: View {
     }
 
     private var visibleName: String {
-        editedName ?? playlist.playlistName ?? "Playlist"
+        if playlist.playlistId == "lane_likes" { return "Liked Songs" }
+        return editedName ?? playlist.playlistName ?? "Playlist"
     }
 
     private var visibleDescription: String? {
@@ -1714,7 +1717,6 @@ struct PlaylistDetailScreen: View {
                             session.queue = list
                             session.currentIndex = 0
                             session.requestStream(for: list[0])
-                            showPlayer = true
                         } label: {
                             Image(systemName: "shuffle")
                                 .font(.system(size: 21, weight: .semibold))
@@ -1729,7 +1731,6 @@ struct PlaylistDetailScreen: View {
                             session.queue = tracks
                             session.currentIndex = 0
                             session.requestStream(for: first)
-                            showPlayer = true
                         } label: {
                             ZStack {
                                 Circle()
@@ -1805,7 +1806,6 @@ struct PlaylistDetailScreen: View {
                                     session.queue = tracks
                                     session.currentIndex = index
                                     session.requestStream(for: track)
-                                    showPlayer = true
                                 } label: {
                                     HStack(spacing: 12) {
                                         Group {
@@ -2475,7 +2475,6 @@ private struct ProfileScreen: View {
                             let track = TrackCandidate(statusTrack)
                             Button {
                                 session.requestStream(for: track)
-                                showPlayer = true
                             } label: {
                                 HStack(spacing: 12) {
                                     ArtworkView(url: track.coverURL, size: 58, radius: 8)
@@ -3174,7 +3173,6 @@ private struct LocalPlaylistDetailScreen: View {
                         session.queue = tracks
                         session.currentIndex = 0
                         session.requestStream(for: first)
-                        showPlayer = true
                     } label: {
                         Image(systemName: "play.fill")
                             .foregroundStyle(.black)
@@ -3202,7 +3200,6 @@ private struct LocalPlaylistDetailScreen: View {
                                 session.queue = tracks
                                 session.currentIndex = index
                                 session.requestStream(for: track)
-                                showPlayer = true
                             } label: {
                                 Label("Play", systemImage: "play.fill")
                             }
@@ -4304,7 +4301,6 @@ private struct TrackSection: View {
                             session.queue = tracks
                             session.currentIndex = tracks.firstIndex(of: track)
                             session.requestStream(for: track)
-                            showPlayer = true
                         } label: {
                             VStack(alignment: .leading, spacing: 8) {
                                 ArtworkView(url: track.coverURL, size: 148, radius: 15)
