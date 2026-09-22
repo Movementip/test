@@ -472,6 +472,8 @@ struct APKPlaylistActionsSheet: View {
                     action("Invite collaborators", icon: "person.badge.plus", asset: nil, perform: onInvite)
                 } else if !isSaved {
                     action("Add to Library", icon: "square.stack", asset: "ic_lib_outline", perform: onSave)
+                } else {
+                    action("Remove from Library", icon: "minus.circle", asset: "ic_lib_outline", perform: onDelete)
                 }
 
                 action("Share", icon: "square.and.arrow.up", asset: "ic_share", perform: onShare)
