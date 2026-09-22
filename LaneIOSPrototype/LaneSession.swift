@@ -968,7 +968,43 @@ final class LaneSession: ObservableObject {
         )
         guard token == requestToken else { return }
 
-        if let playlists {
+        var effectivePlaylists = playlists ?? []
+        if effectivePlaylists.isEmpty {
+            var libraryAccount = account
+            if libraryAccount?.userPlaylists == nil {
+                let language = Locale.current.language.languageCode?.identifier ?? "en"
+                libraryAccount = try? await LaneAPI.shared.account(
+                    token: requestToken,
+                    deviceLanguage: language
+                )
+            }
+
+            if let ids = libraryAccount?.userPlaylists?.filter({ !$0.isEmpty }), !ids.isEmpty {
+                let recovered = await withTaskGroup(of: LanePlaylist?.self) { group in
+                    for id in ids {
+                        group.addTask {
+                            try? await LaneAPI.shared.playlist(
+                                token: requestToken,
+                                playlistId: id
+                            )
+                        }
+                    }
+
+                    var byID: [String: LanePlaylist] = [:]
+                    for await item in group {
+                        if let item, let id = item.playlistId {
+                            byID[id] = item
+                        }
+                    }
+                    return ids.compactMap { byID[$0] }
+                }
+                guard token == requestToken else { return }
+                effectivePlaylists = recovered
+            }
+        }
+
+        do {
+            let playlists = effectivePlaylists
             let fetchedIDs = Set(playlists.compactMap(\.playlistId))
             let confirmedPendingIDs = pendingSavedPlaylists.keys.filter { fetchedIDs.contains($0) }
             for id in confirmedPendingIDs {
