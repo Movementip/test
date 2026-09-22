@@ -5,6 +5,57 @@ private let lanePink = Color(red: 1.0, green: 130.0 / 255.0, blue: 132.0 / 255.0
 private let laneBackground = Color(red: 14.0 / 255.0, green: 14.0 / 255.0, blue: 14.0 / 255.0)
 private let laneCard = Color.white.opacity(0.07)
 
+private struct LaneInteractivePopGestureEnabler: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> UIViewController {
+        LaneInteractivePopController()
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        uiViewController.enableLaneInteractivePop()
+    }
+}
+
+private final class LaneInteractivePopController: UIViewController {
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        enableLaneInteractivePop()
+    }
+
+    override func didMove(toParent parent: UIViewController?) {
+        super.didMove(toParent: parent)
+        enableLaneInteractivePop()
+    }
+
+    func enableLaneInteractivePop() {
+        navigationController?.interactivePopGestureRecognizer?.isEnabled = true
+        navigationController?.interactivePopGestureRecognizer?.delegate = nil
+    }
+}
+
+private extension UIViewController {
+    func enableLaneInteractivePop() {
+        var controller: UIViewController? = self
+        while let current = controller {
+            if let navigation = current.navigationController {
+                navigation.interactivePopGestureRecognizer?.isEnabled = true
+                navigation.interactivePopGestureRecognizer?.delegate = nil
+                return
+            }
+            controller = current.parent
+        }
+    }
+}
+
+private extension View {
+    func laneIOSBackSwipe() -> some View {
+        background(
+            LaneInteractivePopGestureEnabler()
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+        )
+    }
+}
+
 private struct BundlePNG: View {
     let name: String
     var contentMode: ContentMode = .fit
@@ -305,6 +356,7 @@ private struct HomeScreen: View {
             .background(laneBackground)
             .toolbar(.hidden, for: .navigationBar)
         }
+        .laneIOSBackSwipe()
     }
 }
 
@@ -520,6 +572,7 @@ private struct SearchScreen: View {
                 if !active { isSearchFocused = false }
             }
         }
+        .laneIOSBackSwipe()
     }
 
     @ViewBuilder
@@ -919,6 +972,7 @@ private struct LibraryScreen: View {
                 CreatePlaylistSheet()
             }
         }
+        .laneIOSBackSwipe()
     }
 
     private var libraryEntries: [LibraryEntry] {
