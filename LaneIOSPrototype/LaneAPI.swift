@@ -96,20 +96,24 @@ actor LaneAPI {
             candidates.append(candidate)
         }
 
-        // A host remembered while VPN was enabled must never outrank the
-        // timezone region after VPN is disabled. In Russian timezones Android
-        // selects ru.laneapi.com directly, so keep that host first for every
-        // safe request, including /track/stream.
-        appendOnce(timezonePreferred)
-
         if preferCurrent {
+            // Safe reads should use the host that most recently succeeded first.
+            // The previous timezone-first ordering made every screen pay the
+            // timeout of a slow edge again after we had already found a faster one.
             appendOnce(base)
+
+            if let saved = UserDefaults.standard.string(forKey: lastWorkingRegionalBaseKey),
+               let savedURL = URL(string: saved),
+               let host = savedURL.host,
+               officialHosts.contains(host) {
+                appendOnce(savedURL)
+            }
         }
 
-        // Android selects ru.laneapi.com first in Russian time zones. A host
-        // remembered while a VPN was active must not outrank that regional
-        // choice after the VPN is disabled.
-        if let saved = UserDefaults.standard.string(forKey: lastWorkingRegionalBaseKey),
+        appendOnce(timezonePreferred)
+
+        if !preferCurrent,
+           let saved = UserDefaults.standard.string(forKey: lastWorkingRegionalBaseKey),
            let savedURL = URL(string: saved),
            let host = savedURL.host,
            officialHosts.contains(host) {
@@ -154,26 +158,10 @@ actor LaneAPI {
     ) async throws -> (Data, HTTPURLResponse) {
         let isBNITSigned = request.value(forHTTPHeaderField: "X-Core-Token") != nil
 
-        // This is the route Android 1.4 uses in Russian time zones. Going to
-        // the resolved RU edge first avoids the long system-DNS stall seen on
-        // affected mobile providers. TLS still validates ru.laneapi.com.
-        if request.url?.host == "ru.laneapi.com" {
-            if isBNITSigned {
-                let direct = try await AndroidNetworkTransport.data(
-                    for: request,
-                    timeout: directTimeout
-                )
-                return (direct.data, direct.response)
-            }
-
-            if let direct = try? await AndroidNetworkTransport.data(
-                for: request,
-                timeout: directTimeout
-            ) {
-                return (direct.data, direct.response)
-            }
-        }
-
+        // Use URLSession first. It keeps HTTP/2/TLS connections warm and is
+        // substantially faster for the many small requests made by album,
+        // artist, library and artwork screens. Earlier builds forced every RU
+        // API call through a new NWConnection, which regressed load times.
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else {
@@ -181,12 +169,12 @@ actor LaneAPI {
             }
             return (data, http)
         } catch {
-            // Never reuse BNIT headers on a second transport. LaneAPI's outer
-            // safe-read loop rebuilds and signs a fresh request. Mutations do
-            // not retry automatically because their commit state is unknown.
+            // Do not replay an already-signed request over a second transport.
+            // Safe reads are rebuilt and re-signed by the outer regional loop.
             guard signingConfiguration.mode == .official, !isBNITSigned else {
                 throw error
             }
+
             let direct = try await AndroidNetworkTransport.data(
                 for: request,
                 timeout: directTimeout
@@ -465,10 +453,7 @@ actor LaneAPI {
         // Stream resolution already has endpoint/quality compatibility
         // fallbacks at the player layer. One pass over both regional hosts is
         // enough here and prevents the UI appearing to load forever offline.
-        let retryRounds = candidateBases == nil &&
-            canFailOverRegionalHost &&
-            normalizedPath != "/track/stream" &&
-            normalizedPath != "/user/tracks" ? 2 : 1
+        let retryRounds = 1
         let longReadPaths: Set<String> = [
             "/user/import/preview",
             "/user/tracks",
@@ -479,8 +464,14 @@ actor LaneAPI {
             "/track/download"
         ]
         let requestTimeout: TimeInterval = canFailOverRegionalHost
-            ? (normalizedPath == "/user/import/preview" ? 45 : (normalizedPath == "/track/stream" ? 6 : (normalizedPath == "/user/tracks" ? 12 : (longReadPaths.contains(normalizedPath) ? 20 : 12))))
-            : 30
+            ? (normalizedPath == "/user/import/preview"
+                ? 30
+                : (normalizedPath == "/track/stream"
+                    ? 6
+                    : (normalizedPath == "/user/tracks"
+                        ? 6
+                        : (longReadPaths.contains(normalizedPath) ? 10 : 7))))
+            : 20
 
         for round in 0..<retryRounds {
             var shouldRetryRound = false
@@ -966,9 +957,6 @@ actor LaneAPI {
         )
     }
 
-    // Exact Lane Android 1.4.7 contract recovered from the APK:
-    // @POST("/user/tracks") with @Body TrackIds. Its kotlinx serializer emits
-    // {"trackIds":[...]}; a raw JSON array is not a valid TrackIds body.
     func tracksByIds(token: String, ids: [String], prefetch: Bool = false) async throws -> [TrackData] {
         var seen = Set<String>()
         let clean = ids
@@ -977,14 +965,45 @@ actor LaneAPI {
 
         guard !clean.isEmpty else { return [] }
 
-        return try await decoded(
-            [TrackData].self,
-            path: "/user/tracks",
-            method: "POST",
-            token: token,
-            query: [.init(name: "prefetch", value: prefetch ? "true" : "false")],
-            json: ["trackIds": clean]
-        )
+        let query = [URLQueryItem(name: "prefetch", value: prefetch ? "true" : "false")]
+        let bodies: [Any] = [
+            clean,
+            ["trackIds": clean]
+        ]
+
+        var lastResult: APIResult?
+        for body in bodies {
+            let result = try await request(
+                path: "/user/tracks",
+                method: "POST",
+                token: token,
+                query: query,
+                json: body
+            )
+            lastResult = result
+
+            if (200..<300).contains(result.status) {
+                if let tracks = try? JSONDecoder().decode([TrackData].self, from: result.data) {
+                    return tracks
+                }
+                if let page = try? JSONDecoder().decode(PaginatedResult<TrackData>.self, from: result.data) {
+                    return page.items
+                }
+                throw LaneAPIError.decoding("Unexpected /user/tracks response\n\(result.pretty)")
+            }
+
+            let invalidBody = result.status == 400 &&
+                result.pretty.localizedCaseInsensitiveContains("INVALID_TRACK_IDS_BODY")
+            if invalidBody {
+                continue
+            }
+            throw LaneAPIError.http(result.status, result.pretty)
+        }
+
+        if let lastResult {
+            throw LaneAPIError.http(lastResult.status, lastResult.pretty)
+        }
+        throw LaneAPIError.emptyResponse
     }
 
     func recentRaw(token: String) async throws -> APIResult {
@@ -1134,16 +1153,33 @@ actor LaneAPI {
     }
 
     func addTracks(token: String, playlistId: String, trackIds: [String]) async throws -> APIResult {
-        // Exact Lane Android 1.4.7 UserApi.M Retrofit contract:
-        // POST /user/playlist/add-tracks?playlistId=...
-        // @Body List<String>. This endpoint is intentionally different from
-        // /user/tracks, whose body is the TrackIds object {"trackIds":[...]}.
-        try await request(
+        let clean = trackIds
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !clean.isEmpty else { throw LaneAPIError.emptyResponse }
+
+        let query = [URLQueryItem(name: "playlistId", value: playlistId)]
+        let first = try await request(
             path: "/user/playlist/add-tracks",
             method: "POST",
             token: token,
-            query: [.init(name: "playlistId", value: playlistId)],
-            json: trackIds
+            query: query,
+            json: clean
+        )
+
+        guard first.status == 400,
+              first.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY") else {
+            return first
+        }
+
+        // A 400 body-validation rejection means the first mutation did not
+        // commit, so trying the alternate serializer shape is safe.
+        return try await request(
+            path: "/user/playlist/add-tracks",
+            method: "POST",
+            token: token,
+            query: query,
+            json: ["trackIds": clean]
         )
     }
 
