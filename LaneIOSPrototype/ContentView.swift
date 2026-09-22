@@ -2616,10 +2616,8 @@ private struct ProfileScreen: View {
                             ForEach(AudioQualityChoice.allCases) { quality in
                                 let locked = quality != .basic && !session.hasPremiumAccess
                                 Button {
-                                    if locked {
+                                    if locked || !session.selectStreamQuality(quality) {
                                         showPremiumQualityNotice = true
-                                    } else {
-                                        session.streamQuality = quality.rawValue
                                     }
                                 } label: {
                                     HStack(spacing: 3) {
@@ -4342,13 +4340,31 @@ private struct DiagnosticsScreen: View {
             }
 
             Section("Playback") {
-                Picker("Quality", selection: $session.streamQuality) {
+                Picker(
+                    "Quality",
+                    selection: Binding(
+                        get: { session.streamQuality },
+                        set: { raw in
+                            guard let quality = AudioQualityChoice(rawValue: raw) else { return }
+                            _ = session.selectStreamQuality(quality)
+                        }
+                    )
+                ) {
                     ForEach(AudioQualityChoice.allCases) { quality in
-                        Text(quality.rawValue)
+                        Text("(quality.rawValue) · (quality.detail)")
                             .tag(quality.rawValue)
+                            .disabled(quality != .basic && !session.hasPremiumAccess)
                     }
                 }
-                .onChange(of: session.streamQuality) { _ in session.persistStreamQualitySelection() }
+
+                LabeledContent(
+                    "Active stream",
+                    value: session.activeStreamQuality ?? "Not playing"
+                )
+
+                Text("The selected tier is fixed when a track starts. Playback does not downgrade to another quality automatically.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Request") {
