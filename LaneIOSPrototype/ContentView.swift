@@ -1659,10 +1659,13 @@ struct PlaylistDetailScreen: View {
                                 .foregroundStyle(Color.white.opacity(0.38))
                         }
 
-                        let count = loading ? (playlist.tracksCount ?? tracks.count) : tracks.count
-                        Text(count == 1 ? "1 track" : "\(count) tracks")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Color.white.opacity(0.52))
+                        let count = !tracks.isEmpty ? tracks.count :
+                            (playlist.tracksCount ?? playlist.playlistTracksIds?.count)
+                        if let count {
+                            Text(count == 1 ? "1 track" : "\(count) tracks")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Color.white.opacity(0.52))
+                        }
                     }
 
                     HStack(spacing: 16) {
@@ -1774,8 +1777,26 @@ struct PlaylistDetailScreen: View {
                     }
                     .padding(.vertical, 32)
                 } else if tracks.isEmpty {
-                    APKPlaylistEmptyState()
-                    .padding(.top, 18)
+                    if let message = session.playlistLoadMessages[playlist.playlistId ?? ""] {
+                        VStack(spacing: 12) {
+                            Image(systemName: "music.note.list")
+                                .font(.system(size: 31))
+                                .foregroundStyle(.secondary)
+                            Text(message)
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                            Button("Try again") { reloadTracks() }
+                                .buttonStyle(.bordered)
+                                .tint(lanePink)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 28)
+                        .padding(.horizontal, 20)
+                    } else {
+                        APKPlaylistEmptyState()
+                            .padding(.top, 18)
+                    }
                 } else {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
@@ -1867,12 +1888,7 @@ struct PlaylistDetailScreen: View {
             .frame(height: 52)
             .background(laneBackground.opacity(0.96))
         }
-        .onAppear {
-            session.loadPlaylistTracks(playlist) { loaded in
-                tracks = loaded
-                loading = false
-            }
-        }
+        .onAppear { reloadTracks() }
         .alert("Delete playlist?", isPresented: $confirmDelete) {
             Button("Delete", role: .destructive) {
                 Task {
@@ -1939,6 +1955,14 @@ struct PlaylistDetailScreen: View {
         }
         .sheet(item: $shareItem) { item in
             LaneShareActivitySheet(url: item.url)
+        }
+    }
+
+    private func reloadTracks() {
+        loading = tracks.isEmpty
+        session.loadPlaylistTracks(playlist) { loaded in
+            tracks = loaded
+            loading = false
         }
     }
 

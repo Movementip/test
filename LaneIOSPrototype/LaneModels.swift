@@ -289,12 +289,20 @@ struct PaginatedResult<T: Decodable>: Decodable {
     init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: CodingKeys.self)
 
-        items =
-            (try? box.decode([T].self, forKey: .items)) ??
-            (try? box.decode([T].self, forKey: .content)) ??
-            (try? box.decode([T].self, forKey: .data)) ??
-            (try? box.decode([T].self, forKey: .results)) ??
-            []
+        if box.contains(.items) {
+            items = try box.decode([T].self, forKey: .items)
+        } else if box.contains(.content) {
+            items = try box.decode([T].self, forKey: .content)
+        } else if box.contains(.data) {
+            items = try box.decode([T].self, forKey: .data)
+        } else if box.contains(.results) {
+            items = try box.decode([T].self, forKey: .results)
+        } else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.items,
+                .init(codingPath: decoder.codingPath, debugDescription: "Playlist response has no track items")
+            )
+        }
 
         totalItems =
             (try? box.decode(Int64.self, forKey: .totalItems)) ??

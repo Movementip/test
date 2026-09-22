@@ -110,6 +110,8 @@ final class LaneSession: ObservableObject {
 
     // MARK: Library
     @Published var serverPlaylists: [LanePlaylist] = []
+    @Published var playlistLoadMessages: [String: String] = [:]
+    private var playlistTrackCache: [String: [TrackCandidate]] = [:]
     @Published var serverAlbums: [LaneAlbum] = []
     private var cachedAlbumDetails: [String: LaneAlbum] = [:]
     @Published var serverArtists: [LaneArtist] = []
@@ -335,6 +337,10 @@ final class LaneSession: ObservableObject {
             KeychainStore.save(legacy, account: "bearer")
         }
         loadLocalState()
+        if let data = UserDefaults.standard.data(forKey: "lane.cachedPlaylistTracks"),
+           let cache = try? JSONDecoder().decode([String: [TrackCandidate]].self, from: data) {
+            playlistTrackCache = cache
+        }
         if let data = UserDefaults.standard.data(forKey: "lane.cachedAlbumDetails"),
            let cache = try? JSONDecoder().decode([String: LaneAlbum].self, from: data) {
             cachedAlbumDetails = cache
@@ -395,7 +401,12 @@ final class LaneSession: ObservableObject {
         account = nil
         publicProfile = nil
         serverPlaylists = []
+        playlistTrackCache = [:]
+        playlistLoadMessages = [:]
+        UserDefaults.standard.removeObject(forKey: "lane.cachedPlaylistTracks")
         serverAlbums = []
+        cachedAlbumDetails = [:]
+        UserDefaults.standard.removeObject(forKey: "lane.cachedAlbumDetails")
         serverArtists = []
         homeSections = []
         friends = []
@@ -773,6 +784,18 @@ final class LaneSession: ObservableObject {
         }
     }
 
+    private func rememberPlaylistTracks(_ tracks: [TrackCandidate], playlistID: String) {
+        guard !tracks.isEmpty else { return }
+        playlistTrackCache[playlistID] = tracks
+        playlistLoadMessages[playlistID] = nil
+        if playlistTrackCache.count > 64, let oldest = playlistTrackCache.keys.first {
+            playlistTrackCache.removeValue(forKey: oldest)
+        }
+        if let data = try? JSONEncoder().encode(playlistTrackCache) {
+            UserDefaults.standard.set(data, forKey: "lane.cachedPlaylistTracks")
+        }
+    }
+
     func loadPlaylistTracks(_ playlist: LanePlaylist, completion: @escaping ([TrackCandidate]) -> Void) {
         guard let id = playlist.playlistId else {
             let fallback: [TrackCandidate] = playlist.playlistTracks?.map {
@@ -780,6 +803,11 @@ final class LaneSession: ObservableObject {
             } ?? []
             completion(fallback)
             return
+        }
+
+        let cached = playlistTrackCache[id]
+        if let cached, !cached.isEmpty {
+            completion(cached)
         }
 
         Task { @MainActor in
@@ -799,35 +827,76 @@ final class LaneSession: ObservableObject {
                 pageSize: 50
             )
 
-            let (details, page) = await (detailsRequest, pageRequest)
+            let page = await pageRequest
             if let page, !page.items.isEmpty {
                 var items = page.items
-                if let totalPages = page.totalPages, totalPages > 1 {
+                var allPagesLoaded = true
+                if cached == nil {
+                    completion(items.map { TrackCandidate($0, refID: id) })
+                }
+                let pageSize = max(page.pageSize ?? 50, 1)
+                let inferredPages = page.totalItems.map {
+                    Int(min($0 / Int64(pageSize) + ($0 % Int64(pageSize) == 0 ? 0 : 1), 200))
+                }
+                let totalPages = max(1, min(page.totalPages ?? inferredPages ?? 1, 200))
+                if totalPages > 1 {
                     for pageNumber in 2...totalPages {
                         guard let next = try? await LaneAPI.shared.playlistTracks(
                             token: token,
                             playlistId: id,
                             page: pageNumber,
                             pageSize: 50
-                        ) else { break }
+                        ) else {
+                            allPagesLoaded = false
+                            break
+                        }
                         items.append(contentsOf: next.items)
                     }
                 }
-                completion(items.map { TrackCandidate($0, refID: id) })
+                let loaded = items.map { TrackCandidate($0, refID: id) }
+                if let totalItems = page.totalItems, Int64(loaded.count) < totalItems {
+                    allPagesLoaded = false
+                }
+                if allPagesLoaded || cached == nil || loaded.count > (cached?.count ?? 0) {
+                    rememberPlaylistTracks(loaded, playlistID: id)
+                    completion(loaded)
+                }
                 return
             }
 
-            let resolvedPlaylist = details ?? playlist
-            if let embedded = resolvedPlaylist.playlistTracks, !embedded.isEmpty {
-                completion(embedded.map { TrackCandidate($0, refID: id) })
+            let details = await detailsRequest
+            let libraryCopy = serverPlaylists.first { $0.playlistId == id }
+            let embedded = [details?.playlistTracks, libraryCopy?.playlistTracks, playlist.playlistTracks]
+                .compactMap { $0 }
+                .first { !$0.isEmpty }
+            if let embedded {
+                let loaded = embedded.map { TrackCandidate($0, refID: id) }
+                rememberPlaylistTracks(loaded, playlistID: id)
+                completion(loaded)
                 return
             }
 
             // Match Android's offline/server fallback: resolve the playlist's
             // IDs through the read-only POST /user/tracks in resilient pages.
-            let ids = resolvedPlaylist.playlistTracksIds ?? playlist.playlistTracksIds ?? []
+            let ids = [details?.playlistTracksIds, libraryCopy?.playlistTracksIds, playlist.playlistTracksIds]
+                .compactMap { $0 }
+                .first { !$0.isEmpty } ?? []
             guard !ids.isEmpty else {
-                completion([])
+                let isKnownEmpty = page?.totalItems == 0 ||
+                    details?.tracksCount == 0 ||
+                    libraryCopy?.tracksCount == 0 ||
+                    playlist.tracksCount == 0
+                if isKnownEmpty {
+                    playlistTrackCache.removeValue(forKey: id)
+                    if let data = try? JSONEncoder().encode(playlistTrackCache) {
+                        UserDefaults.standard.set(data, forKey: "lane.cachedPlaylistTracks")
+                    }
+                    playlistLoadMessages[id] = nil
+                    completion([])
+                } else {
+                    playlistLoadMessages[id] = "Tracks could not be loaded. Try again."
+                    if cached == nil { completion([]) }
+                }
                 return
             }
 
@@ -847,7 +916,14 @@ final class LaneSession: ObservableObject {
                 uniquingKeysWith: { first, _ in first }
             )
             let ordered = ids.compactMap { byID[$0] }
-            completion(ordered.map { TrackCandidate($0, refID: id) })
+            if ordered.isEmpty {
+                playlistLoadMessages[id] = "Lane could not resolve the tracks in this playlist. Try again."
+                if cached == nil { completion([]) }
+            } else {
+                let tracks = ordered.map { TrackCandidate($0, refID: id) }
+                rememberPlaylistTracks(tracks, playlistID: id)
+                completion(tracks)
+            }
         }
     }
 
@@ -1648,12 +1724,26 @@ final class LaneSession: ObservableObject {
                 )
             } catch {
                 lastError = error
-                guard attempt < 2 else { break }
+                // A rejected quality tier, missing track or auth error will
+                // not improve by repeating the same signed request. Return it
+                // immediately so BASIC quality can be tried without a 3 s
+                // backoff and two redundant regional round trips.
+                guard attempt < 2, isTransientStreamResolutionError(error) else { break }
                 try Task.checkCancellation()
-                try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_000_000_000)
+                try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 250_000_000)
             }
         }
         throw lastError
+    }
+
+    private func isTransientStreamResolutionError(_ error: Error) -> Bool {
+        if case let LaneAPIError.http(status, body) = error {
+            return status == 408 || status == 425 || status == 429 ||
+                (500...599).contains(status) ||
+                (status == 401 && body.contains("REPLAY_ATTACK_DETECTED"))
+        }
+        let networkError = error as NSError
+        return networkError.domain == NSURLErrorDomain
     }
 
     private func resolvedPlaybackStream(
@@ -1990,7 +2080,9 @@ final class LaneSession: ObservableObject {
         }
         let item = AVPlayerItem(asset: asset)
         let newPlayer = AVPlayer(playerItem: item)
-        newPlayer.automaticallyWaitsToMinimizeStalling = true
+        // Media3 starts promptly; AVPlayer's default conservative buffering
+        // could delay the first audible frame for several seconds on LTE.
+        newPlayer.automaticallyWaitsToMinimizeStalling = false
         player = newPlayer
         observePlaybackEnd(of: item, requestID: requestID, track: track)
 

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Network
 import Security
 import SwiftUI
@@ -427,20 +428,112 @@ func laneRoutedMediaURL(_ rawValue: String?) -> URL? {
     return URL(string: value)
 }
 
+private final class LaneImageMemoryCache {
+    static let shared = LaneImageMemoryCache()
+    private let images = NSCache<NSString, UIImage>()
+
+    private init() {
+        images.totalCostLimit = 64 * 1024 * 1024
+    }
+
+    func image(for key: String) -> UIImage? {
+        images.object(forKey: key as NSString)
+    }
+
+    func store(_ image: UIImage, for key: String) {
+        let decodedBytes = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
+        images.setObject(image, forKey: key as NSString, cost: decodedBytes)
+    }
+}
+
+private actor LaneImageDiskCache {
+    static let shared = LaneImageDiskCache()
+    private let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("LaneArtwork", isDirectory: true)
+    private var writesSinceTrim = 0
+
+    private func fileURL(for key: String) -> URL {
+        let digest = SHA256.hash(data: Data(key.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return directory.appendingPathComponent(digest).appendingPathExtension("img")
+    }
+
+    func data(for key: String) -> Data? {
+        try? Data(contentsOf: fileURL(for: key))
+    }
+
+    func store(_ data: Data, for key: String) {
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try data.write(to: fileURL(for: key), options: .atomic)
+            writesSinceTrim += 1
+            if writesSinceTrim >= 32 {
+                writesSinceTrim = 0
+                trim()
+            }
+        } catch {
+            // Artwork is optional; a full or unavailable cache must not block playback.
+        }
+    }
+
+    private func trim() {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]
+        ) else { return }
+
+        var total = 0
+        let entries = files.compactMap { url -> (URL, Int, Date)? in
+            guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else {
+                return nil
+            }
+            let size = values.fileSize ?? 0
+            total += size
+            return (url, size, values.contentModificationDate ?? .distantPast)
+        }
+        guard total > 200 * 1024 * 1024 else { return }
+        for (url, size, _) in entries.sorted(by: { $0.2 < $1.2 }) {
+            try? FileManager.default.removeItem(at: url)
+            total -= size
+            if total <= 160 * 1024 * 1024 { break }
+        }
+    }
+}
+
 @MainActor
 final class LaneRemoteImageLoader: ObservableObject {
     @Published private(set) var image: UIImage?
-    private var loadedValue: String?
+    private(set) var loadedValue: String?
 
     func load(_ rawValue: String?) async {
-        guard rawValue != loadedValue else { return }
-        loadedValue = rawValue
-        image = nil
-
         guard let url = laneRoutedMediaURL(rawValue) else { return }
-        guard let data = try? await AndroidNetworkTransport.imageData(from: url),
+        let key = url.absoluteString
+        if let cached = LaneImageMemoryCache.shared.image(for: key) {
+            image = cached
+            loadedValue = rawValue
+            return
+        }
+        guard rawValue != loadedValue else { return }
+        if image != nil { image = nil }
+
+        if let diskData = await LaneImageDiskCache.shared.data(for: key),
+           !Task.isCancelled,
+           let decoded = UIImage(data: diskData) {
+            LaneImageMemoryCache.shared.store(decoded, for: key)
+            image = decoded
+            loadedValue = rawValue
+            return
+        }
+
+        guard !Task.isCancelled,
+              let data = try? await AndroidNetworkTransport.imageData(from: url),
+              !Task.isCancelled,
               let decoded = UIImage(data: data) else { return }
+        LaneImageMemoryCache.shared.store(decoded, for: key)
         image = decoded
+        loadedValue = rawValue
+        await LaneImageDiskCache.shared.store(data, for: key)
     }
 }
 
@@ -465,7 +558,9 @@ struct LaneResilientImage<Placeholder: View>: View {
 
     var body: some View {
         Group {
-            if let image = loader.image {
+            if let image = url.flatMap({ laneRoutedMediaURL($0)?.absoluteString })
+                .flatMap({ LaneImageMemoryCache.shared.image(for: $0) })
+                ?? (loader.loadedValue == url ? loader.image : nil) {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: contentMode)

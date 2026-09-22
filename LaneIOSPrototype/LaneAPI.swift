@@ -506,7 +506,7 @@ actor LaneAPI {
 
                     // Safe reads may move to the other regional edge. Mutation
                     // requests never enter this branch, so they remain single-shot.
-                    if canFailOverRegionalHost, index + 1 < candidates.count {
+                    if canFailOverRegionalHost, transient, index + 1 < candidates.count {
                         continue
                     }
 
