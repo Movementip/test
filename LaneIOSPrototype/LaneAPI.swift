@@ -1094,16 +1094,16 @@ actor LaneAPI {
     }
 
     func addTracks(token: String, playlistId: String, trackIds: [String]) async throws -> APIResult {
-        // Exact Lane Android 1.4.7 Retrofit signature recovered from the APK:
-        // k(TrackIds, String, Continuation) -> /user/playlist/add-tracks.
-        // TrackIds is the same serializable model used by /user/tracks, so the
-        // JSON body is {"trackIds":[...]} — NOT a raw string array.
+        // Exact Lane Android 1.4.7 UserApi.M Retrofit contract:
+        // POST /user/playlist/add-tracks?playlistId=...
+        // @Body List<String>. This endpoint is intentionally different from
+        // /user/tracks, whose body is the TrackIds object {"trackIds":[...]}.
         try await request(
             path: "/user/playlist/add-tracks",
             method: "POST",
             token: token,
             query: [.init(name: "playlistId", value: playlistId)],
-            json: ["trackIds": trackIds]
+            json: trackIds
         )
     }
 
