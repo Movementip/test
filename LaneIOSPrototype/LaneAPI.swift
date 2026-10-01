@@ -657,10 +657,20 @@ actor LaneAPI {
             "/user/playlist/add",
             "/user/playlist/remove-track"
         ]
-        let readOnlyPOSTPaths: Set<String> = ["/user/tracks"]
+        let retryablePOSTPaths: Set<String> = [
+            "/user/tracks",
+            // Lane stores playlist track IDs as a set. Repeating this request
+            // after a timeout or regional failover cannot create duplicates.
+            "/user/playlist/add-tracks"
+        ]
+        let retryableMutationGETPaths: Set<String> = [
+            // Removing the same ID more than once is likewise idempotent.
+            "/user/playlist/remove-track"
+        ]
         let canFailOver =
             (upperMethod == "GET" && !mutatingGETPaths.contains(normalizedPath)) ||
-            (upperMethod == "POST" && readOnlyPOSTPaths.contains(normalizedPath))
+            (upperMethod == "GET" && retryableMutationGETPaths.contains(normalizedPath)) ||
+            (upperMethod == "POST" && retryablePOSTPaths.contains(normalizedPath))
 
         let candidates: [URL]
         if let candidateBases, !candidateBases.isEmpty {
@@ -1392,9 +1402,9 @@ actor LaneAPI {
             )
             last = result
 
-            let invalidBody = result.status == 400 &&
-                result.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY")
-            if mode == "auto", invalidBody {
+            // Regional Lane edges have returned both the named validation
+            // code and a generic HTTP 400 for the alternate body shape.
+            if mode == "auto", result.status == 400 {
                 continue
             }
             return result

@@ -156,8 +156,10 @@ final class LaneSession: ObservableObject {
     @Published var favorites: Set<String> = []
     @Published var likedTracks: [TrackCandidate] = []
     private var favoriteMutationsInFlight: Set<String> = []
+    private var pendingFavoriteStates: [String: Bool] = [:]
     private var pendingSavedPlaylists: [String: LanePlaylist] = [:]
     private var pendingRemovedPlaylistIDs: Set<String> = []
+    private var libraryLoadGeneration = UUID()
     private var favoriteMigrationInProgress = false
     private let favoriteMigrationKey = "lane.favorites.serverMigrationCompleted"
     @Published var localPlaylists: [LocalPlaylist] = []
@@ -658,6 +660,7 @@ final class LaneSession: ObservableObject {
             favorites = []
             likedTracks = []
             favoriteMutationsInFlight = []
+            pendingFavoriteStates = [:]
             pendingSavedPlaylists = [:]
             pendingRemovedPlaylistIDs = []
             streamResolutionCache = [:]
@@ -688,6 +691,7 @@ final class LaneSession: ObservableObject {
         favorites = []
         likedTracks = []
         favoriteMutationsInFlight = []
+        pendingFavoriteStates = [:]
         pendingSavedPlaylists = [:]
         pendingRemovedPlaylistIDs = []
         favoriteMigrationInProgress = false
@@ -1546,11 +1550,103 @@ final class LaneSession: ObservableObject {
         return output
     }
 
+    private func mergedPlaylist(
+        summary: LanePlaylist,
+        detail: LanePlaylist?,
+        loadedTracks: [TrackData]?
+    ) -> LanePlaylist {
+        let detailTrackIDs = detail?.playlistTracksIds
+        let detailTracks = detail?.playlistTracks
+        let loadedTrackIDs = loadedTracks?.compactMap(\.songId)
+        let resolvedIDs = [loadedTrackIDs, detailTrackIDs, summary.playlistTracksIds]
+            .compactMap { $0 }
+            .first { !$0.isEmpty }
+        let resolvedTracks = [loadedTracks, detailTracks, summary.playlistTracks]
+            .compactMap { $0 }
+            .first { !$0.isEmpty }
+        let resolvedCount = [
+            summary.effectiveTrackCount,
+            detail?.effectiveTrackCount ?? 0,
+            loadedTracks?.count ?? 0,
+            resolvedIDs?.count ?? 0,
+            resolvedTracks?.count ?? 0
+        ].max() ?? 0
+
+        return LanePlaylist(
+            playlistId: detail?.playlistId ?? summary.playlistId,
+            playlistImageUrl: detail?.playlistImageUrl ?? summary.playlistImageUrl,
+            playlistName: detail?.playlistName ?? summary.playlistName,
+            playlistDescription: detail?.playlistDescription ?? summary.playlistDescription,
+            playlistTracksIds: resolvedIDs,
+            playlistTracks: resolvedTracks,
+            creatorLid: detail?.creatorLid ?? summary.creatorLid,
+            platform: detail?.platform ?? summary.platform,
+            tracksCount: resolvedCount,
+            visibility: detail?.visibility ?? summary.visibility,
+            collaboratorIds: detail?.collaboratorIds ?? summary.collaboratorIds
+        )
+    }
+
+    /// `/user/playlists` is a summary endpoint and some regional deployments
+    /// currently serialize every `tracksCount` as zero. Hydrate only those
+    /// suspicious summaries from the same detail/paging APIs used by the
+    /// playlist screen, in parallel, then publish the corrected counts.
+    private func hydrateLibraryPlaylistMetadata(
+        _ playlists: [LanePlaylist],
+        token requestToken: String
+    ) async -> [String: LanePlaylist] {
+        let targets = playlists.filter {
+            $0.playlistId != "lane_likes" && $0.effectiveTrackCount == 0
+        }
+        guard !targets.isEmpty else { return [:] }
+
+        return await withTaskGroup(
+            of: (String, LanePlaylist)?.self,
+            returning: [String: LanePlaylist].self
+        ) { group in
+            for summary in targets {
+                guard let playlistID = summary.playlistId, !playlistID.isEmpty else { continue }
+                group.addTask { [weak self] in
+                    guard let self else { return nil }
+                    async let detailRequest = try? LaneAPI.shared.playlist(
+                        token: requestToken,
+                        playlistId: playlistID,
+                        platform: summary.platform
+                    )
+                    async let tracksRequest = self.loadPlaylistTrackCollection(
+                        token: requestToken,
+                        playlistId: playlistID,
+                        pageSize: 100
+                    )
+                    let (detail, tracks) = await (detailRequest, tracksRequest)
+                    return (
+                        playlistID,
+                        await self.mergedPlaylist(
+                            summary: summary,
+                            detail: detail,
+                            loadedTracks: tracks
+                        )
+                    )
+                }
+            }
+
+            var hydrated: [String: LanePlaylist] = [:]
+            for await item in group {
+                if let (playlistID, playlist) = item {
+                    hydrated[playlistID] = playlist
+                }
+            }
+            return hydrated
+        }
+    }
+
     private func loadLibrary() async {
         guard !isGuest else { return }
 
         await configureAPI()
         let requestToken = token
+        let loadGeneration = UUID()
+        libraryLoadGeneration = loadGeneration
         async let playlistsRequest = try? LaneAPI.shared.userPlaylists(token: requestToken)
         async let albumsRequest = try? LaneAPI.shared.userAlbums(token: requestToken)
         async let artistsRequest = try? LaneAPI.shared.userArtists(token: requestToken)
@@ -1562,7 +1658,7 @@ final class LaneSession: ObservableObject {
             artistsRequest,
             recentRequest
         )
-        guard token == requestToken else { return }
+        guard token == requestToken, libraryLoadGeneration == loadGeneration else { return }
 
         var effectivePlaylists = playlists ?? []
         if effectivePlaylists.isEmpty {
@@ -1594,7 +1690,7 @@ final class LaneSession: ObservableObject {
                     }
                     return ids.compactMap { byID[$0] }
                 }
-                guard token == requestToken else { return }
+                guard token == requestToken, libraryLoadGeneration == loadGeneration else { return }
                 effectivePlaylists = recovered
             }
         }
@@ -1622,13 +1718,29 @@ final class LaneSession: ObservableObject {
             }
             serverPlaylists = visiblePlaylists + pending
 
+            let hydrated = await hydrateLibraryPlaylistMetadata(
+                serverPlaylists,
+                token: requestToken
+            )
+            guard token == requestToken, libraryLoadGeneration == loadGeneration else { return }
+            if !hydrated.isEmpty {
+                serverPlaylists = serverPlaylists.map { playlist in
+                    guard let id = playlist.playlistId,
+                          let resolved = hydrated[id],
+                          resolved.effectiveTrackCount >= playlist.effectiveTrackCount else {
+                        return playlist
+                    }
+                    return resolved
+                }
+            }
+
             let likedPlaylist = serverPlaylists.first(where: { $0.playlistId == "lane_likes" })
             let directLikedData = await loadPlaylistTrackCollection(
                 token: requestToken,
                 playlistId: "lane_likes",
                 pageSize: 100
             )
-            guard token == requestToken else { return }
+            guard token == requestToken, libraryLoadGeneration == loadGeneration else { return }
 
             var likedIDs = directLikedData?.compactMap(\.songId)
             if likedIDs == nil || (likedIDs?.isEmpty == true && (likedPlaylist?.tracksCount ?? 0) > 0) {
@@ -1640,7 +1752,7 @@ final class LaneSession: ObservableObject {
                     token: requestToken,
                     playlistId: "lane_likes"
                 )
-                guard token == requestToken else { return }
+                guard token == requestToken, libraryLoadGeneration == loadGeneration else { return }
                 likedIDs = detail?.playlistTracksIds ??
                     detail?.playlistTracks?.compactMap(\.songId)
             }
@@ -1653,6 +1765,12 @@ final class LaneSession: ObservableObject {
 
             if let likedIDs {
                 let serverIDs = Set(likedIDs)
+                let confirmedPendingIDs = pendingFavoriteStates.compactMap { id, desired in
+                    serverIDs.contains(id) == desired ? id : nil
+                }
+                for id in confirmedPendingIDs {
+                    pendingFavoriteStates.removeValue(forKey: id)
+                }
                 let needsMigration = !UserDefaults.standard.bool(forKey: favoriteMigrationKey)
                 let legacyIDs: Set<String> = needsMigration
                     ? Set(favorites.subtracting(serverIDs).filter {
@@ -1662,10 +1780,20 @@ final class LaneSession: ObservableObject {
                 let pendingMigration = favoriteMigrationInProgress
                     ? favorites.subtracting(serverIDs)
                     : Set(legacyIDs)
-                favorites = serverIDs.subtracting(favoriteMutationsInFlight)
+                var reconciledFavorites = serverIDs
+                    .subtracting(favoriteMutationsInFlight)
                     .union(favorites.intersection(favoriteMutationsInFlight))
                     .union(pendingMigration)
+                for (id, shouldBeLiked) in pendingFavoriteStates {
+                    if shouldBeLiked {
+                        reconciledFavorites.insert(id)
+                    } else {
+                        reconciledFavorites.remove(id)
+                    }
+                }
+                favorites = reconciledFavorites
 
+                let previousLikedTracks = likedTracks
                 if let directLikedData {
                     likedTracks = directLikedData.map { TrackCandidate($0, refID: "lane_likes") }
                     rememberResolvedTracks(likedTracks)
@@ -1679,6 +1807,18 @@ final class LaneSession: ObservableObject {
                     )
                 }
 
+                for (id, shouldBeLiked) in pendingFavoriteStates {
+                    if shouldBeLiked {
+                        guard !likedTracks.contains(where: { $0.trackID == id }),
+                              let pendingTrack = previousLikedTracks.first(where: { $0.trackID == id }) else {
+                            continue
+                        }
+                        likedTracks.insert(pendingTrack, at: 0)
+                    } else {
+                        likedTracks.removeAll { $0.trackID == id }
+                    }
+                }
+
                 if needsMigration, !favoriteMigrationInProgress, !legacyIDs.isEmpty {
                     favoriteMigrationInProgress = true
                     Task { @MainActor in
@@ -1690,6 +1830,7 @@ final class LaneSession: ObservableObject {
                 UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")
             }
         }
+        guard token == requestToken, libraryLoadGeneration == loadGeneration else { return }
         if let albums { serverAlbums = albums }
         if let artists { serverArtists = artists }
 
@@ -4420,6 +4561,54 @@ final class LaneSession: ObservableObject {
         track.trackID ?? track.id
     }
 
+    private func favoriteStateOnServer(
+        trackID: String,
+        token requestToken: String
+    ) async -> Bool? {
+        async let detailRequest = try? LaneAPI.shared.playlist(
+            token: requestToken,
+            playlistId: "lane_likes"
+        )
+        async let tracksRequest = loadPlaylistTrackCollection(
+            token: requestToken,
+            playlistId: "lane_likes",
+            pageSize: 100
+        )
+        let (detail, tracks) = await (detailRequest, tracksRequest)
+
+        if let ids = detail?.playlistTracksIds {
+            return ids.contains(trackID)
+        }
+        if let embedded = detail?.playlistTracks {
+            return embedded.contains { $0.songId == trackID }
+        }
+        if let tracks {
+            return tracks.contains { $0.songId == trackID }
+        }
+        if detail?.effectiveTrackCount == 0 {
+            return false
+        }
+        return nil
+    }
+
+    private func waitForFavoriteState(
+        trackID: String,
+        liked: Bool,
+        token requestToken: String,
+        attempts: Int = 4
+    ) async -> Bool {
+        for attempt in 0..<attempts {
+            guard token == requestToken else { return false }
+            if await favoriteStateOnServer(trackID: trackID, token: requestToken) == liked {
+                return true
+            }
+            if attempt + 1 < attempts {
+                try? await Task.sleep(nanoseconds: 450_000_000)
+            }
+        }
+        return false
+    }
+
     func isFavorite(_ track: TrackCandidate) -> Bool {
         favorites.contains(favoriteKey(track))
     }
@@ -4438,7 +4627,9 @@ final class LaneSession: ObservableObject {
 
         let requestToken = token
         let wasLiked = favorites.contains(trackID)
+        let shouldBeLiked = !wasLiked
         let previousLikedTracks = likedTracks
+        pendingFavoriteStates[trackID] = shouldBeLiked
         if wasLiked {
             favorites.remove(trackID)
             likedTracks.removeAll { $0.trackID == trackID }
@@ -4463,6 +4654,7 @@ final class LaneSession: ObservableObject {
             )
             rememberResolvedTracks([track])
         }
+        UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")
 
         Task { @MainActor in
             defer {
@@ -4470,36 +4662,77 @@ final class LaneSession: ObservableObject {
                     favoriteMutationsInFlight.remove(trackID)
                 }
             }
-            do {
-                await configureAPI()
-                if wasLiked {
-                    let result = try await LaneAPI.shared.removeTrack(
-                        token: requestToken,
-                        playlistId: "lane_likes",
-                        trackId: trackID
-                    )
-                    try result.requireSuccess()
-                } else {
-                    let result = try await LaneAPI.shared.addTracks(
-                        token: requestToken,
-                        playlistId: "lane_likes",
-                        trackIds: [trackID]
-                    )
-                    try result.requireSuccess()
-                }
-                if token == requestToken {
-                    UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")
-                }
-            } catch {
+            await configureAPI()
+            var acceptedByServer = false
+            var confirmedOnServer = false
+            var lastError: Error?
+
+            // Adding/removing a playlist track is idempotent on Lane. A
+            // bounded retry covers a dead regional route without risking a
+            // duplicate like, and each attempt is verified against the
+            // `lane_likes` read model before UI state is reconciled.
+            for attempt in 0..<2 {
                 guard token == requestToken else { return }
+                do {
+                    let result: APIResult
+                    if wasLiked {
+                        result = try await LaneAPI.shared.removeTrack(
+                            token: requestToken,
+                            playlistId: "lane_likes",
+                            trackId: trackID
+                        )
+                    } else {
+                        result = try await LaneAPI.shared.addTracks(
+                            token: requestToken,
+                            playlistId: "lane_likes",
+                            trackIds: [trackID]
+                        )
+                    }
+                    status = result.status
+                    try result.requireSuccess()
+                    acceptedByServer = true
+                } catch {
+                    lastError = error
+                }
+
+                confirmedOnServer = await waitForFavoriteState(
+                    trackID: trackID,
+                    liked: shouldBeLiked,
+                    token: requestToken,
+                    attempts: acceptedByServer ? 4 : 1
+                )
+                if confirmedOnServer { break }
+
+                if attempt == 0 {
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                }
+            }
+
+            guard token == requestToken,
+                  pendingFavoriteStates[trackID] == shouldBeLiked else { return }
+
+            if confirmedOnServer {
+                pendingFavoriteStates.removeValue(forKey: trackID)
+                output = shouldBeLiked ? "Added to liked tracks." : "Removed from liked tracks."
+            } else if acceptedByServer {
+                // A successful write can take a moment to reach the regional
+                // read endpoint. Keep the confirmed optimistic state; the
+                // next Library refresh clears this pending marker as soon as
+                // the server exposes the same value.
+                output = shouldBeLiked
+                    ? "Like saved. Lane is updating your Library."
+                    : "Like removed. Lane is updating your Library."
+            } else {
+                pendingFavoriteStates.removeValue(forKey: trackID)
                 if wasLiked {
                     favorites.insert(trackID)
                 } else {
                     favorites.remove(trackID)
                 }
                 likedTracks = previousLikedTracks
-                output = "Could not update liked tracks: \(error.localizedDescription)"
+                output = "Could not update liked tracks: \(lastError?.localizedDescription ?? "Lane did not confirm the change")"
             }
+            UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")
         }
     }
 

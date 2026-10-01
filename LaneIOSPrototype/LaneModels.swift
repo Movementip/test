@@ -326,6 +326,19 @@ struct LanePlaylist: Decodable, Hashable {
         self.visibility = visibility
         self.collaboratorIds = collaboratorIds
     }
+
+    /// Library summaries from some Lane edges report `tracksCount: 0` even
+    /// when the same payload contains track IDs or embedded tracks. Treat all
+    /// three representations as evidence and never let a stale zero hide the
+    /// actual playlist size.
+    var effectiveTrackCount: Int {
+        [
+            0,
+            tracksCount ?? 0,
+            playlistTracksIds?.count ?? 0,
+            playlistTracks?.count ?? 0
+        ].max() ?? 0
+    }
 }
 
 

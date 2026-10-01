@@ -3217,7 +3217,7 @@ private struct APKHomePlaylistCard: View {
                 .foregroundStyle(.white)
                 .lineLimit(1)
 
-            let count = playlist.tracksCount ?? playlist.playlistTracks?.count ?? 0
+            let count = playlist.effectiveTrackCount
             Text(count == 1 ? "1 track" : "\(count) tracks")
                 .font(.system(size: 12))
                 .foregroundStyle(Color.white.opacity(0.55))
@@ -3241,7 +3241,7 @@ private struct APKHomePlaylistRow: View {
                     .foregroundStyle(.white)
                     .lineLimit(1)
 
-                let count = playlist.tracksCount ?? playlist.playlistTracks?.count ?? 0
+                let count = playlist.effectiveTrackCount
                 Text(count == 1 ? "1 track" : "\(count) tracks")
                     .font(.system(size: 12))
                     .foregroundStyle(Color.white.opacity(0.55))
@@ -3317,7 +3317,7 @@ private struct APKHomeChartCard: View {
                         .foregroundStyle(.white)
                         .lineLimit(1)
 
-                    let count = playlist.tracksCount ?? playlist.playlistTracks?.count ?? 0
+                    let count = playlist.effectiveTrackCount
                     Text("\(count) tracks")
                         .font(.system(size: 11))
                         .foregroundStyle(Color.white.opacity(0.55))

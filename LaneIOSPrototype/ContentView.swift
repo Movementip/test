@@ -111,6 +111,9 @@ private struct TelegramIcon: View {
 struct ContentView: View {
     @EnvironmentObject private var session: LaneSession
     @State private var selectedTab = 0
+    @State private var homeRootID = UUID()
+    @State private var searchRootID = UUID()
+    @State private var libraryRootID = UUID()
     @State private var showPlayer = false
     @State private var displayedWavePlaylist: LanePlaylist?
 
@@ -118,16 +121,19 @@ struct ContentView: View {
         ZStack(alignment: .bottom) {
             ZStack {
                 HomeScreen(showPlayer: $showPlayer)
+                    .id(homeRootID)
                     .opacity(selectedTab == 0 ? 1 : 0)
                     .allowsHitTesting(selectedTab == 0 && displayedWavePlaylist == nil)
                     .accessibilityHidden(selectedTab != 0 || displayedWavePlaylist != nil)
 
                 SearchScreen(showPlayer: $showPlayer, isActive: selectedTab == 1)
+                    .id(searchRootID)
                     .opacity(selectedTab == 1 ? 1 : 0)
                     .allowsHitTesting(selectedTab == 1 && displayedWavePlaylist == nil)
                     .accessibilityHidden(selectedTab != 1 || displayedWavePlaylist != nil)
 
                 LibraryScreen(showPlayer: $showPlayer, onSearch: { selectTab(1) })
+                    .id(libraryRootID)
                     .opacity(selectedTab == 2 ? 1 : 0)
                     .allowsHitTesting(selectedTab == 2 && displayedWavePlaylist == nil)
                     .accessibilityHidden(selectedTab != 2 || displayedWavePlaylist != nil)
@@ -208,11 +214,22 @@ struct ContentView: View {
     }
 
     private func selectTab(_ index: Int) {
-        if selectedTab != index {
-            closeWave()
-            withAnimation(.spring(response: 0.20, dampingFraction: 0.50)) {
-                selectedTab = index
+        closeWave()
+
+        if selectedTab == index {
+            // Match the APK and standard tab-bar behaviour: tapping the
+            // already selected item returns that tab to its root screen.
+            switch index {
+            case 0: homeRootID = UUID()
+            case 1: searchRootID = UUID()
+            case 2: libraryRootID = UUID()
+            default: break
             }
+            return
+        }
+
+        withAnimation(.spring(response: 0.20, dampingFraction: 0.50)) {
+            selectedTab = index
         }
     }
 
@@ -1599,7 +1616,7 @@ private struct PlaylistRow: View {
                     .foregroundStyle(.white)
                     .lineLimit(1)
 
-                let count = playlist.tracksCount ?? playlist.playlistTracks?.count ?? 0
+                let count = playlist.effectiveTrackCount
                 Text(count == 1 ? "1 track" : "\(count) tracks")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.58))
@@ -1761,13 +1778,10 @@ struct PlaylistDetailScreen: View {
                                 .foregroundStyle(Color.white.opacity(0.38))
                         }
 
-                        let count = !tracks.isEmpty ? tracks.count :
-                            (playlist.tracksCount ?? playlist.playlistTracksIds?.count)
-                        if let count {
-                            Text(count == 1 ? "1 track" : "\(count) tracks")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(Color.white.opacity(0.52))
-                        }
+                        let count = max(tracks.count, playlist.effectiveTrackCount)
+                        Text(count == 1 ? "1 track" : "\(count) tracks")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.52))
                     }
 
                     HStack(spacing: 16) {
@@ -4931,7 +4945,7 @@ private struct ServerPlaylistShelf: View {
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(.white)
                                     .lineLimit(1)
-                                Text(playlist.playlistDescription ?? "\(playlist.tracksCount ?? 0) tracks")
+                                Text(playlist.playlistDescription ?? "\(playlist.effectiveTrackCount) tracks")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)

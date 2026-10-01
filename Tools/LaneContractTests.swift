@@ -142,6 +142,12 @@ final class LaneMockURLProtocol: URLProtocol {
 @main
 struct LaneContractTestRunner {
     static func main() async throws {
+        let stalePlaylistSummary = try JSONDecoder().decode(
+            LanePlaylist.self,
+            from: Data(#"{"playlistId":"library-playlist","playlistTracksIds":["track-1","track-2"],"tracksCount":0}"#.utf8)
+        )
+        precondition(stalePlaylistSummary.effectiveTrackCount == 2)
+
         precondition(
             YandexPlaylistSource.normalize("lk.42") ==
                 "https://music.yandex.ru/playlists/lk.42"
