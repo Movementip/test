@@ -4702,7 +4702,7 @@ private struct DiagnosticsScreen: View {
                     )
                 ) {
                     ForEach(AudioQualityChoice.allCases) { quality in
-                        Text("(quality.rawValue) · (quality.detail)")
+                        Text("\(quality.rawValue) · \(quality.detail)")
                             .tag(quality.rawValue)
                             .disabled(quality != .basic && !session.hasPremiumAccess)
                     }
@@ -4716,6 +4716,59 @@ private struct DiagnosticsScreen: View {
                 Text("The selected tier is fixed when a track starts. Playback does not downgrade to another quality automatically.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            Section("Runtime network profile") {
+                Picker("API host", selection: $session.diagnosticHostMode) {
+                    Text("Auto").tag("auto")
+                    Text("laneapi.com").tag("global")
+                    Text("ru.laneapi.com").tag("ru")
+                }
+
+                Picker("Transport", selection: $session.diagnosticTransportMode) {
+                    Text("System URLSession").tag("system")
+                    Text("Auto fallback").tag("auto")
+                    Text("Direct TLS/DoH").tag("direct")
+                }
+
+                Picker("Media URLs", selection: $session.diagnosticMediaRoute) {
+                    Text("Original URLs").tag("original")
+                    Text("APK RU CDN rewrite").tag("apk")
+                }
+
+                Picker("/user/tracks body", selection: $session.diagnosticTrackBodyMode) {
+                    Text("TrackIds object").tag("object")
+                    Text("Raw array").tag("raw")
+                    Text("Auto-detect").tag("auto")
+                }
+
+                Picker("add-tracks body", selection: $session.diagnosticAddBodyMode) {
+                    Text("Raw array").tag("raw")
+                    Text("TrackIds object").tag("object")
+                    Text("Auto-detect").tag("auto")
+                }
+
+                Button("Restore stable profile") {
+                    session.resetDiagnosticProfileToStable()
+                }
+
+                Text("These switches apply immediately. You can test server/transport/body combinations without reinstalling the IPA.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Self-test") {
+                Button(session.diagnosticsRunning ? "Running diagnostics…" : "Run safe diagnostics") {
+                    session.runLaneDiagnostics()
+                }
+                .disabled(session.diagnosticsRunning)
+
+                ScrollView(.horizontal) {
+                    Text(session.diagnosticReport.isEmpty ? "No diagnostics run yet." : session.diagnosticReport)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                }
+                .frame(minHeight: 150)
             }
 
             Section("Request") {
@@ -4733,6 +4786,25 @@ private struct DiagnosticsScreen: View {
                     session.persist()
                     session.rawCall(path: path, method: method)
                 }
+            }
+
+            Section("Sanitized request trace") {
+                HStack {
+                    Button("Refresh trace") {
+                        session.refreshDiagnosticTrace()
+                    }
+                    Spacer()
+                    Button("Clear", role: .destructive) {
+                        session.clearDiagnosticTrace()
+                    }
+                }
+
+                ScrollView([.horizontal, .vertical]) {
+                    Text(session.diagnosticTraceText.isEmpty ? "No trace yet." : session.diagnosticTraceText)
+                        .font(.caption2.monospaced())
+                        .textSelection(.enabled)
+                }
+                .frame(minHeight: 180)
             }
 
             Section("Response") {
