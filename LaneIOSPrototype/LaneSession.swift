@@ -461,6 +461,7 @@ final class LaneSession: ObservableObject {
     private var didConfigureAPIBase = false
     private var didPrepareRegionalHost = false
     private var didAutoTuneNetwork = false
+    private var didAutoTuneMediaRoute = false
     private var configuredBackendMode: LaneBackendMode?
 
     var isGuest: Bool {
@@ -3005,6 +3006,10 @@ final class LaneSession: ObservableObject {
                 self.playbackWatchdogTask?.cancel()
                 self.activeStreamQuality = requestedQuality
                 self.streamURL = result.url
+                await self.autoTuneMediaRoute(for: result.url)
+                try Task.checkCancellation()
+                guard self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
                 try self.play(
                     urlString: result.url,
                     useCompatibilityHeaders: false,
@@ -3023,6 +3028,53 @@ final class LaneSession: ObservableObject {
                 self.playerError = self.userFacingPlaybackError(error)
                 self.output = "Playback error: \(error.localizedDescription)"
             }
+        }
+    }
+
+    private func mediaHeadProbe(_ url: URL) async -> Int? {
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 2.5
+        request.setValue("LaneMusic/1.0 (Android; Mobile)", forHTTPHeaderField: "User-Agent")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        let started = Date()
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<400).contains(http.statusCode) else {
+                return nil
+            }
+            return Int(Date().timeIntervalSince(started) * 1000)
+        } catch {
+            return nil
+        }
+    }
+
+    private func autoTuneMediaRoute(for rawURL: String) async {
+        guard !didAutoTuneMediaRoute else { return }
+        didAutoTuneMediaRoute = true
+
+        guard let original = URL(string: rawURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return
+        }
+        guard let apk = laneAPKMediaURL(rawURL),
+              apk.absoluteString != original.absoluteString else {
+            diagnosticMediaRoute = "original"
+            return
+        }
+
+        async let originalProbe = mediaHeadProbe(original)
+        async let apkProbe = mediaHeadProbe(apk)
+        let (originalMS, apkMS) = await (originalProbe, apkProbe)
+
+        switch (originalMS, apkMS) {
+        case let (.some(originalValue), .some(apkValue)):
+            diagnosticMediaRoute = apkValue < originalValue ? "apk" : "original"
+        case (.none, .some):
+            diagnosticMediaRoute = "apk"
+        default:
+            diagnosticMediaRoute = "original"
         }
     }
 
