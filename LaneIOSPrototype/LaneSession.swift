@@ -89,6 +89,7 @@ final class LaneSession: ObservableObject {
         didSet { UserDefaults.standard.set(diagnosticMediaRoute, forKey: "lane.diag.mediaRoute") }
     }
     @Published var diagnosticsRunning = false
+    @Published var mutationDiagnosticsRunning = false
     @Published var diagnosticReport = ""
     @Published var diagnosticTraceText = ""
 
@@ -900,6 +901,142 @@ final class LaneSession: ObservableObject {
             report.append("selected add body=\(diagnosticAddBodyMode)")
             report.append("media route kept=\(diagnosticMediaRoute)")
             diagnosticReport = report.joined(separator: "\n")
+        }
+    }
+
+    func runLaneMutationDiagnostics() {
+        guard !mutationDiagnosticsRunning else { return }
+        mutationDiagnosticsRunning = true
+
+        Task { @MainActor in
+            defer {
+                mutationDiagnosticsRunning = false
+                refreshDiagnosticTrace()
+            }
+
+            await configureAPI()
+            var report: [String] = ["Lane write self-test"]
+
+            guard !token.isEmpty else {
+                diagnosticReport = "Lane write self-test\nFAIL: account is not authenticated."
+                return
+            }
+
+            if account == nil {
+                await loadAccount()
+            }
+            guard let creator = account?.laneId, !creator.isEmpty else {
+                diagnosticReport = "Lane write self-test\nFAIL: Lane account ID is unavailable."
+                return
+            }
+
+            let sampleTrackID =
+                currentTrack?.trackID ??
+                recentTracks.first?.trackID ??
+                history.first?.trackID ??
+                homeTracks.first?.trackID ??
+                searchTracks.first?.trackID
+
+            guard let sampleTrackID, !sampleTrackID.isEmpty else {
+                diagnosticReport = "Lane write self-test\nFAIL: play or open at least one track first so the test has a real Lane track ID."
+                return
+            }
+
+            let marker = String(UUID().uuidString.prefix(8)).lowercased()
+            let diagnosticName = "Lane iOS diagnostic \(marker)"
+            var createdPlaylistID: String?
+
+            do {
+                let create = try await LaneAPI.shared.createPlaylist(
+                    token: token,
+                    imageURL: "",
+                    name: diagnosticName,
+                    description: "Temporary automatic API self-test. Safe to delete.",
+                    tracks: [],
+                    creatorLid: creator
+                )
+                try create.requireSuccess()
+                report.append("create playlist: PASS HTTP \(create.status)")
+
+                for attempt in 0..<5 {
+                    let playlists = try await LaneAPI.shared.userPlaylists(token: token)
+                    if let match = playlists.first(where: { $0.playlistName == diagnosticName }),
+                       let id = match.playlistId,
+                       !id.isEmpty {
+                        createdPlaylistID = id
+                        break
+                    }
+                    if attempt < 4 {
+                        try await Task.sleep(nanoseconds: 500_000_000)
+                    }
+                }
+
+                guard let playlistID = createdPlaylistID else {
+                    throw LaneAPIError.decoding("Created diagnostic playlist did not appear in /user/playlists.")
+                }
+                report.append("playlist visibility: PASS")
+
+                let add = try await LaneAPI.shared.addTracks(
+                    token: token,
+                    playlistId: playlistID,
+                    trackIds: [sampleTrackID]
+                )
+                try add.requireSuccess()
+                report.append("add-tracks: PASS HTTP \(add.status) bodyMode=\(diagnosticAddBodyMode)")
+
+                var verified = false
+                for attempt in 0..<4 {
+                    if let detail = try? await LaneAPI.shared.playlist(
+                        token: token,
+                        playlistId: playlistID
+                    ) {
+                        let ids = detail.playlistTracksIds ??
+                            detail.playlistTracks?.compactMap(\.songId) ??
+                            []
+                        if ids.contains(sampleTrackID) {
+                            verified = true
+                            break
+                        }
+                    }
+
+                    if let page = try? await LaneAPI.shared.playlistTracks(
+                        token: token,
+                        playlistId: playlistID,
+                        page: 0,
+                        pageSize: 20
+                    ),
+                    page.items.contains(where: { $0.songId == sampleTrackID }) {
+                        verified = true
+                        break
+                    }
+
+                    if attempt < 3 {
+                        try await Task.sleep(nanoseconds: 500_000_000)
+                    }
+                }
+
+                report.append(verified
+                    ? "verify persisted track: PASS"
+                    : "verify persisted track: FAIL (server did not expose added track)")
+            } catch {
+                report.append("write path: FAIL \(error.localizedDescription)")
+            }
+
+            if let createdPlaylistID {
+                do {
+                    let cleanup = try await LaneAPI.shared.deletePlaylist(
+                        token: token,
+                        playlistId: createdPlaylistID
+                    )
+                    try cleanup.requireSuccess()
+                    report.append("cleanup diagnostic playlist: PASS")
+                } catch {
+                    report.append("cleanup diagnostic playlist: FAIL \(error.localizedDescription)")
+                }
+            }
+
+            diagnosticReport = report.joined(separator: "\n")
+            await loadLibrary()
         }
     }
 
