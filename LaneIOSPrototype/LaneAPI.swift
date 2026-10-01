@@ -920,23 +920,7 @@ actor LaneAPI {
         token: String,
         query: [URLQueryItem] = []
     ) async throws -> APIResult {
-        do {
-            let first = try await request(
-                path: path,
-                method: method,
-                token: token,
-                query: query
-            )
-            if first.status < 500 {
-                return first
-            }
-        } catch {
-            // Subscribe/save/unsubscribe actions are idempotent, so a retry on
-            // the currently reachable regional edge cannot create duplicates.
-        }
-
-        _ = await prepareRegionalHost()
-        return try await request(
+        try await request(
             path: path,
             method: method,
             token: token,
