@@ -63,8 +63,41 @@ actor LaneAPI {
     private var serviceLDI = ""
     private var signingConfiguration = LaneSigningConfiguration.official
     private var timeOffsetMilliseconds: Int64 = 0
-    private var lastRegionalProbeAt: Date?
-    private var directRequiredHosts: Set<String> = []
+    private let lastWorkingRegionalBaseKey = "lane.lastWorkingRegionalBase"
+    private let diagnosticTraceKey = "lane.diag.trace"
+
+    private func diagnosticSetting(_ key: String, default fallback: String) -> String {
+        UserDefaults.standard.string(forKey: key) ?? fallback
+    }
+
+    private func appendDiagnosticTrace(_ message: String) {
+        let formatter = ISO8601DateFormatter()
+        let line = "\(formatter.string(from: Date())) \(message)"
+        var trace = UserDefaults.standard.stringArray(forKey: diagnosticTraceKey) ?? []
+        trace.append(line)
+        if trace.count > 120 {
+            trace.removeFirst(trace.count - 120)
+        }
+        UserDefaults.standard.set(trace, forKey: diagnosticTraceKey)
+    }
+
+    func diagnosticTrace() -> [String] {
+        UserDefaults.standard.stringArray(forKey: diagnosticTraceKey) ?? []
+    }
+
+    func clearDiagnosticTrace() {
+        UserDefaults.standard.removeObject(forKey: diagnosticTraceKey)
+    }
+
+    private func diagnosticBodyShape(_ json: Any?) -> String {
+        guard let json else { return "none" }
+        if let array = json as? [Any] { return "array[\(array.count)]" }
+        if let dict = json as? [String: Any] {
+            return "object{\(dict.keys.sorted().joined(separator: ","))}"
+        }
+        return String(describing: type(of: json))
+    }
+
     private let lastWorkingRegionalBaseKey = "lane.lastWorkingRegionalBase"
 
     func setBase(_ value: String) {
@@ -88,7 +121,11 @@ actor LaneAPI {
     private func officialRegionalBases(preferCurrent: Bool = false) -> [URL] {
         let primary = URL(string: "https://laneapi.com")!
         let russian = URL(string: "https://ru.laneapi.com")!
-        let officialHosts = Set([primary.host, russian.host].compactMap { $0 })
+        let mode = diagnosticSetting("lane.diag.host", default: "auto")
+
+        if mode == "global" { return [primary] }
+        if mode == "ru" { return [russian] }
+
         let timezonePreferred = isRussianLaneTimezone(TimeZone.current.identifier) ? russian : primary
         var candidates: [URL] = []
 
@@ -97,34 +134,19 @@ actor LaneAPI {
             candidates.append(candidate)
         }
 
-        if preferCurrent {
-            // Safe reads should use the host that most recently succeeded first.
-            // The previous timezone-first ordering made every screen pay the
-            // timeout of a slow edge again after we had already found a faster one.
-            appendOnce(base)
+        // Stable-build ordering: use the already-working base first. Only then
+        // try the other official regions. This avoids paying a dead-host timeout
+        // on every screen refresh.
+        appendOnce(base)
 
-            if let saved = UserDefaults.standard.string(forKey: lastWorkingRegionalBaseKey),
-               let savedURL = URL(string: saved),
-               let host = savedURL.host,
-               officialHosts.contains(host) {
-                appendOnce(savedURL)
-            }
-        }
-
-        appendOnce(timezonePreferred)
-
-        if !preferCurrent,
-           let saved = UserDefaults.standard.string(forKey: lastWorkingRegionalBaseKey),
-           let savedURL = URL(string: saved),
-           let host = savedURL.host,
-           officialHosts.contains(host) {
+        if let saved = UserDefaults.standard.string(forKey: lastWorkingRegionalBaseKey),
+           let savedURL = URL(string: saved) {
             appendOnce(savedURL)
         }
 
-        for candidate in [base, primary, russian] {
-            appendOnce(candidate)
-        }
-
+        appendOnce(timezonePreferred)
+        appendOnce(primary)
+        appendOnce(russian)
         return candidates
     }
 
@@ -174,14 +196,9 @@ actor LaneAPI {
         _ request: URLRequest,
         directTimeout: TimeInterval
     ) async throws -> (Data, HTTPURLResponse) {
-        let isBNITSigned = request.value(forHTTPHeaderField: "X-Core-Token") != nil
-        let host = request.url?.host ?? ""
+        let mode = diagnosticSetting("lane.diag.transport", default: "system")
 
-        // A /time probe records hosts that are reachable only through the
-        // Android-style DoH/direct-TLS path. Use that path from the outset for
-        // signed mutations too; otherwise likes/import/library saves would fail
-        // without VPN even though the probe had already proven the host works.
-        if isBNITSigned, directRequiredHosts.contains(host) {
+        if mode == "direct" {
             let direct = try await AndroidNetworkTransport.data(
                 for: request,
                 timeout: directTimeout
@@ -189,7 +206,6 @@ actor LaneAPI {
             return (direct.data, direct.response)
         }
 
-        // Normal case: pooled URLSession/HTTP2 is faster.
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else {
@@ -197,12 +213,7 @@ actor LaneAPI {
             }
             return (data, http)
         } catch {
-            // Do not replay an already-signed request after an ambiguous
-            // transport failure. Safe requests are rebuilt/re-signed by the
-            // regional loop; mutations will re-probe before the next attempt.
-            guard signingConfiguration.mode == .official, !isBNITSigned else {
-                throw error
-            }
+            guard mode == "auto" else { throw error }
 
             let direct = try await AndroidNetworkTransport.data(
                 for: request,
@@ -410,7 +421,7 @@ actor LaneAPI {
             // Lane Android 1.4.7's kotlinx-serialization converter sends this
             // exact media type. Keep it byte-for-byte compatible because the
             // /user/tracks validator is stricter than most Lane endpoints.
-            request.setValue("application/json; charset=UTF8", forHTTPHeaderField: "Content-Type")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: json)
         }
 
@@ -428,10 +439,6 @@ actor LaneAPI {
     ) async throws -> APIResult {
         let upperMethod = method.uppercased()
         let normalizedPath = "/" + path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-
-        // Most Lane reads are GETs, but several legacy mutations are GETs too.
-        // Exclude them explicitly so regional retry can never perform an action
-        // twice. /user/tracks is the only read-only POST used by Android 1.4.7.
         let mutatingGETPaths: Set<String> = [
             "/createUserOrLogin",
             "/delete-playlist",
@@ -444,157 +451,99 @@ actor LaneAPI {
             "/user/playlist/remove-track"
         ]
         let readOnlyPOSTPaths: Set<String> = ["/user/tracks"]
-        let canFailOverRegionalHost =
+        let canFailOver =
             (upperMethod == "GET" && !mutatingGETPaths.contains(normalizedPath)) ||
             (upperMethod == "POST" && readOnlyPOSTPaths.contains(normalizedPath))
-
-        // Mutations cannot be blindly retried because the first request may
-        // already have committed. Instead, probe the official regions before
-        // sending a mutation and issue it once against the currently reachable
-        // host. This is what makes likes/library actions survive VPN changes
-        // without risking duplicate writes.
-        if signingConfiguration.mode == .official, !canFailOverRegionalHost {
-            // Mutations are single-shot, so verify the region before writing.
-            // Keep that verification briefly: a 1,000-track import can issue
-            // dozens of add-tracks mutations and probing /time before every one
-            // would add seconds of avoidable latency.
-            let probeIsFresh = lastRegionalProbeAt.map {
-                Date().timeIntervalSince($0) < 15
-            } ?? false
-            if !probeIsFresh {
-                _ = await prepareRegionalHost()
-            }
-        }
 
         let candidates: [URL]
         if let candidateBases, !candidateBases.isEmpty {
             candidates = candidateBases
-        } else if signingConfiguration.mode == .official, canFailOverRegionalHost {
-            // Re-evaluate region ordering for every safe read so switching VPN
-            // state does not leave the app pinned to a stale global endpoint.
+        } else if signingConfiguration.mode == .official, canFailOver {
             candidates = officialRegionalBases(preferCurrent: true)
         } else {
-            candidates = [base]
+            let hostMode = diagnosticSetting("lane.diag.host", default: "auto")
+            if hostMode == "global" {
+                candidates = [URL(string: "https://laneapi.com")!]
+            } else if hostMode == "ru" {
+                candidates = [URL(string: "https://ru.laneapi.com")!]
+            } else {
+                candidates = [base]
+            }
+        }
+
+        let timeout: TimeInterval
+        switch normalizedPath {
+        case "/track/stream": timeout = 6
+        case "/user/tracks": timeout = 8
+        case "/user/import/preview": timeout = 25
+        default: timeout = upperMethod == "GET" ? 7 : 20
         }
 
         var lastError: Error?
         var lastResult: APIResult?
-        // Stream resolution already has endpoint/quality compatibility
-        // fallbacks at the player layer. One pass over both regional hosts is
-        // enough here and prevents the UI appearing to load forever offline.
-        let retryRounds = 1
-        let longReadPaths: Set<String> = [
-            "/user/import/preview",
-            "/user/tracks",
-            "/platforms/search",
-            "/platforms/album",
-            "/platforms/artist",
-            "/track/stream",
-            "/track/download"
-        ]
-        let requestTimeout: TimeInterval = canFailOverRegionalHost
-            ? (normalizedPath == "/user/import/preview"
-                ? 30
-                : (normalizedPath == "/track/stream"
-                    ? 6
-                    : (normalizedPath == "/user/tracks"
-                        ? 6
-                        : (longReadPaths.contains(normalizedPath) ? 10 : 7))))
-            : 20
 
-        for round in 0..<retryRounds {
-            var shouldRetryRound = false
+        for (index, targetBase) in candidates.enumerated() {
+            let started = Date()
+            do {
+                let unsigned = try build(
+                    path: path,
+                    method: method,
+                    token: token,
+                    query: query,
+                    headers: headers,
+                    json: json,
+                    baseURL: targetBase
+                )
+                let signer = signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
+                let signed = try signer.sign(unsigned, body: unsigned.httpBody)
+                var request = signed
+                request.timeoutInterval = timeout
 
-            for (index, targetBase) in candidates.enumerated() {
-                do {
-                    let unsigned = try build(
-                        path: path,
-                        method: method,
-                        token: token,
-                        query: query,
-                        headers: headers,
-                        json: json,
-                        baseURL: targetBase
-                    )
+                let (rawData, http) = try await performOfficialRequest(
+                    request,
+                    directTimeout: min(max(timeout, 4), 10)
+                )
+                let data = try decodeOfficialTransport(rawData, response: http)
+                let result = APIResult(
+                    status: http.statusCode,
+                    headers: http.allHeaderFields,
+                    data: data
+                )
+                lastResult = result
 
-                    let signer = signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
-                    let signed = try signer.sign(unsigned, body: unsigned.httpBody)
+                let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+                appendDiagnosticTrace(
+                    "\(upperMethod) \(normalizedPath) host=\(targetBase.host ?? "?") body=\(diagnosticBodyShape(json)) -> \(http.statusCode) \(elapsed)ms"
+                )
 
-                    var request = signed
-                    request.timeoutInterval = requestTimeout
-
-                    let (rawData, http) = try await performOfficialRequest(
-                        request,
-                        directTimeout: min(max(requestTimeout, 5), 12)
-                    )
-
-                    let data = try decodeOfficialTransport(rawData, response: http)
-                    let result = APIResult(
-                        status: http.statusCode,
-                        headers: http.allHeaderFields,
-                        data: data
-                    )
-                    lastResult = result
-
-                    if (200..<400).contains(http.statusCode) {
-                        // A regional edge can have album metadata while its
-                        // track index still answers [] for the same IDs. This
-                        // POST is read-only in the APK, so a fresh signed read
-                        // against the other official edge is safe. Do not
-                        // remember an empty response as a working catalog.
-                        let emptyTrackResolution = normalizedPath == "/user/tracks" &&
-                            ((try? JSONSerialization.jsonObject(with: data)) as? [Any])?.isEmpty == true
-                        if emptyTrackResolution, index + 1 < candidates.count {
-                            continue
-                        }
-                        if signingConfiguration.mode == .official, !emptyTrackResolution {
-                            rememberWorkingRegionalBase(targetBase)
-                        } else if signingConfiguration.mode != .official {
-                            base = targetBase
-                        }
-                        return result
-                    }
-
-                    let replayRejected = http.statusCode == 401 &&
-                        result.pretty.localizedCaseInsensitiveContains("REPLAY_ATTACK_DETECTED")
-                    let transient = http.statusCode == 408 ||
-                        http.statusCode == 425 ||
-                        http.statusCode == 429 ||
-                        (500...599).contains(http.statusCode) ||
-                        (canFailOverRegionalHost && replayRejected)
-                    shouldRetryRound = shouldRetryRound || transient
-
-                    // Safe reads may move to the other regional edge. Mutation
-                    // requests never enter this branch, so they remain single-shot.
-                    let definitiveStreamRejection = normalizedPath == "/track/stream" &&
-                        http.statusCode == 403 &&
-                        result.pretty.localizedCaseInsensitiveContains("PREMIUM_REQUIRED")
-                    if canFailOverRegionalHost,
-                       !definitiveStreamRejection,
-                       index + 1 < candidates.count {
-                        continue
-                    }
-
-                    if !transient || round + 1 >= retryRounds {
-                        return result
-                    }
-                } catch {
-                    lastError = error
-                    shouldRetryRound = true
-                    if index + 1 < candidates.count {
-                        continue
-                    }
+                if (200..<400).contains(http.statusCode) {
+                    rememberWorkingRegionalBase(targetBase)
+                    return result
                 }
+
+                let retryable = http.statusCode == 408 ||
+                    http.statusCode == 425 ||
+                    http.statusCode == 429 ||
+                    (500...599).contains(http.statusCode)
+
+                if canFailOver, retryable, index + 1 < candidates.count {
+                    continue
+                }
+                return result
+            } catch {
+                let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+                appendDiagnosticTrace(
+                    "\(upperMethod) \(normalizedPath) host=\(targetBase.host ?? "?") body=\(diagnosticBodyShape(json)) -> ERROR \(elapsed)ms \(error.localizedDescription)"
+                )
+                lastError = error
+                if canFailOver, index + 1 < candidates.count {
+                    continue
+                }
+                break
             }
-
-            guard shouldRetryRound, round + 1 < retryRounds else { break }
-            try? await Task.sleep(nanoseconds: round == 0 ? 350_000_000 : 750_000_000)
         }
 
-        if let lastResult {
-            return lastResult
-        }
-
+        if let lastResult { return lastResult }
         throw lastError ?? LaneAPIError.emptyResponse
     }
 
@@ -1021,25 +970,29 @@ actor LaneAPI {
         let clean = ids
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && seen.insert($0).inserted }
-
         guard !clean.isEmpty else { return [] }
 
-        let query = [URLQueryItem(name: "prefetch", value: prefetch ? "true" : "false")]
-        let bodies: [Any] = [
-            clean,
-            ["trackIds": clean]
-        ]
+        let mode = diagnosticSetting("lane.diag.trackBody", default: "object")
+        let payloads: [Any]
+        switch mode {
+        case "raw":
+            payloads = [clean]
+        case "auto":
+            payloads = [["trackIds": clean], clean]
+        default:
+            payloads = [["trackIds": clean]]
+        }
 
-        var lastResult: APIResult?
-        for body in bodies {
+        var last: APIResult?
+        for payload in payloads {
             let result = try await request(
                 path: "/user/tracks",
                 method: "POST",
                 token: token,
-                query: query,
-                json: body
+                query: [.init(name: "prefetch", value: prefetch ? "true" : "false")],
+                json: payload
             )
-            lastResult = result
+            last = result
 
             if (200..<300).contains(result.status) {
                 if let tracks = try? JSONDecoder().decode([TrackData].self, from: result.data) {
@@ -1053,14 +1006,14 @@ actor LaneAPI {
 
             let invalidBody = result.status == 400 &&
                 result.pretty.localizedCaseInsensitiveContains("INVALID_TRACK_IDS_BODY")
-            if invalidBody {
+            if mode == "auto", invalidBody {
                 continue
             }
             throw LaneAPIError.http(result.status, result.pretty)
         }
 
-        if let lastResult {
-            throw LaneAPIError.http(lastResult.status, lastResult.pretty)
+        if let last {
+            throw LaneAPIError.http(last.status, last.pretty)
         }
         throw LaneAPIError.emptyResponse
     }
@@ -1221,29 +1174,37 @@ actor LaneAPI {
             .filter { !$0.isEmpty }
         guard !clean.isEmpty else { throw LaneAPIError.emptyResponse }
 
-        let query = [URLQueryItem(name: "playlistId", value: playlistId)]
-        let first = try await request(
-            path: "/user/playlist/add-tracks",
-            method: "POST",
-            token: token,
-            query: query,
-            json: clean
-        )
-
-        guard first.status == 400,
-              first.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY") else {
-            return first
+        let mode = diagnosticSetting("lane.diag.addBody", default: "raw")
+        let payloads: [Any]
+        switch mode {
+        case "object":
+            payloads = [["trackIds": clean]]
+        case "auto":
+            payloads = [clean, ["trackIds": clean]]
+        default:
+            payloads = [clean]
         }
 
-        // A 400 body-validation rejection means the first mutation did not
-        // commit, so trying the alternate serializer shape is safe.
-        return try await request(
-            path: "/user/playlist/add-tracks",
-            method: "POST",
-            token: token,
-            query: query,
-            json: ["trackIds": clean]
-        )
+        var last: APIResult?
+        for payload in payloads {
+            let result = try await request(
+                path: "/user/playlist/add-tracks",
+                method: "POST",
+                token: token,
+                query: [.init(name: "playlistId", value: playlistId)],
+                json: payload
+            )
+            last = result
+
+            let invalidBody = result.status == 400 &&
+                result.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY")
+            if mode == "auto", invalidBody {
+                continue
+            }
+            return result
+        }
+
+        return last ?? APIResult(status: 0, headers: [:], data: Data())
     }
 
     func removeTrack(token: String, playlistId: String, trackId: String) async throws -> APIResult {
