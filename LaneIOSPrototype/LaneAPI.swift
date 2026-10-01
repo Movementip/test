@@ -98,8 +98,6 @@ actor LaneAPI {
         return String(describing: type(of: json))
     }
 
-    private let lastWorkingRegionalBaseKey = "lane.lastWorkingRegionalBase"
-
     func setBase(_ value: String) {
         if let url = URL(string: value) {
             base = url
