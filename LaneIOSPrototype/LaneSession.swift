@@ -2313,10 +2313,11 @@ final class LaneSession: ObservableObject {
             )
         }
 
-        // Exact APK input comes first. A canonical URL without share/tracking
-        // parameters is a safe fallback for Yandex links copied from the app.
+        // Try the stable URL first so tracking parameters copied from a share
+        // sheet cannot send Lane through a slow redirect chain. The exact APK
+        // input remains a fallback for a server that expects the original form.
         var candidates: [String] = []
-        for candidate in [source, normalizedYandexID].compactMap({ $0 })
+        for candidate in [normalizedYandexID, source].compactMap({ $0 })
             where !candidates.contains(candidate) {
             candidates.append(candidate)
         }
@@ -2338,10 +2339,12 @@ final class LaneSession: ObservableObject {
             } catch {
                 lastError = error
                 let description = error.localizedDescription
-                let retryable = description.localizedCaseInsensitiveContains("timed out") ||
-                    description.localizedCaseInsensitiveContains("HTTP 5") ||
-                    description.localizedCaseInsensitiveContains("DATA_ACCESS_ERROR")
-                if !retryable { break }
+                let malformedLink = description.localizedCaseInsensitiveContains("HTTP 400") ||
+                    description.localizedCaseInsensitiveContains("HTTP 404")
+                // A timeout/5xx has already exercised LaneAPI's regional
+                // failover; repeating the same playlist in a different textual
+                // form only doubles the wait. Move straight to direct metadata.
+                if !malformedLink { break }
             }
         }
 
