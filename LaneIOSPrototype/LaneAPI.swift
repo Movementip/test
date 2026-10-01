@@ -108,6 +108,44 @@ actor LaneAPI {
         base.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
+    func diagnosticTimeProbe(baseURL: String) async -> String {
+        guard let base = URL(string: baseURL) else { return "invalid URL" }
+        let url = base.appendingPathComponent("time")
+
+        func elapsedMS(_ start: Date) -> Int {
+            Int(Date().timeIntervalSince(start) * 1000)
+        }
+
+        var parts: [String] = []
+
+        do {
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.timeoutInterval = 4
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            let started = Date()
+            let (_, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            parts.append("system=\(status)/\(elapsedMS(started))ms")
+        } catch {
+            parts.append("system=ERR/\(error.localizedDescription)")
+        }
+
+        do {
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.timeoutInterval = 4
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            let started = Date()
+            let direct = try await AndroidNetworkTransport.data(for: request, timeout: 4)
+            parts.append("direct=\(direct.response.statusCode)/\(elapsedMS(started))ms")
+        } catch {
+            parts.append("direct=ERR/\(error.localizedDescription)")
+        }
+
+        return parts.joined(separator: " ")
+    }
+
     func setServiceLDI(_ value: String) {
         serviceLDI = value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
