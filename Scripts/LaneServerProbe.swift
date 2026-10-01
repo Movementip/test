@@ -56,7 +56,9 @@ enum LaneProbe {
         request.setValue("android", forHTTPHeaderField: "X-Platform")
         request.setValue("dark", forHTTPHeaderField: "X-Theme")
         request.setValue("LaneMusic/1.0 (Android; Mobile)", forHTTPHeaderField: "User-Agent")
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         if let json {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: json)
@@ -163,6 +165,29 @@ enum LaneProbe {
                 print("\(host) /time: \(probe.text)")
             } else {
                 print("\(host) /time: unavailable")
+            }
+        }
+
+        // These endpoints exercise the real BNIT signing/encryption path
+        // without needing a user's bearer token. That lets CI catch signer or
+        // regional transport regressions before another IPA is installed.
+        let publicLDI = ldi.isEmpty ? "0123456789abcdef" : ldi
+        for host in hosts {
+            let offset = offsets[host] ?? 0
+            for path in ["/config", "/reserve"] {
+                do {
+                    let req = try makeRequest(
+                        host: host,
+                        path: path,
+                        token: "",
+                        ldi: publicLDI,
+                        offset: offset
+                    )
+                    let res = try await send(req)
+                    print("  signed \(path) @ \(host): HTTP \(res.status) \(res.elapsedMS)ms code=\(errorCode(res.data))")
+                } catch {
+                    print("  signed \(path) @ \(host): ERROR \(error.localizedDescription)")
+                }
             }
         }
 
