@@ -2220,17 +2220,24 @@ final class LaneSession: ObservableObject {
             return ids
         }
 
-        guard result.status == 400,
-              result.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY") else {
+        guard result.status == 400 else {
             throw LaneAPIError.http(result.status, result.pretty)
         }
+
+        // *_BODY means the JSON shape itself is wrong. Splitting the same
+        // malformed request down to one track can never fix it and was the
+        // reason imports appeared to "check every track" while saving none.
+        if result.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY") {
+            throw LaneAPIError.http(result.status, result.pretty)
+        }
+
         guard ids.count > 1 else {
             onChecked(1)
             return []
         }
 
-        // Only an explicit validation rejection is safe to split. A timeout
-        // or ambiguous transport failure still stops immediately.
+        // A non-body 400 can be track-specific. Bisect only in that case so
+        // one bad source/canonical ID does not block the rest of the batch.
         let middle = ids.count / 2
         let left = try await addImportIDsBySplitting(
             Array(ids[..<middle]), into: playlistID, onChecked: onChecked
