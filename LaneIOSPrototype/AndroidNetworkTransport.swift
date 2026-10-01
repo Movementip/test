@@ -394,6 +394,15 @@ func laneRoutedMediaURL(_ rawValue: String?) -> URL? {
     guard var value = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
           !value.isEmpty else { return nil }
 
+    // Stable pre-regression builds used the media URL exactly as returned by
+    // Lane. Keep that as the default. The APK-style RU CDN rewrite remains
+    // available from Diagnostics so it can be tested on the actual carrier
+    // without another IPA reinstall.
+    let mediaRoute = UserDefaults.standard.string(forKey: "lane.diag.mediaRoute") ?? "original"
+    guard mediaRoute == "apk" else {
+        return URL(string: value)
+    }
+
     let russianZones: Set<String> = [
         "Europe/Kaliningrad", "Europe/Moscow", "Europe/Simferopol", "Europe/Kirov",
         "Europe/Astrakhan", "Europe/Volgograd", "Europe/Saratov", "Europe/Ulyanovsk",
