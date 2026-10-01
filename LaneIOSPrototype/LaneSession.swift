@@ -79,10 +79,10 @@ final class LaneSession: ObservableObject {
     @Published var diagnosticTransportMode = UserDefaults.standard.string(forKey: "lane.diag.transport") ?? "system" {
         didSet { UserDefaults.standard.set(diagnosticTransportMode, forKey: "lane.diag.transport") }
     }
-    @Published var diagnosticTrackBodyMode = UserDefaults.standard.string(forKey: "lane.diag.trackBody") ?? "object" {
+    @Published var diagnosticTrackBodyMode = UserDefaults.standard.string(forKey: "lane.diag.trackBody") ?? "auto" {
         didSet { UserDefaults.standard.set(diagnosticTrackBodyMode, forKey: "lane.diag.trackBody") }
     }
-    @Published var diagnosticAddBodyMode = UserDefaults.standard.string(forKey: "lane.diag.addBody") ?? "raw" {
+    @Published var diagnosticAddBodyMode = UserDefaults.standard.string(forKey: "lane.diag.addBody") ?? "auto" {
         didSet { UserDefaults.standard.set(diagnosticAddBodyMode, forKey: "lane.diag.addBody") }
     }
     @Published var diagnosticMediaRoute = UserDefaults.standard.string(forKey: "lane.diag.mediaRoute") ?? "original" {
@@ -456,6 +456,7 @@ final class LaneSession: ObservableObject {
     private var streamResolutionCache: [String: (result: TrackStreamingResult, expiresAt: Date)] = [:]
     private var didConfigureAPIBase = false
     private var didPrepareRegionalHost = false
+    private var didAutoTuneNetwork = false
     private var configuredBackendMode: LaneBackendMode?
 
     var isGuest: Bool {
@@ -674,9 +675,6 @@ final class LaneSession: ObservableObject {
     }
 
     private func configureAPI() async {
-        // Restore the stable pre-regression behaviour: configure the API base
-        // once and let successful reads remember the working regional host.
-        // Do not probe/switch transports before every request.
         let modeChanged = configuredBackendMode != backendMode
         if !didConfigureAPIBase || modeChanged || backendMode == .custom {
             await LaneAPI.shared.setBase(baseURL)
@@ -684,6 +682,7 @@ final class LaneSession: ObservableObject {
         }
 
         if modeChanged {
+            didAutoTuneNetwork = false
             configuredBackendMode = backendMode
         }
 
@@ -695,6 +694,18 @@ final class LaneSession: ObservableObject {
                 apiKey: apiKey
             )
         )
+
+        // Test the real network once per app session before the first signed
+        // request. This chooses system vs direct transport and global vs RU
+        // Lane host without requiring another IPA reinstall.
+        if backendMode == .official, !didAutoTuneNetwork {
+            didAutoTuneNetwork = true
+            let profile = await LaneAPI.shared.autoTuneNetworkProfile()
+            diagnosticHostMode = UserDefaults.standard.string(forKey: "lane.diag.host") ?? "auto"
+            diagnosticTransportMode = UserDefaults.standard.string(forKey: "lane.diag.transport") ?? "system"
+            baseURL = await LaneAPI.shared.currentBaseURL()
+            diagnosticReport = "Auto-selected network: \(profile)"
+        }
     }
 
     func prepareAPI() async {
@@ -729,10 +740,10 @@ final class LaneSession: ObservableObject {
     func resetDiagnosticProfileToStable() {
         diagnosticHostMode = "auto"
         diagnosticTransportMode = "system"
-        diagnosticTrackBodyMode = "object"
-        diagnosticAddBodyMode = "raw"
+        diagnosticTrackBodyMode = "auto"
+        diagnosticAddBodyMode = "auto"
         diagnosticMediaRoute = "original"
-        diagnosticReport = "Stable profile restored: Auto host, System transport, original media URLs, TrackIds object, Add-tracks raw array."
+        diagnosticReport = "Compatibility profile restored: Auto host, System transport, original media URLs, automatic track-body detection."
     }
 
     func clearDiagnosticTrace() {
