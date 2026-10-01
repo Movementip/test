@@ -306,20 +306,23 @@ final class LaneSession: ObservableObject {
                 prefetch: prefetch
             )
         } catch {
-            let invalidBody = error.localizedDescription
-                .localizedCaseInsensitiveContains("INVALID_TRACK_IDS_BODY")
-            guard invalidBody else { throw error }
-
-            // The current backend rejects a whole request when either its
-            // accepted batch size is exceeded or one stale platform ID is
-            // present. Split until the valid IDs resolve; a single invalid ID
-            // is skipped without discarding the rest of the playlist.
-            guard ids.count > 1 else {
-                output = "Skipped an unresolved source track: \(ids[0])"
-                trackResolveMessage = "Lane rejected a listed track ID (INVALID_TRACK_IDS_BODY). Try again."
-                return []
+            let text = error.localizedDescription
+            if text.localizedCaseInsensitiveContains("INVALID_TRACK_IDS_BODY") {
+                // This is a serializer/body-contract rejection, not evidence
+                // that one particular track is bad. LaneAPI already tried the
+                // compatible body shapes in auto mode; bisecting the same body
+                // only multiplies requests and made albums/imports painfully slow.
+                throw error
             }
 
+            guard case let LaneAPIError.http(status, _) = error,
+                  status == 400,
+                  ids.count > 1 else {
+                throw error
+            }
+
+            // For other 400s only, isolate a genuinely stale/unsupported ID
+            // without discarding valid tracks from the album/playlist.
             let middle = ids.count / 2
             let left = try await resolveTrackDataResilient(
                 Array(ids[..<middle]),
