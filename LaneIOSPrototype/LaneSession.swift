@@ -1735,33 +1735,44 @@ final class LaneSession: ObservableObject {
             }
 
             let likedPlaylist = serverPlaylists.first(where: { $0.playlistId == "lane_likes" })
-            let directLikedData = await loadPlaylistTrackCollection(
+            async let directLikedRequest = loadPlaylistTrackCollection(
                 token: requestToken,
                 playlistId: "lane_likes",
                 pageSize: 100
             )
+            async let likedDetailRequest = try? LaneAPI.shared.playlist(
+                token: requestToken,
+                playlistId: "lane_likes"
+            )
+            let (directLikedData, likedDetail) = await (directLikedRequest, likedDetailRequest)
             guard token == requestToken, libraryLoadGeneration == loadGeneration else { return }
 
-            var likedIDs = directLikedData?.compactMap(\.songId)
-            if likedIDs == nil || (likedIDs?.isEmpty == true && (likedPlaylist?.tracksCount ?? 0) > 0) {
-                likedIDs = likedPlaylist?.playlistTracksIds
+            // A regional paging endpoint may temporarily return an empty page
+            // while /user/playlists or /playlist/lane_likes already contains
+            // the real IDs (this is also how the APK obtains liked songs).
+            // Merge every available representation instead of allowing that
+            // empty page or a stale tracksCount=0 to erase server-side likes.
+            var likedIDsBuffer: [String] = []
+            var likedIDSet = Set<String>()
+            func appendLikedIDs(_ ids: [String]?) {
+                for id in ids ?? [] where !id.isEmpty && likedIDSet.insert(id).inserted {
+                    likedIDsBuffer.append(id)
+                }
             }
+            appendLikedIDs(directLikedData?.compactMap(\.songId))
+            appendLikedIDs(likedDetail?.playlistTracks?.compactMap(\.songId))
+            appendLikedIDs(likedDetail?.playlistTracksIds)
+            appendLikedIDs(likedPlaylist?.playlistTracks?.compactMap(\.songId))
+            appendLikedIDs(likedPlaylist?.playlistTracksIds)
 
-            if likedIDs == nil || (likedIDs?.isEmpty == true && (likedPlaylist?.tracksCount ?? 0) > 0) {
-                let detail = try? await LaneAPI.shared.playlist(
-                    token: requestToken,
-                    playlistId: "lane_likes"
-                )
-                guard token == requestToken, libraryLoadGeneration == loadGeneration else { return }
-                likedIDs = detail?.playlistTracksIds ??
-                    detail?.playlistTracks?.compactMap(\.songId)
-            }
-
-            if let count = likedPlaylist?.tracksCount,
-               count > (likedIDs?.count ?? 0),
-               directLikedData == nil {
-                likedIDs = nil
-            }
+            let didReadLikedState = directLikedData != nil || likedDetail != nil || likedPlaylist != nil
+            let expectedLikedCount = max(
+                likedDetail?.effectiveTrackCount ?? 0,
+                likedPlaylist?.effectiveTrackCount ?? 0
+            )
+            let likedIDs: [String]? = expectedLikedCount > likedIDsBuffer.count && likedIDsBuffer.isEmpty
+                ? nil
+                : (didReadLikedState ? likedIDsBuffer : nil)
 
             if let likedIDs {
                 let serverIDs = Set(likedIDs)
@@ -1794,8 +1805,19 @@ final class LaneSession: ObservableObject {
                 favorites = reconciledFavorites
 
                 let previousLikedTracks = likedTracks
-                if let directLikedData {
-                    likedTracks = directLikedData.map { TrackCandidate($0, refID: "lane_likes") }
+                var embeddedLikedData: [TrackData] = []
+                var embeddedLikedIDs = Set<String>()
+                for track in (directLikedData ?? []) +
+                    (likedDetail?.playlistTracks ?? []) +
+                    (likedPlaylist?.playlistTracks ?? []) {
+                    let key = track.songId ?? "\(track.title ?? "")|\(track.artistsDisplayedName ?? "")"
+                    if embeddedLikedIDs.insert(key).inserted {
+                        embeddedLikedData.append(track)
+                    }
+                }
+
+                if !embeddedLikedData.isEmpty {
+                    likedTracks = embeddedLikedData.map { TrackCandidate($0, refID: "lane_likes") }
                     rememberResolvedTracks(likedTracks)
                 } else if likedIDs.isEmpty {
                     likedTracks = []
@@ -2715,20 +2737,18 @@ final class LaneSession: ObservableObject {
     ) async throws -> Set<String> {
         let cached = serverPlaylists.first { $0.playlistId == playlistID }
 
-        // Newly created/empty playlists already carry enough information in
-        // Library. Do not block the first import on a second details request.
+        // Newly created playlists with explicit IDs already carry enough
+        // information in Library. A bare tracksCount=0 is not authoritative:
+        // some Lane summaries currently return that value for non-empty lists.
         if !forceRemoteRead,
            let ids = cached?.playlistTracksIds,
-           !ids.isEmpty || cached?.tracksCount == 0 {
+           !ids.isEmpty {
             return Set(ids.filter { !$0.isEmpty })
         }
         if !forceRemoteRead,
            let tracks = cached?.playlistTracks,
-           !tracks.isEmpty || cached?.tracksCount == 0 {
+           !tracks.isEmpty {
             return Set(tracks.compactMap(\.songId).filter { !$0.isEmpty })
-        }
-        if !forceRemoteRead, cached?.tracksCount == 0 {
-            return []
         }
 
         let playlist = try await LaneAPI.shared.playlist(
@@ -2737,16 +2757,11 @@ final class LaneSession: ObservableObject {
             platform: cached?.platform
         )
 
-        if let ids = playlist.playlistTracksIds,
-           !ids.isEmpty || playlist.tracksCount == 0 {
+        if let ids = playlist.playlistTracksIds, !ids.isEmpty {
             return Set(ids.filter { !$0.isEmpty })
         }
-        if let tracks = playlist.playlistTracks,
-           !tracks.isEmpty || playlist.tracksCount == 0 {
+        if let tracks = playlist.playlistTracks, !tracks.isEmpty {
             return Set(tracks.compactMap(\.songId).filter { !$0.isEmpty })
-        }
-        if playlist.tracksCount == 0 {
-            return []
         }
 
         // Some Lane edges expose only tracksCount. Reuse the same resilient
@@ -2758,6 +2773,14 @@ final class LaneSession: ObservableObject {
             pageSize: 100
         ) {
             return Set(loaded.compactMap(\.songId).filter { !$0.isEmpty })
+        }
+
+        // Only accept an empty state after both explicit collection fields
+        // and the paging endpoint have been considered.
+        if playlist.playlistTracksIds?.isEmpty == true ||
+            playlist.playlistTracks?.isEmpty == true ||
+            playlist.tracksCount == 0 {
+            return []
         }
 
         throw LaneAPIError.decoding(
@@ -4576,19 +4599,20 @@ final class LaneSession: ObservableObject {
         )
         let (detail, tracks) = await (detailRequest, tracksRequest)
 
+        var didReadState = false
         if let ids = detail?.playlistTracksIds {
-            return ids.contains(trackID)
+            didReadState = true
+            if ids.contains(trackID) { return true }
         }
         if let embedded = detail?.playlistTracks {
-            return embedded.contains { $0.songId == trackID }
+            didReadState = true
+            if embedded.contains(where: { $0.songId == trackID }) { return true }
         }
         if let tracks {
-            return tracks.contains { $0.songId == trackID }
+            didReadState = true
+            if tracks.contains(where: { $0.songId == trackID }) { return true }
         }
-        if detail?.effectiveTrackCount == 0 {
-            return false
-        }
-        return nil
+        return didReadState ? false : nil
     }
 
     private func waitForFavoriteState(

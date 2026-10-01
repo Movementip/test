@@ -16,11 +16,18 @@ enum AndroidNetworkTransport {
 final class LaneMockURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var paths = Set<String>()
+    private static var didUseObjectAddFallback = false
 
     static func received(_ path: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         return paths.contains(path)
+    }
+
+    static func usedObjectAddFallback() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didUseObjectAddFallback
     }
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -40,15 +47,15 @@ final class LaneMockURLProtocol: URLProtocol {
         Self.lock.unlock()
 
         do {
-            let responseBody = try response(for: request)
+            let result = try response(for: request)
             let response = HTTPURLResponse(
                 url: url,
-                statusCode: 200,
+                statusCode: result.status,
                 httpVersion: "HTTP/1.1",
                 headerFields: ["Content-Type": "application/json"]
             )!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: responseBody)
+            client?.urlProtocol(self, didLoad: result.data)
             client?.urlProtocolDidFinishLoading(self)
         } catch {
             client?.urlProtocol(self, didFailWithError: error)
@@ -57,7 +64,7 @@ final class LaneMockURLProtocol: URLProtocol {
 
     override func stopLoading() {}
 
-    private func response(for request: URLRequest) throws -> Data {
+    private func response(for request: URLRequest) throws -> (status: Int, data: Data) {
         let path = request.url?.path ?? ""
         let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let body = try requestBody(request)
@@ -69,33 +76,53 @@ final class LaneMockURLProtocol: URLProtocol {
             try require(json["playlistName"] as? String == "Road Trip", "playlistName body mismatch")
             try require(json["playlistTracks"] as? [String] == ["track-1"], "playlistTracks body mismatch")
             try require(json["creatorLid"] as? String == "lane-user", "creatorLid body mismatch")
-            return Data(#"{"playlistId":"playlist-created"}"#.utf8)
+            return (200, Data(#"{"playlistId":"playlist-created"}"#.utf8))
 
         case "/user/playlist/add-tracks":
             try require(request.httpMethod == "POST", "add-tracks must be POST")
-            try require(query.first(where: { $0.name == "playlistId" })?.value == "playlist-created", "playlistId query mismatch")
+            let playlistID = query.first(where: { $0.name == "playlistId" })?.value
+            if playlistID == "playlist-fallback" {
+                if let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                   json["trackIds"] as? [String] == ["track-3"] {
+                    Self.lock.lock()
+                    Self.didUseObjectAddFallback = true
+                    Self.lock.unlock()
+                    return (200, Data(#"{"ok":true}"#.utf8))
+                }
+                return (
+                    400,
+                    Data(#"{"code":"INVALID_PLAYLIST_TRACKS_BODY","message":"Invalid playlist tracks body"}"#.utf8)
+                )
+            }
+
+            try require(playlistID == "playlist-created", "playlistId query mismatch")
             let array = try JSONSerialization.jsonObject(with: body) as? [String]
             try require(array == ["track-1", "track-2"], "add-tracks must send the APK raw JSON array")
-            return Data(#"{"ok":true}"#.utf8)
+            return (200, Data(#"{"ok":true}"#.utf8))
 
         case "/user/tracks":
             try require(request.httpMethod == "POST", "user/tracks must be POST")
-            let json = try object(body)
-            try require(json["trackIds"] as? [String] == ["track-1", "track-2"], "user/tracks must send TrackIds object")
-            return Data(#"[{"songId":"track-1","platform":"spotify","title":"One","artistsDisplayedName":"Lane","spData":{"artists":["artist-1"],"album":"album-1"}},{"songId":"track-2","title":"Two","artistsDisplayedName":"Lane"}]"#.utf8)
+            if let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+               json["trackIds"] as? [String] == ["track-1", "track-2"] {
+                return (200, Data(#"[{"songId":"track-1","platform":"spotify","title":"One","artistsDisplayedName":"Lane","spData":{"artists":["artist-1"],"album":"album-1"}},{"songId":"track-2","title":"Two","artistsDisplayedName":"Lane"}]"#.utf8))
+            }
+            return (
+                400,
+                Data(#"{"code":"INVALID_TRACK_IDS_BODY","message":"Invalid track ids body"}"#.utf8)
+            )
 
         case "/playlist/playlist-created/tracks":
             try require(query.first(where: { $0.name == "page" })?.value == "1", "playlist page must be 1-based")
-            return Data(#"{"items":[{"songId":"track-1","title":"One","artistsDisplayedName":"Lane"}],"totalItems":1,"page":1,"pageSize":50,"totalPages":1}"#.utf8)
+            return (200, Data(#"{"items":[{"songId":"track-1","title":"One","artistsDisplayedName":"Lane"}],"totalItems":1,"page":1,"pageSize":50,"totalPages":1}"#.utf8))
 
         case "/track/stats":
             try require(query.first(where: { $0.name == "trackId" })?.value == "track-1", "stats trackId mismatch")
-            return Data(#"{"likesCount":27,"commentsCount":4}"#.utf8)
+            return (200, Data(#"{"likesCount":27,"commentsCount":4}"#.utf8))
 
         case "/user/import/preview":
             try require(query.first(where: { $0.name == "platform" })?.value == "yandex", "Yandex platform must be lowercase")
             try require(query.first(where: { $0.name == "yandexPlaylistId" })?.value == "https://music.yandex.ru/playlists/lk.42", "Yandex source mismatch")
-            return Data(#"{"playlistId":"preview","playlistName":"Yandex","playlistTracksIds":["track-1","track-2"],"tracksCount":2}"#.utf8)
+            return (200, Data(#"{"playlistId":"preview","playlistName":"Yandex","playlistTracksIds":["track-1","track-2"],"tracksCount":2}"#.utf8))
 
         default:
             throw NSError(domain: "LaneContractTests", code: 404, userInfo: [
@@ -199,12 +226,26 @@ struct LaneContractTestRunner {
         )
         try addResult.requireSuccess()
 
+        // A value pinned by an older build must not stop the client from
+        // switching to the server's current object body contract.
+        UserDefaults.standard.set("raw", forKey: "lane.diag.addBody")
+        let healedAddResult = try await api.addTracks(
+            token: "test-token",
+            playlistId: "playlist-fallback",
+            trackIds: ["track-3"]
+        )
+        try healedAddResult.requireSuccess()
+        precondition(LaneMockURLProtocol.usedObjectAddFallback())
+        precondition(UserDefaults.standard.string(forKey: "lane.diag.addBody") == "object")
+
+        UserDefaults.standard.set("raw", forKey: "lane.diag.trackBody")
         let resolved = try await api.tracksByIds(
             token: "test-token",
             ids: ["track-1", "track-2"],
             prefetch: false
         )
         precondition(resolved.compactMap(\.songId) == ["track-1", "track-2"])
+        precondition(UserDefaults.standard.string(forKey: "lane.diag.trackBody") == "object")
         precondition(resolved.first?.artistIDs == ["artist-1"])
         precondition(TrackCandidate(resolved[0]).artistIDs == ["artist-1"])
 
@@ -235,6 +276,6 @@ struct LaneContractTestRunner {
             "/user/import/preview"
         ]
         precondition(expectedPaths.allSatisfy(LaneMockURLProtocol.received))
-        print("Lane contract tests passed (\(expectedPaths.count) mocked API scenarios).")
+        print("Lane contract tests passed (\(expectedPaths.count + 2) mocked API scenarios).")
     }
 }

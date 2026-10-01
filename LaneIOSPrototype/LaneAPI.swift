@@ -1177,28 +1177,31 @@ actor LaneAPI {
         guard !clean.isEmpty else { return [] }
 
         let mode = diagnosticSetting("lane.diag.trackBody", default: "auto")
-        let payloads: [Any]
+        let payloads: [(name: String, body: Any)]
         switch mode {
         case "raw":
-            payloads = [clean]
-        case "auto":
-            payloads = [["trackIds": clean], clean]
+            payloads = [("raw", clean), ("object", ["trackIds": clean])]
         default:
-            payloads = [["trackIds": clean]]
+            payloads = [("object", ["trackIds": clean]), ("raw", clean)]
         }
 
         var last: APIResult?
-        for payload in payloads {
+        var bodyCompatibleFailure: APIResult?
+        for (index, payload) in payloads.enumerated() {
             let result = try await request(
                 path: "/user/tracks",
                 method: "POST",
                 token: token,
                 query: [.init(name: "prefetch", value: prefetch ? "true" : "false")],
-                json: payload
+                json: payload.body
             )
             last = result
 
             if (200..<300).contains(result.status) {
+                // Persist the shape that actually worked. Older builds could
+                // pin a now-obsolete diagnostic value, which then prevented
+                // automatic recovery after a regional API contract change.
+                UserDefaults.standard.set(payload.name, forKey: "lane.diag.trackBody")
                 if let tracks = try? JSONDecoder().decode([TrackData].self, from: result.data) {
                     return tracks
                 }
@@ -1212,12 +1215,18 @@ actor LaneAPI {
             // both the APK TrackIds object and a raw array, and not every edge
             // labels a body mismatch with INVALID_TRACK_IDS_BODY. A generic
             // 400 is therefore safe to retry once with the alternate shape.
-            if mode == "auto", result.status == 400 {
-                continue
+            if result.status == 400 {
+                let bodyMismatch = result.pretty.localizedCaseInsensitiveContains("INVALID_TRACK_IDS_BODY")
+                if !bodyMismatch { bodyCompatibleFailure = result }
+                if index + 1 < payloads.count { continue }
             }
-            throw LaneAPIError.http(result.status, result.pretty)
+            let preferred = bodyCompatibleFailure ?? result
+            throw LaneAPIError.http(preferred.status, preferred.pretty)
         }
 
+        if let bodyCompatibleFailure {
+            throw LaneAPIError.http(bodyCompatibleFailure.status, bodyCompatibleFailure.pretty)
+        }
         if let last {
             throw LaneAPIError.http(last.status, last.pretty)
         }
@@ -1381,36 +1390,43 @@ actor LaneAPI {
         guard !clean.isEmpty else { throw LaneAPIError.emptyResponse }
 
         let mode = diagnosticSetting("lane.diag.addBody", default: "auto")
-        let payloads: [Any]
+        let payloads: [(name: String, body: Any)]
         switch mode {
         case "object":
-            payloads = [["trackIds": clean]]
-        case "auto":
-            payloads = [clean, ["trackIds": clean]]
+            payloads = [("object", ["trackIds": clean]), ("raw", clean)]
         default:
-            payloads = [clean]
+            payloads = [("raw", clean), ("object", ["trackIds": clean])]
         }
 
         var last: APIResult?
-        for payload in payloads {
+        var bodyCompatibleFailure: APIResult?
+        for (index, payload) in payloads.enumerated() {
             let result = try await request(
                 path: "/user/playlist/add-tracks",
                 method: "POST",
                 token: token,
                 query: [.init(name: "playlistId", value: playlistId)],
-                json: payload
+                json: payload.body
             )
             last = result
 
-            // Regional Lane edges have returned both the named validation
-            // code and a generic HTTP 400 for the alternate body shape.
-            if mode == "auto", result.status == 400 {
-                continue
+            if (200..<300).contains(result.status) {
+                UserDefaults.standard.set(payload.name, forKey: "lane.diag.addBody")
+                return result
             }
-            return result
+
+            // Regional Lane edges have returned both the named validation
+            // code and a generic HTTP 400 for the alternate body shape. Retry
+            // even when an older build persisted an explicit raw/object mode.
+            if result.status == 400 {
+                let bodyMismatch = result.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY")
+                if !bodyMismatch { bodyCompatibleFailure = result }
+                if index + 1 < payloads.count { continue }
+            }
+            return bodyCompatibleFailure ?? result
         }
 
-        return last ?? APIResult(status: 0, headers: [:], data: Data())
+        return bodyCompatibleFailure ?? last ?? APIResult(status: 0, headers: [:], data: Data())
     }
 
     func removeTrack(token: String, playlistId: String, trackId: String) async throws -> APIResult {
