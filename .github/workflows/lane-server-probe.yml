@@ -1,0 +1,40 @@
+name: Lane Server Probe
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "LaneIOSPrototype/LaneAPI.swift"
+      - "LaneIOSPrototype/RequestSigner.swift"
+      - "Scripts/LaneServerProbe.swift"
+      - ".github/workflows/lane-server-probe.yml"
+
+jobs:
+  probe:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Public connectivity
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== system DNS/TLS =="
+          for host in laneapi.com ru.laneapi.com; do
+            curl --connect-timeout 5 --max-time 8 -sS               -o /tmp/time.json               -w "$host HTTP=%{http_code} connect=%{time_connect}s tls=%{time_appconnect}s total=%{time_total}s\n"               "https://$host/time" || true
+          done
+
+          echo "== direct TLS with original SNI/Host =="
+          curl --connect-timeout 5 --max-time 8 -sS             --resolve ru.laneapi.com:443:158.160.143.196             -o /tmp/ru-direct.json             -w "ru-direct HTTP=%{http_code} connect=%{time_connect}s tls=%{time_appconnect}s total=%{time_total}s\n"             "https://ru.laneapi.com/time" || true
+
+      - name: Build protocol probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun swiftc             LaneIOSPrototype/RequestSigner.swift             Scripts/LaneServerProbe.swift             -o /tmp/lane-server-probe             -lz
+
+      - name: Run protocol probe
+        env:
+          LANE_TEST_TOKEN: ${{ secrets.LANE_TEST_TOKEN }}
+          LANE_TEST_LDI: ${{ secrets.LANE_TEST_LDI }}
+        run: /tmp/lane-server-probe
