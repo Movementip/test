@@ -544,7 +544,7 @@ final class LaneSession: ObservableObject {
     @discardableResult
     func selectStreamQuality(_ quality: AudioQualityChoice) -> Bool {
         if quality != .basic && !hasPremiumAccess {
-            output = "Lane Premium is required for (quality.title) audio quality."
+            output = "Lane Premium is required for \(quality.title) audio quality."
             return false
         }
         streamQuality = quality.rawValue
