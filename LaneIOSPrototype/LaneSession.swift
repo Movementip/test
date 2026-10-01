@@ -72,6 +72,23 @@ final class LaneSession: ObservableObject {
     @Published var status = 0
     @Published var busy = false
 
+    // MARK: Runtime diagnostics
+    @Published var diagnosticHostMode = UserDefaults.standard.string(forKey: "lane.diag.host") ?? "auto" {
+        didSet { UserDefaults.standard.set(diagnosticHostMode, forKey: "lane.diag.host") }
+    }
+    @Published var diagnosticTransportMode = UserDefaults.standard.string(forKey: "lane.diag.transport") ?? "system" {
+        didSet { UserDefaults.standard.set(diagnosticTransportMode, forKey: "lane.diag.transport") }
+    }
+    @Published var diagnosticTrackBodyMode = UserDefaults.standard.string(forKey: "lane.diag.trackBody") ?? "object" {
+        didSet { UserDefaults.standard.set(diagnosticTrackBodyMode, forKey: "lane.diag.trackBody") }
+    }
+    @Published var diagnosticAddBodyMode = UserDefaults.standard.string(forKey: "lane.diag.addBody") ?? "raw" {
+        didSet { UserDefaults.standard.set(diagnosticAddBodyMode, forKey: "lane.diag.addBody") }
+    }
+    @Published var diagnosticsRunning = false
+    @Published var diagnosticReport = ""
+    @Published var diagnosticTraceText = ""
+
     // MARK: Catalog
     @Published var homeSections: [LaneHomeSection] = []
     @Published var homeTracks: [TrackCandidate] = []
@@ -654,9 +671,9 @@ final class LaneSession: ObservableObject {
     }
 
     private func configureAPI() async {
-        // Set the configured base once. After that LaneAPI is allowed to keep
-        // whichever regional host actually works; resetting it before every
-        // request caused repeated timeouts on networks where one host is poor.
+        // Restore the stable pre-regression behaviour: configure the API base
+        // once and let successful reads remember the working regional host.
+        // Do not probe/switch transports before every request.
         let modeChanged = configuredBackendMode != backendMode
         if !didConfigureAPIBase || modeChanged || backendMode == .custom {
             await LaneAPI.shared.setBase(baseURL)
@@ -664,7 +681,6 @@ final class LaneSession: ObservableObject {
         }
 
         if modeChanged {
-            didPrepareRegionalHost = false
             configuredBackendMode = backendMode
         }
 
@@ -676,11 +692,6 @@ final class LaneSession: ObservableObject {
                 apiKey: apiKey
             )
         )
-
-        if backendMode == .official, !didPrepareRegionalHost {
-            didPrepareRegionalHost = true
-            baseURL = await LaneAPI.shared.prepareRegionalHost()
-        }
     }
 
     func prepareAPI() async {
@@ -708,6 +719,137 @@ final class LaneSession: ObservableObject {
                 status = 0
                 output = error.localizedDescription
             }
+        }
+    }
+
+
+    func resetDiagnosticProfileToStable() {
+        diagnosticHostMode = "auto"
+        diagnosticTransportMode = "system"
+        diagnosticTrackBodyMode = "object"
+        diagnosticAddBodyMode = "raw"
+        diagnosticReport = "Stable profile restored: Auto host, System transport, TrackIds object, Add-tracks raw array."
+    }
+
+    func clearDiagnosticTrace() {
+        Task {
+            await LaneAPI.shared.clearDiagnosticTrace()
+            diagnosticTraceText = ""
+        }
+    }
+
+    func refreshDiagnosticTrace() {
+        Task {
+            let lines = await LaneAPI.shared.diagnosticTrace()
+            diagnosticTraceText = lines.joined(separator: "\n")
+        }
+    }
+
+    func runLaneDiagnostics() {
+        guard !diagnosticsRunning else { return }
+        diagnosticsRunning = true
+        diagnosticReport = "Running Lane diagnostics…"
+
+        Task { @MainActor in
+            defer {
+                diagnosticsRunning = false
+                refreshDiagnosticTrace()
+            }
+
+            await configureAPI()
+            var report: [String] = []
+            report.append("Lane diagnostics")
+            report.append("hostMode=\(diagnosticHostMode) transport=\(diagnosticTransportMode)")
+            report.append("trackBody=\(diagnosticTrackBodyMode) addBody=\(diagnosticAddBodyMode)")
+            report.append("base=\(await LaneAPI.shared.currentBaseURL())")
+            report.append("token=\(token.isEmpty ? "missing" : "present")")
+
+            async let globalProbe = LaneAPI.shared.diagnosticTimeProbe(baseURL: "https://laneapi.com")
+            async let ruProbe = LaneAPI.shared.diagnosticTimeProbe(baseURL: "https://ru.laneapi.com")
+            let (global, ru) = await (globalProbe, ruProbe)
+            report.append("laneapi.com: \(global)")
+            report.append("ru.laneapi.com: \(ru)")
+
+            guard !token.isEmpty else {
+                diagnosticReport = report.joined(separator: "\n")
+                return
+            }
+
+            func timed<T>(_ name: String, _ operation: () async throws -> T) async -> T? {
+                let started = Date()
+                do {
+                    let value = try await operation()
+                    let ms = Int(Date().timeIntervalSince(started) * 1000)
+                    report.append("\(name): PASS \(ms)ms")
+                    return value
+                } catch {
+                    let ms = Int(Date().timeIntervalSince(started) * 1000)
+                    report.append("\(name): FAIL \(ms)ms \(error.localizedDescription)")
+                    return nil
+                }
+            }
+
+            let language = Locale.current.language.languageCode?.identifier ?? "en"
+            let accountResult: UserAccountDTO? = await timed("account") {
+                try await LaneAPI.shared.account(token: token, deviceLanguage: language)
+            }
+            let playlistsResult: [LanePlaylist]? = await timed("playlists") {
+                try await LaneAPI.shared.userPlaylists(token: token)
+            }
+            _ = await timed("albums") {
+                try await LaneAPI.shared.userAlbums(token: token)
+            } as [LaneAlbum]?
+            _ = await timed("artists") {
+                try await LaneAPI.shared.userArtists(token: token)
+            } as [LaneArtist]?
+
+            let sampleTrackID =
+                currentTrack?.trackID ??
+                recentTracks.first?.trackID ??
+                history.first?.trackID ??
+                homeTracks.first?.trackID ??
+                searchTracks.first?.trackID
+
+            if let sampleTrackID, !sampleTrackID.isEmpty {
+                let resolved: [TrackData]? = await timed("user/tracks sample") {
+                    try await LaneAPI.shared.tracksByIds(
+                        token: token,
+                        ids: [sampleTrackID],
+                        prefetch: false
+                    )
+                }
+                if let resolved {
+                    report.append("user/tracks returned=\(resolved.count)")
+                }
+            } else {
+                report.append("user/tracks sample: SKIP no local track ID")
+            }
+
+            let samplePlaylist =
+                playlistsResult?.first(where: { $0.playlistId != "lane_likes" }) ??
+                playlistsResult?.first
+
+            if let playlistID = samplePlaylist?.playlistId, !playlistID.isEmpty {
+                let detail: LanePlaylist? = await timed("playlist detail") {
+                    try await LaneAPI.shared.playlist(token: token, playlistId: playlistID)
+                }
+                if let detail {
+                    let count = detail.playlistTracksIds?.count ??
+                        detail.playlistTracks?.count ??
+                        detail.tracksCount ?? 0
+                    report.append("playlist detail tracks=\(count)")
+                }
+            } else {
+                report.append("playlist detail: SKIP no playlist")
+            }
+
+            if let laneId = accountResult?.laneId, !laneId.isEmpty {
+                _ = await timed("user-info") {
+                    try await LaneAPI.shared.userInfo(token: token, laneId: laneId)
+                } as UserInfoDTO?
+            }
+
+            diagnosticReport = report.joined(separator: "\n")
         }
     }
 
