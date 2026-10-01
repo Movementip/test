@@ -197,32 +197,18 @@ actor LaneAPI {
         let url = candidate.appendingPathComponent("time")
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.timeoutInterval = 2.5
+        request.timeoutInterval = 3
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("close", forHTTPHeaderField: "Connection")
 
-        let host = candidate.host ?? ""
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse else {
-                throw LaneAPIError.nonHTTP
-            }
-            guard (200..<300).contains(http.statusCode) else {
-                throw LaneAPIError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
-            }
-            directRequiredHosts.remove(host)
-            return try JSONDecoder().decode(LaneServerTimeResponse.self, from: data)
-        } catch {
-            let direct = try await AndroidNetworkTransport.data(for: request, timeout: 4)
-            guard (200..<300).contains(direct.response.statusCode) else {
-                throw LaneAPIError.http(
-                    direct.response.statusCode,
-                    String(data: direct.data, encoding: .utf8) ?? ""
-                )
-            }
-            if !host.isEmpty { directRequiredHosts.insert(host) }
-            return try JSONDecoder().decode(LaneServerTimeResponse.self, from: direct.data)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw LaneAPIError.nonHTTP
         }
+        guard (200..<300).contains(http.statusCode) else {
+            throw LaneAPIError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
+        }
+        return try JSONDecoder().decode(LaneServerTimeResponse.self, from: data)
     }
 
     /// URLSession is kept as the normal path. When the carrier's resolver or
@@ -272,7 +258,6 @@ actor LaneAPI {
             if let server = try? await probeOfficialServer(candidate) {
                 timeOffsetMilliseconds = server.timestamp - Int64(Date().timeIntervalSince1970 * 1000.0)
                 rememberWorkingRegionalBase(candidate)
-                lastRegionalProbeAt = Date()
                 let resolved = currentBaseURL()
                 return resolved
             }
