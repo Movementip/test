@@ -183,6 +183,69 @@ final class LaneSession: ObservableObject {
         }
     }
 
+    /// TrackData in the Android app exposes platform artist IDs through its
+    /// Spotify/SoundCloud payload. Prefer those IDs; older cached iOS tracks do
+    /// not have them, so fall back to Lane search by the displayed artist name.
+    func resolveArtist(for track: TrackCandidate) async -> LaneArtist? {
+        let displayedName = track.subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !displayedName.isEmpty,
+              displayedName.localizedCaseInsensitiveCompare("Unknown artist") != .orderedSame else {
+            return nil
+        }
+
+        let knownArtists = serverArtists + searchArtists + Array(cachedArtistDetails.values)
+        if let artistID = track.artistIDs?.first, !artistID.isEmpty {
+            if let existing = knownArtists.first(where: { $0.id == artistID }) {
+                return existing
+            }
+            return LaneArtist(
+                name: displayedName,
+                id: artistID,
+                platform: track.platform,
+                avatarUrl: track.artistAvatars?.first
+            )
+        }
+
+        let normalized = displayedName.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: .current
+        )
+        if let existing = knownArtists.first(where: {
+            $0.name?.folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: .current
+            ) == normalized
+        }) {
+            return existing
+        }
+
+        do {
+            await configureAPI()
+            let response = try await LaneAPI.shared.search(token: token, query: displayedName)
+            let artists = response.results.compactMap(\.artist)
+            let match = artists.first(where: {
+                $0.name?.folding(
+                    options: [.caseInsensitive, .diacriticInsensitive],
+                    locale: .current
+                ) == normalized
+            }) ?? artists.first
+            if let match {
+                if !searchArtists.contains(where: { $0.id == match.id }) {
+                    searchArtists.append(match)
+                }
+                return match
+            }
+        } catch {
+            output = "Artist lookup error: \(error.localizedDescription)"
+        }
+
+        return LaneArtist(
+            name: displayedName,
+            platform: track.platform,
+            avatarUrl: track.artistAvatars?.first
+        )
+    }
+
     func cachedArtistDetail(for artist: LaneArtist) -> LaneArtist? {
         guard let id = artist.id, !id.isEmpty else { return nil }
         return cachedArtistDetails[id]
@@ -259,7 +322,8 @@ final class LaneSession: ObservableObject {
                 coverURL: track.coverURL,
                 duration: track.duration,
                 genre: track.genre,
-                artistAvatars: track.artistAvatars
+                artistAvatars: track.artistAvatars,
+                artistIDs: track.artistIDs
             )
         }
     }
@@ -286,7 +350,8 @@ final class LaneSession: ObservableObject {
                 coverURL: track.coverURL,
                 duration: track.duration,
                 genre: track.genre,
-                artistAvatars: track.artistAvatars
+                artistAvatars: track.artistAvatars,
+                artistIDs: track.artistIDs
             )
         }
         if let data = try? JSONEncoder().encode(resolvedTrackCache) {
@@ -325,15 +390,31 @@ final class LaneSession: ObservableObject {
             // For other 400s only, isolate a genuinely stale/unsupported ID
             // without discarding valid tracks from the album/playlist.
             let middle = ids.count / 2
-            let left = try await resolveTrackDataResilient(
-                Array(ids[..<middle]),
-                prefetch: prefetch
-            )
-            let right = try await resolveTrackDataResilient(
-                Array(ids[middle...]),
-                prefetch: prefetch
-            )
-            return left + right
+            var recovered: [TrackData] = []
+            var failedHalves = 0
+
+            do {
+                recovered += try await resolveTrackDataResilient(
+                    Array(ids[..<middle]),
+                    prefetch: prefetch
+                )
+            } catch {
+                failedHalves += 1
+            }
+            do {
+                recovered += try await resolveTrackDataResilient(
+                    Array(ids[middle...]),
+                    prefetch: prefetch
+                )
+            } catch {
+                failedHalves += 1
+            }
+
+            // A stale platform ID must not hide every other valid album track.
+            // Preserve the original server error only when neither half could
+            // be recovered at all.
+            if failedHalves == 2 { throw error }
+            return recovered
         }
     }
 
@@ -440,6 +521,7 @@ final class LaneSession: ObservableObject {
     @Published var streamURL = ""
     @Published var playbackPosition: Double = 0
     @Published var playbackDuration: Double = 0
+    @Published var playbackBufferedDuration: Double = 0
     @Published var playerError = ""
     @Published var trackStats: TrackStatsDTO?
     @Published var currentLyrics: LaneTrackLyrics?
@@ -449,6 +531,7 @@ final class LaneSession: ObservableObject {
 
     private var player: AVPlayer?
     private var playerItemStatusObserver: NSKeyValueObservation?
+    private var playerLoadedTimeRangesObserver: NSKeyValueObservation?
     private var playerTimeControlObserver: NSKeyValueObservation?
     private var periodicTimeObserver: Any?
     private var playbackEndObserver: NSObjectProtocol?
@@ -1623,7 +1706,8 @@ final class LaneSession: ObservableObject {
                     coverURL: track.coverURL,
                     duration: track.duration,
                     genre: track.genre,
-                    artistAvatars: track.artistAvatars
+                    artistAvatars: track.artistAvatars,
+                    artistIDs: track.artistIDs
                 )
             }
             rememberResolvedTracks(recentTracks)
@@ -2213,16 +2297,91 @@ final class LaneSession: ObservableObject {
     ) async throws -> LanePlaylist {
         await configureAPI()
         let normalizedYandexID = yandexPlaylistID.map(YandexPlaylistSource.normalize)
-        return try await LaneAPI.shared.importPreview(
-            token: token,
-            platform: platform,
-            spotifyBearerToken: spotifyBearerToken,
-            spotifyClientToken: spotifyClientToken,
-            spotifyPlaylistId: spotifyPlaylistID,
-            soundcloudPlaylistId: soundCloudPlaylistID,
-            yandexPlaylistId: normalizedYandexID,
-            soundcloudProfileUrl: soundCloudProfileURL
-        )
+
+        guard platform.lowercased() == "yandex",
+              let source = yandexPlaylistID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !source.isEmpty else {
+            return try await LaneAPI.shared.importPreview(
+                token: token,
+                platform: platform,
+                spotifyBearerToken: spotifyBearerToken,
+                spotifyClientToken: spotifyClientToken,
+                spotifyPlaylistId: spotifyPlaylistID,
+                soundcloudPlaylistId: soundCloudPlaylistID,
+                yandexPlaylistId: normalizedYandexID,
+                soundcloudProfileUrl: soundCloudProfileURL
+            )
+        }
+
+        // Exact APK input comes first. A canonical URL without share/tracking
+        // parameters is a safe fallback for Yandex links copied from the app.
+        var candidates: [String] = []
+        for candidate in [source, normalizedYandexID].compactMap({ $0 })
+            where !candidates.contains(candidate) {
+            candidates.append(candidate)
+        }
+
+        let metadataTask = Task { [weak self] in
+            try await self?.yandexPlaylistTracks(from: source) ?? []
+        }
+        var lastError: Error = LaneAPIError.emptyResponse
+
+        for candidate in candidates {
+            do {
+                let preview = try await LaneAPI.shared.importPreview(
+                    token: token,
+                    platform: platform,
+                    yandexPlaylistId: candidate
+                )
+                metadataTask.cancel()
+                return preview
+            } catch {
+                lastError = error
+                let description = error.localizedDescription
+                let retryable = description.localizedCaseInsensitiveContains("timed out") ||
+                    description.localizedCaseInsensitiveContains("HTTP 5") ||
+                    description.localizedCaseInsensitiveContains("DATA_ACCESS_ERROR")
+                if !retryable { break }
+            }
+        }
+
+        // If Lane's expensive preview endpoint stalls, use public Yandex
+        // metadata and ask the normal /user/tracks resolver for canonical Lane
+        // IDs. Only expose this fallback when every source track resolves, so
+        // the user never gets a misleading "complete" partial playlist.
+        do {
+            let sourceTracks = try await metadataTask.value
+            let sourceIDs = sourceTracks
+                .sorted { $0.originalIndex < $1.originalIndex }
+                .map(\.yandexID)
+            guard !sourceIDs.isEmpty else { throw lastError }
+
+            var resolved: [TrackData] = []
+            for start in stride(from: 0, to: sourceIDs.count, by: 15) {
+                let end = min(start + 15, sourceIDs.count)
+                resolved += try await resolveTrackDataResilient(
+                    Array(sourceIDs[start..<end]),
+                    prefetch: false
+                )
+            }
+
+            let resolvedIDs = Set(resolved.compactMap(\.songId))
+            guard resolved.count == sourceIDs.count,
+                  resolvedIDs.count == sourceIDs.count else { throw lastError }
+
+            return LanePlaylist(
+                playlistId: "yandex-import-preview",
+                playlistImageUrl: sourceTracks.first?.coverURL,
+                playlistName: "Yandex Music",
+                playlistDescription: "Imported from Yandex Music",
+                playlistTracksIds: nil,
+                playlistTracks: resolved,
+                platform: "yandex",
+                tracksCount: resolved.count
+            )
+        } catch {
+            throw lastError
+        }
     }
 
     func beginTelegramMusicImport() async throws -> String {
@@ -3116,6 +3275,7 @@ final class LaneSession: ObservableObject {
         streamURL = ""
         playbackPosition = 0
         playbackDuration = parseDuration(track.duration) ?? 0
+        playbackBufferedDuration = 0
         trackStats = track.trackID.flatMap { trackStatsCache[$0] }
         currentLyrics = nil
         lyricsError = ""
@@ -3341,6 +3501,9 @@ final class LaneSession: ObservableObject {
         playerItemStatusObserver?.invalidate()
         playerItemStatusObserver = nil
 
+        playerLoadedTimeRangesObserver?.invalidate()
+        playerLoadedTimeRangesObserver = nil
+
         playerTimeControlObserver?.invalidate()
         playerTimeControlObserver = nil
 
@@ -3366,6 +3529,36 @@ final class LaneSession: ObservableObject {
                       self.currentTrack?.id == track.id,
                       self.player?.currentItem === item else { return }
                 self.advanceAfterPlaybackEnd()
+            }
+        }
+    }
+
+    private func observeLoadedTimeRanges(
+        of item: AVPlayerItem,
+        requestID: UUID,
+        track: TrackCandidate
+    ) {
+        playerLoadedTimeRangesObserver = item.observe(
+            \.loadedTimeRanges,
+            options: [.initial, .new]
+        ) { [weak self, weak item] itemValue, _ in
+            Task { @MainActor in
+                guard let self,
+                      let item,
+                      item === itemValue,
+                      self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id,
+                      self.player?.currentItem === item else { return }
+
+                let bufferedEnd = item.loadedTimeRanges
+                    .map(\.timeRangeValue)
+                    .map { CMTimeGetSeconds(CMTimeRangeGetEnd($0)) }
+                    .filter { $0.isFinite && $0 >= 0 }
+                    .max() ?? 0
+                let upperBound = self.playbackDuration > 0
+                    ? min(bufferedEnd, self.playbackDuration)
+                    : bufferedEnd
+                self.playbackBufferedDuration = max(self.playbackPosition, upperBound)
             }
         }
     }
@@ -3441,6 +3634,7 @@ final class LaneSession: ObservableObject {
         newPlayer.automaticallyWaitsToMinimizeStalling = false
         player = newPlayer
         observePlaybackEnd(of: item, requestID: requestID, track: track)
+        observeLoadedTimeRanges(of: item, requestID: requestID, track: track)
 
         playerItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             Task { @MainActor in
@@ -3730,6 +3924,7 @@ final class LaneSession: ObservableObject {
                 localPlayer.automaticallyWaitsToMinimizeStalling = false
                 player = localPlayer
                 observePlaybackEnd(of: item, requestID: requestID, track: track)
+                observeLoadedTimeRanges(of: item, requestID: requestID, track: track)
 
                 playerItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
                     Task { @MainActor in
@@ -3740,6 +3935,7 @@ final class LaneSession: ObservableObject {
                             self.isBuffering = false
                             if item.duration.seconds.isFinite && item.duration.seconds > 0 {
                                 self.playbackDuration = item.duration.seconds
+                                self.playbackBufferedDuration = item.duration.seconds
                             }
                             self.player?.play()
                         case .failed:
@@ -3875,6 +4071,7 @@ final class LaneSession: ObservableObject {
         localPlayer.automaticallyWaitsToMinimizeStalling = false
         player = localPlayer
         observePlaybackEnd(of: item, requestID: requestID, track: track)
+        observeLoadedTimeRanges(of: item, requestID: requestID, track: track)
 
         playerItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             Task { @MainActor in
@@ -3891,6 +4088,7 @@ final class LaneSession: ObservableObject {
                     let duration = item.duration.seconds
                     if duration.isFinite && duration > 0 {
                         self.playbackDuration = duration
+                        self.playbackBufferedDuration = duration
                     }
 
                     self.player?.play()
@@ -4074,6 +4272,7 @@ final class LaneSession: ObservableObject {
         isBuffering = false
         playbackPosition = 0
         playbackDuration = 0
+        playbackBufferedDuration = 0
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
 
@@ -4254,7 +4453,8 @@ final class LaneSession: ObservableObject {
                     coverURL: track.coverURL,
                     duration: track.duration,
                     genre: track.genre,
-                    artistAvatars: track.artistAvatars
+                    artistAvatars: track.artistAvatars,
+                    artistIDs: track.artistIDs
                 ),
                 at: 0
             )

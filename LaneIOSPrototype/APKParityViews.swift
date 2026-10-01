@@ -2098,6 +2098,11 @@ struct APKWaveLoadingToast: View {
     }
 }
 
+private struct APKPlayerArtistDestination: Identifiable {
+    let id = UUID()
+    let artist: LaneArtist
+}
+
 struct APKFullPlayerView: View {
     @EnvironmentObject private var session: LaneSession
     @Environment(\.dismiss) private var dismiss
@@ -2109,6 +2114,8 @@ struct APKFullPlayerView: View {
     @State private var draggingProgress = false
     @State private var draggedValue: Double = 0
     @State private var artworkDragOffset: CGFloat = 0
+    @State private var artistDestination: APKPlayerArtistDestination?
+    @State private var resolvingArtist = false
 
     var body: some View {
         ZStack {
@@ -2188,22 +2195,35 @@ struct APKFullPlayerView: View {
                                         .font(.system(size: 21, weight: .bold))
                                         .lineLimit(1)
 
-                                    HStack(spacing: 7) {
-                                        if let avatars = track.artistAvatars, !avatars.isEmpty {
-                                            HStack(spacing: -5) {
-                                                ForEach(Array(avatars.prefix(3).enumerated()), id: \.offset) { _, avatar in
-                                                    APKRemoteImage(url: avatar, circle: true)
-                                                        .frame(width: 20, height: 20)
-                                                        .overlay(Circle().stroke(Color.black.opacity(0.5), lineWidth: 1))
+                                    Button {
+                                        openArtist(for: track)
+                                    } label: {
+                                        HStack(spacing: 7) {
+                                            if let avatars = track.artistAvatars, !avatars.isEmpty {
+                                                HStack(spacing: -5) {
+                                                    ForEach(Array(avatars.prefix(3).enumerated()), id: \.offset) { _, avatar in
+                                                        APKRemoteImage(url: avatar, circle: true)
+                                                            .frame(width: 20, height: 20)
+                                                            .overlay(Circle().stroke(Color.black.opacity(0.5), lineWidth: 1))
+                                                    }
                                                 }
                                             }
-                                        }
 
-                                        Text(track.subtitle)
-                                            .font(.system(size: 15))
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
+                                            Text(track.subtitle)
+                                                .font(.system(size: 15))
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+
+                                            if resolvingArtist {
+                                                ProgressView()
+                                                    .controlSize(.mini)
+                                                    .tint(.secondary)
+                                            }
+                                        }
                                     }
+                                    .buttonStyle(.plain)
+                                    .disabled(resolvingArtist)
+                                    .accessibilityHint("Opens the artist page")
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -2287,6 +2307,12 @@ struct APKFullPlayerView: View {
                     .environmentObject(session)
             }
         }
+        .fullScreenCover(item: $artistDestination) { destination in
+            NavigationStack {
+                APKArtistDetailScreen(seed: destination.artist)
+                    .environmentObject(session)
+            }
+        }
         .overlay(alignment: .bottom) {
             if session.waveIsLoading {
                 APKWaveLoadingToast(coverURL: session.waveSourceCoverURL)
@@ -2357,6 +2383,17 @@ struct APKFullPlayerView: View {
             return playlist.playlistName.map { "Playlist \"\($0)\"" } ?? "Playlist"
         }
         return "Lane"
+    }
+
+    private func openArtist(for track: TrackCandidate) {
+        guard !resolvingArtist else { return }
+        resolvingArtist = true
+        Task {
+            defer { resolvingArtist = false }
+            if let artist = await session.resolveArtist(for: track) {
+                artistDestination = APKPlayerArtistDestination(artist: artist)
+            }
+        }
     }
 
     @ViewBuilder
@@ -2460,11 +2497,22 @@ struct APKFullPlayerView: View {
                         ? session.playbackPosition / session.playbackDuration
                         : 0)
                 let clamped = min(max(fraction, 0), 1)
+                let bufferedFraction = session.playbackDuration > 0
+                    ? session.playbackBufferedDuration / session.playbackDuration
+                    : 0
+                let buffered = min(max(bufferedFraction, clamped), 1)
 
                 ZStack(alignment: .leading) {
                     Capsule()
-                        .fill(Color.white.opacity(0.24))
+                        .fill(Color.white.opacity(0.16))
                         .frame(height: 4)
+
+                    // Media3 in the APK exposes a secondary buffered progress
+                    // segment. AVPlayer supplies the same information through
+                    // loadedTimeRanges; keep it visibly distinct from playback.
+                    Capsule()
+                        .fill(Color.white.opacity(0.42))
+                        .frame(width: geometry.size.width * CGFloat(buffered), height: 4)
 
                     Capsule()
                         .fill(Color.white)
@@ -2495,7 +2543,9 @@ struct APKFullPlayerView: View {
             .frame(height: 28)
             .accessibilityElement()
             .accessibilityLabel("Playback position")
-            .accessibilityValue(formatTime(session.playbackPosition))
+            .accessibilityValue(
+                "\(formatTime(session.playbackPosition)), buffered to \(formatTime(session.playbackBufferedDuration))"
+            )
             .accessibilityAdjustableAction { direction in
                 switch direction {
                 case .increment:

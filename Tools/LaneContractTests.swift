@@ -82,7 +82,7 @@ final class LaneMockURLProtocol: URLProtocol {
             try require(request.httpMethod == "POST", "user/tracks must be POST")
             let json = try object(body)
             try require(json["trackIds"] as? [String] == ["track-1", "track-2"], "user/tracks must send TrackIds object")
-            return Data(#"[{"songId":"track-1","title":"One","artistsDisplayedName":"Lane"},{"songId":"track-2","title":"Two","artistsDisplayedName":"Lane"}]"#.utf8)
+            return Data(#"[{"songId":"track-1","platform":"spotify","title":"One","artistsDisplayedName":"Lane","spData":{"artists":["artist-1"],"album":"album-1"}},{"songId":"track-2","title":"Two","artistsDisplayedName":"Lane"}]"#.utf8)
 
         case "/playlist/playlist-created/tracks":
             try require(query.first(where: { $0.name == "page" })?.value == "1", "playlist page must be 1-based")
@@ -150,6 +150,11 @@ struct LaneContractTestRunner {
             YandexPlaylistSource.normalize("owner/17") ==
                 "https://music.yandex.ru/users/owner/playlists/17"
         )
+        precondition(
+            YandexPlaylistSource.normalize(
+                "https://music.yandex.ru/playlists/lk.42?utm_source=share#track"
+            ) == "https://music.yandex.ru/playlists/lk.42"
+        )
 
         UserDefaults.standard.set("raw", forKey: "lane.diag.addBody")
         UserDefaults.standard.set("object", forKey: "lane.diag.trackBody")
@@ -194,6 +199,8 @@ struct LaneContractTestRunner {
             prefetch: false
         )
         precondition(resolved.compactMap(\.songId) == ["track-1", "track-2"])
+        precondition(resolved.first?.artistIDs == ["artist-1"])
+        precondition(TrackCandidate(resolved[0]).artistIDs == ["artist-1"])
 
         let page = try await api.playlistTracks(
             token: "test-token",

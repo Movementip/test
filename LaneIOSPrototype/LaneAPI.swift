@@ -682,7 +682,9 @@ actor LaneAPI {
         switch normalizedPath {
         case "/track/stream": timeout = 6
         case "/user/tracks": timeout = 8
-        case "/user/import/preview": timeout = 25
+        // Large Yandex favourites playlists are assembled server-side and can
+        // legitimately exceed the generic request timeout used elsewhere.
+        case "/user/import/preview": timeout = 60
         default: timeout = upperMethod == "GET" ? 7 : 20
         }
 
@@ -731,6 +733,7 @@ actor LaneAPI {
                 let retryable = http.statusCode == 408 ||
                     http.statusCode == 425 ||
                     http.statusCode == 429 ||
+                    (normalizedPath == "/user/tracks" && http.statusCode == 400) ||
                     (500...599).contains(http.statusCode)
 
                 if canFailOver, retryable, index + 1 < candidates.count {
@@ -1195,9 +1198,11 @@ actor LaneAPI {
                 throw LaneAPIError.decoding("Unexpected /user/tracks response\n\(result.pretty)")
             }
 
-            let invalidBody = result.status == 400 &&
-                result.pretty.localizedCaseInsensitiveContains("INVALID_TRACK_IDS_BODY")
-            if mode == "auto", invalidBody {
+            // /user/tracks is read-only. Regional Lane deployments have used
+            // both the APK TrackIds object and a raw array, and not every edge
+            // labels a body mismatch with INVALID_TRACK_IDS_BODY. A generic
+            // 400 is therefore safe to retry once with the alternate shape.
+            if mode == "auto", result.status == 400 {
                 continue
             }
             throw LaneAPIError.http(result.status, result.pretty)

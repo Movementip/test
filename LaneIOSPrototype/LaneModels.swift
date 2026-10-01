@@ -39,6 +39,24 @@ enum YandexPlaylistSource {
     static func normalize(_ source: String) -> String {
         let clean = source.trimmingCharacters(in: .whitespacesAndNewlines)
         if clean.lowercased().hasPrefix("http://") || clean.lowercased().hasPrefix("https://") {
+            // Shared Yandex links often carry tracking parameters. Lane's
+            // importer expects the stable playlist URL and can otherwise keep
+            // resolving the redirect until the request times out.
+            if let url = URL(string: clean),
+               let host = url.host?.lowercased(),
+               host == "music.yandex.ru" || host.hasSuffix(".music.yandex.ru") {
+                let pieces = url.pathComponents.filter { $0 != "/" }
+                if let playlists = pieces.firstIndex(of: "playlists"),
+                   pieces.indices.contains(playlists + 1) {
+                    let playlistID = pieces[playlists + 1]
+                    if let users = pieces.firstIndex(of: "users"),
+                       pieces.indices.contains(users + 1),
+                       users < playlists {
+                        return "https://music.yandex.ru/users/\(pieces[users + 1])/playlists/\(playlistID)"
+                    }
+                    return "https://music.yandex.ru/playlists/\(playlistID)"
+                }
+            }
             return clean
         }
         if clean.contains("/") {
@@ -123,6 +141,26 @@ struct LaneSearchHistoryItem: Identifiable {
     }
 }
 
+struct SpotifyAdditionalData: Decodable, Hashable {
+    let artists: [String]?
+    let album: String?
+}
+
+struct SoundCloudAdditionalData: Decodable, Hashable {
+    let userId: String?
+    let streamUrl: String?
+    let urn: String?
+}
+
+struct DeezerAdditionalData: Decodable, Hashable {
+    let trackId: String?
+    let streamUrl: String?
+}
+
+struct TelegramAdditionalData: Decodable, Hashable {
+    let trackId: String?
+}
+
 struct TrackData: Decodable, Hashable {
     let songId: String?
     let platform: String?
@@ -132,6 +170,21 @@ struct TrackData: Decodable, Hashable {
     let duration: String?
     let genre: String?
     let artistAvatars: [String]?
+    let spData: SpotifyAdditionalData?
+    let scData: SoundCloudAdditionalData?
+    let dzData: DeezerAdditionalData?
+    let tgData: TelegramAdditionalData?
+
+    var artistIDs: [String] {
+        switch platform?.lowercased() {
+        case "spotify":
+            return spData?.artists ?? []
+        case "soundcloud":
+            return scData?.userId.map { [$0] } ?? []
+        default:
+            return []
+        }
+    }
 }
 
 struct YandexImportTrack: Identifiable, Hashable, Sendable {
@@ -247,6 +300,32 @@ struct LanePlaylist: Decodable, Hashable {
     let tracksCount: Int?
     let visibility: String?
     let collaboratorIds: [String]?
+
+    init(
+        playlistId: String? = nil,
+        playlistImageUrl: String? = nil,
+        playlistName: String? = nil,
+        playlistDescription: String? = nil,
+        playlistTracksIds: [String]? = nil,
+        playlistTracks: [TrackData]? = nil,
+        creatorLid: String? = nil,
+        platform: String? = nil,
+        tracksCount: Int? = nil,
+        visibility: String? = nil,
+        collaboratorIds: [String]? = nil
+    ) {
+        self.playlistId = playlistId
+        self.playlistImageUrl = playlistImageUrl
+        self.playlistName = playlistName
+        self.playlistDescription = playlistDescription
+        self.playlistTracksIds = playlistTracksIds
+        self.playlistTracks = playlistTracks
+        self.creatorLid = creatorLid
+        self.platform = platform
+        self.tracksCount = tracksCount
+        self.visibility = visibility
+        self.collaboratorIds = collaboratorIds
+    }
 }
 
 
@@ -457,6 +536,7 @@ struct TrackCandidate: Identifiable, Hashable, Codable {
     let duration: String?
     let genre: String?
     let artistAvatars: [String]?
+    let artistIDs: [String]?
 
     init(
         id: String? = nil,
@@ -468,7 +548,8 @@ struct TrackCandidate: Identifiable, Hashable, Codable {
         coverURL: String? = nil,
         duration: String? = nil,
         genre: String? = nil,
-        artistAvatars: [String]? = nil
+        artistAvatars: [String]? = nil,
+        artistIDs: [String]? = nil
     ) {
         self.id = id ?? trackID ?? refID ?? "\(title)|\(subtitle)"
         self.title = title
@@ -480,6 +561,7 @@ struct TrackCandidate: Identifiable, Hashable, Codable {
         self.duration = duration
         self.genre = genre
         self.artistAvatars = artistAvatars
+        self.artistIDs = artistIDs
     }
 
     init(_ track: TrackData, refID: String? = nil) {
@@ -492,7 +574,8 @@ struct TrackCandidate: Identifiable, Hashable, Codable {
             coverURL: track.coverUrl,
             duration: track.duration,
             genre: track.genre,
-            artistAvatars: track.artistAvatars
+            artistAvatars: track.artistAvatars,
+            artistIDs: track.artistIDs
         )
     }
 }
