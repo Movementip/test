@@ -191,6 +191,57 @@ enum LaneProbe {
             }
         }
 
+        // Probe request parsing before bearer authentication. Some Lane
+        // endpoints validate JSON shape before auth, which lets CI detect body
+        // contract changes even when no user test token is configured.
+        if let host = hosts.first {
+            let offset = offsets[host] ?? 0
+            let dummyID = "__lane_probe_missing__"
+            for (label, body) in [
+                ("tracks-object", ["trackIds": [dummyID]] as Any),
+                ("tracks-raw", [dummyID] as Any)
+            ] {
+                do {
+                    let req = try makeRequest(
+                        host: host,
+                        path: "/user/tracks",
+                        method: "POST",
+                        token: "",
+                        ldi: publicLDI,
+                        offset: offset,
+                        query: [URLQueryItem(name: "prefetch", value: "false")],
+                        json: body
+                    )
+                    let res = try await send(req)
+                    print("  unauth \(label): HTTP \(res.status) code=\(errorCode(res.data))")
+                } catch {
+                    print("  unauth \(label): ERROR \(error.localizedDescription)")
+                }
+            }
+
+            for (label, body) in [
+                ("add-raw", [dummyID] as Any),
+                ("add-object", ["trackIds": [dummyID]] as Any)
+            ] {
+                do {
+                    let req = try makeRequest(
+                        host: host,
+                        path: "/user/playlist/add-tracks",
+                        method: "POST",
+                        token: "",
+                        ldi: publicLDI,
+                        offset: offset,
+                        query: [URLQueryItem(name: "playlistId", value: "__lane_probe_missing_playlist__")],
+                        json: body
+                    )
+                    let res = try await send(req)
+                    print("  unauth \(label): HTTP \(res.status) code=\(errorCode(res.data))")
+                } catch {
+                    print("  unauth \(label): ERROR \(error.localizedDescription)")
+                }
+            }
+        }
+
         guard !token.isEmpty, !ldi.isEmpty else {
             print("Authenticated checks skipped: configure LANE_TEST_TOKEN and LANE_TEST_LDI repository secrets.")
             return
