@@ -4758,10 +4758,19 @@ private struct DiagnosticsScreen: View {
             }
 
             Section("Self-test") {
+                Button(session.diagnosticsRunning ? "Running diagnostics…" : "Auto-tune this network") {
+                    session.autoTuneLaneNetwork()
+                }
+                .disabled(session.diagnosticsRunning)
+
                 Button(session.diagnosticsRunning ? "Running diagnostics…" : "Run safe diagnostics") {
                     session.runLaneDiagnostics()
                 }
                 .disabled(session.diagnosticsRunning)
+
+                Text("Auto-tune tests the official Lane hosts/transports on this iPhone and selects the fastest working read profile. It also detects the accepted track-body formats without changing a real playlist.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 ScrollView(.horizontal) {
                     Text(session.diagnosticReport.isEmpty ? "No diagnostics run yet." : session.diagnosticReport)
