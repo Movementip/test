@@ -703,11 +703,21 @@ final class LaneSession: ObservableObject {
         // Lane host without requiring another IPA reinstall.
         if backendMode == .official, !didAutoTuneNetwork {
             didAutoTuneNetwork = true
-            let profile = await LaneAPI.shared.autoTuneNetworkProfile()
+            let publicProfile = await LaneAPI.shared.autoTuneNetworkProfile()
+
+            var authenticatedProfile = "guest"
+            if !token.isEmpty {
+                let language = Locale.current.language.languageCode?.identifier ?? "en"
+                authenticatedProfile = await LaneAPI.shared.autoTuneAuthenticatedProfile(
+                    token: token,
+                    deviceLanguage: language
+                )
+            }
+
             diagnosticHostMode = UserDefaults.standard.string(forKey: "lane.diag.host") ?? "auto"
             diagnosticTransportMode = UserDefaults.standard.string(forKey: "lane.diag.transport") ?? "system"
             baseURL = await LaneAPI.shared.currentBaseURL()
-            diagnosticReport = "Auto-selected network: \(profile)"
+            diagnosticReport = "Auto-selected network: \(publicProfile)\nAuthenticated route: \(authenticatedProfile)"
         }
     }
 
