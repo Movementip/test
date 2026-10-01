@@ -389,31 +389,23 @@ private final class DirectHTTPSOperation {
     }
 }
 
-/// Exact CdnUrlInterceptor routing recovered from Lane Android 1.4.7.
-func laneRoutedMediaURL(_ rawValue: String?) -> URL? {
+private let laneRussianMediaZones: Set<String> = [
+    "Europe/Kaliningrad", "Europe/Moscow", "Europe/Simferopol", "Europe/Kirov",
+    "Europe/Astrakhan", "Europe/Volgograd", "Europe/Saratov", "Europe/Ulyanovsk",
+    "Europe/Samara", "Asia/Yekaterinburg", "Asia/Omsk", "Asia/Novosibirsk",
+    "Asia/Barnaul", "Asia/Tomsk", "Asia/Novokuznetsk", "Asia/Krasnoyarsk",
+    "Asia/Irkutsk", "Asia/Chita", "Asia/Yakutsk", "Asia/Khandyga",
+    "Asia/Vladivostok", "Asia/Ust-Nera", "Asia/Magadan", "Asia/Sakhalin",
+    "Asia/Srednekolymsk", "Asia/Kamchatka", "Asia/Anadyr"
+]
+
+/// Exact CdnUrlInterceptor rewrite recovered from Lane Android 1.4.7,
+/// independent of the current diagnostics preference.
+func laneAPKMediaURL(_ rawValue: String?) -> URL? {
     guard var value = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
           !value.isEmpty else { return nil }
 
-    // Stable pre-regression builds used the media URL exactly as returned by
-    // Lane. Keep that as the default. The APK-style RU CDN rewrite remains
-    // available from Diagnostics so it can be tested on the actual carrier
-    // without another IPA reinstall.
-    let mediaRoute = UserDefaults.standard.string(forKey: "lane.diag.mediaRoute") ?? "original"
-    guard mediaRoute == "apk" else {
-        return URL(string: value)
-    }
-
-    let russianZones: Set<String> = [
-        "Europe/Kaliningrad", "Europe/Moscow", "Europe/Simferopol", "Europe/Kirov",
-        "Europe/Astrakhan", "Europe/Volgograd", "Europe/Saratov", "Europe/Ulyanovsk",
-        "Europe/Samara", "Asia/Yekaterinburg", "Asia/Omsk", "Asia/Novosibirsk",
-        "Asia/Barnaul", "Asia/Tomsk", "Asia/Novokuznetsk", "Asia/Krasnoyarsk",
-        "Asia/Irkutsk", "Asia/Chita", "Asia/Yakutsk", "Asia/Khandyga",
-        "Asia/Vladivostok", "Asia/Ust-Nera", "Asia/Magadan", "Asia/Sakhalin",
-        "Asia/Srednekolymsk", "Asia/Kamchatka", "Asia/Anadyr"
-    ]
-
-    guard russianZones.contains(TimeZone.current.identifier) else {
+    guard laneRussianMediaZones.contains(TimeZone.current.identifier) else {
         return URL(string: value)
     }
 
@@ -427,6 +419,19 @@ func laneRoutedMediaURL(_ rawValue: String?) -> URL? {
     }
 
     return URL(string: value)
+}
+
+/// Applies the currently selected media route. The app can switch between the
+/// original Lane URL and the APK regional rewrite at runtime.
+func laneRoutedMediaURL(_ rawValue: String?) -> URL? {
+    guard let clean = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !clean.isEmpty else { return nil }
+
+    let mediaRoute = UserDefaults.standard.string(forKey: "lane.diag.mediaRoute") ?? "original"
+    if mediaRoute == "apk" {
+        return laneAPKMediaURL(clean)
+    }
+    return URL(string: clean)
 }
 
 private final class LaneImageMemoryCache {
