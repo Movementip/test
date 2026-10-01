@@ -7,6 +7,7 @@ on:
       - "LaneIOSPrototype/**"
       - "LaneIOSPrototype.xcodeproj/**"
       - "LaneAssets/**"
+      - "Tools/LaneContractTests.swift"
       - ".github/workflows/build-ipa.yml"
 
 jobs:
@@ -17,6 +18,16 @@ jobs:
 
       - name: Xcode
         run: xcodebuild -version
+
+      - name: API contract tests
+        run: |
+          swiftc -parse-as-library -swift-version 5 \
+            LaneIOSPrototype/LaneModels.swift \
+            LaneIOSPrototype/RequestSigner.swift \
+            LaneIOSPrototype/LaneAPI.swift \
+            Tools/LaneContractTests.swift \
+            -o /tmp/lane-contract-tests -lz
+          /tmp/lane-contract-tests
 
       - name: Build unsigned app
         run: |

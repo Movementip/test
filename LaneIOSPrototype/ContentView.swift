@@ -4,6 +4,7 @@ import UIKit
 private let lanePink = Color(red: 1.0, green: 130.0 / 255.0, blue: 132.0 / 255.0)
 private let laneBackground = Color(red: 14.0 / 255.0, green: 14.0 / 255.0, blue: 14.0 / 255.0)
 private let laneCard = Color.white.opacity(0.07)
+private let laneBottomSurface = Color(red: 21.0 / 255.0, green: 21.0 / 255.0, blue: 21.0 / 255.0)
 
 private struct LaneInteractivePopGestureEnabler: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UIViewController {
@@ -46,7 +47,7 @@ private extension UIViewController {
     }
 }
 
-private extension View {
+extension View {
     func laneIOSBackSwipe() -> some View {
         background(
             LaneInteractivePopGestureEnabler()
@@ -242,10 +243,20 @@ private struct LaneBottomBar: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: 48)
-        .background(
-            Color(red: 21.0 / 255.0, green: 21.0 / 255.0, blue: 21.0 / 255.0)
-                .clipShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
-        )
+        .background {
+            ZStack(alignment: .bottom) {
+                RoundedRectangle(cornerRadius: 36, style: .continuous)
+                    .fill(laneBottomSurface)
+
+                // Continue the control surface through the home-indicator area
+                // while the buttons themselves remain inside the safe area.
+                Rectangle()
+                    .fill(laneBottomSurface)
+                    .frame(height: 48)
+                    .offset(y: 48)
+                    .ignoresSafeArea(.container, edges: .bottom)
+            }
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 36, style: .continuous)
                 .stroke(Color.white.opacity(0.05), lineWidth: 1)
@@ -327,19 +338,10 @@ private struct HomeScreen: View {
                                 }
 
                                 if !session.serverPlaylists.isEmpty {
-                                    CardShelf(
+                                    ServerPlaylistShelf(
                                         title: "Your playlists",
-                                        cards: session.serverPlaylists.map {
-                                            LaneCardItem(
-                                                id: $0.playlistId ?? UUID().uuidString,
-                                                title: $0.playlistName ?? "Playlist",
-                                                subtitle: $0.playlistDescription ?? "\($0.tracksCount ?? 0) tracks",
-                                                imageURL: $0.playlistImageUrl,
-                                                kind: "playlist",
-                                                backendID: $0.playlistId,
-                                                platform: $0.platform
-                                            )
-                                        }
+                                        playlists: session.serverPlaylists,
+                                        showPlayer: $showPlayer
                                     )
                                 }
                             }
@@ -1968,6 +1970,7 @@ struct PlaylistDetailScreen: View {
         }
         .background(laneBackground.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
+        .laneIOSBackSwipe()
         .safeAreaInset(edge: .top, spacing: 0) {
             HStack(spacing: 0) {
                 APKImportBackButton {
@@ -3716,14 +3719,25 @@ private struct DownloadsScreen: View {
     }
 }
 
-private struct CreatePlaylistSheet: View {
+struct CreatePlaylistSheet: View {
     @EnvironmentObject private var session: LaneSession
     @Environment(\.dismiss) private var dismiss
+
+    let initialTrackIDs: [String]
+    let onCreated: (LanePlaylist) -> Void
 
     @State private var name = ""
     @State private var description = ""
     @State private var saving = false
     @State private var errorMessage: String?
+
+    init(
+        initialTrackIDs: [String] = [],
+        onCreated: @escaping (LanePlaylist) -> Void = { _ in }
+    ) {
+        self.initialTrackIDs = initialTrackIDs
+        self.onCreated = onCreated
+    }
 
     var body: some View {
         NavigationStack {
@@ -3759,7 +3773,12 @@ private struct CreatePlaylistSheet: View {
                         errorMessage = nil
                         Task {
                             do {
-                                try await session.createServerPlaylist(name: name, description: description)
+                                let playlist = try await session.createServerPlaylist(
+                                    name: name,
+                                    description: description,
+                                    trackIDs: initialTrackIDs
+                                )
+                                onCreated(playlist)
                                 dismiss()
                             } catch {
                                 errorMessage = error.localizedDescription
@@ -3908,6 +3927,7 @@ private struct ImportTracksScreen: View {
             importTask = nil
         }
         .toolbar(.hidden, for: .navigationBar)
+        .laneIOSBackSwipe()
     }
 
     private var importTopBar: some View {
@@ -4888,9 +4908,10 @@ private struct TrackSection: View {
     }
 }
 
-private struct CardShelf: View {
+private struct ServerPlaylistShelf: View {
     let title: String
-    let cards: [LaneCardItem]
+    let playlists: [LanePlaylist]
+    @Binding var showPlayer: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -4900,18 +4921,24 @@ private struct CardShelf: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 14) {
-                    ForEach(cards) { card in
-                        VStack(alignment: .leading, spacing: 8) {
-                            ArtworkView(url: card.imageURL, size: 148, radius: 15)
-                            Text(card.title)
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
-                            Text(card.subtitle)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                    ForEach(Array(playlists.enumerated()), id: \.offset) { _, playlist in
+                        NavigationLink {
+                            PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ArtworkView(url: playlist.playlistImageUrl, size: 148, radius: 15)
+                                Text(playlist.playlistName ?? "Playlist")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+                                Text(playlist.playlistDescription ?? "\(playlist.tracksCount ?? 0) tracks")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            .frame(width: 148, alignment: .leading)
                         }
-                        .frame(width: 148, alignment: .leading)
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 18)

@@ -457,6 +457,8 @@ final class LaneSession: ObservableObject {
     private var playbackRequestID = UUID()
     private var streamResolveTask: Task<Void, Never>?
     private var playbackWatchdogTask: Task<Void, Never>?
+    private var trackStatsTask: Task<Void, Never>?
+    private var trackStatsCache: [String: TrackStatsDTO] = [:]
     private var streamResolutionCache: [String: (result: TrackStreamingResult, expiresAt: Date)] = [:]
     private var didConfigureAPIBase = false
     private var didPrepareRegionalHost = false
@@ -506,6 +508,10 @@ final class LaneSession: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: "lane.cachedArtistDetails"),
            let cache = try? JSONDecoder().decode([String: LaneArtist].self, from: data) {
             cachedArtistDetails = cache
+        }
+        if let data = UserDefaults.standard.data(forKey: "lane.cachedTrackStats"),
+           let cache = try? JSONDecoder().decode([String: TrackStatsDTO].self, from: data) {
+            trackStatsCache = cache
         }
         configureRemoteCommands()
     }
@@ -615,6 +621,10 @@ final class LaneSession: ObservableObject {
         serverArtists = []
         cachedArtistDetails = [:]
         UserDefaults.standard.removeObject(forKey: "lane.cachedArtistDetails")
+        trackStatsTask?.cancel()
+        trackStatsCache = [:]
+        trackStats = nil
+        UserDefaults.standard.removeObject(forKey: "lane.cachedTrackStats")
         streamResolutionCache = [:]
         activeStreamQuality = nil
         homeSections = []
@@ -1736,7 +1746,12 @@ final class LaneSession: ObservableObject {
         }
     }
 
-    func createServerPlaylist(name: String, description: String = "", trackIDs: [String] = []) async throws {
+    @discardableResult
+    func createServerPlaylist(
+        name: String,
+        description: String = "",
+        trackIDs: [String] = []
+    ) async throws -> LanePlaylist {
         let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty, !isGuest else { throw LaneAPIError.decoding("Sign in and enter a playlist name") }
 
@@ -1747,6 +1762,7 @@ final class LaneSession: ObservableObject {
             throw LaneAPIError.decoding("Lane account ID is unavailable")
         }
         await configureAPI()
+        let previousIDs = Set(serverPlaylists.compactMap(\.playlistId))
         let result = try await LaneAPI.shared.createPlaylist(
             token: token,
             imageURL: "",
@@ -1757,8 +1773,66 @@ final class LaneSession: ObservableObject {
         )
         status = result.status
         try result.requireSuccess()
-        output = result.pretty
-        await loadLibrary()
+
+        func playlistID(in value: Any?) -> String? {
+            if let dictionary = value as? [String: Any] {
+                if let id = dictionary["playlistId"] as? String, !id.isEmpty { return id }
+                for child in dictionary.values {
+                    if let id = playlistID(in: child) { return id }
+                }
+            } else if let array = value as? [Any] {
+                for child in array {
+                    if let id = playlistID(in: child) { return id }
+                }
+            }
+            return nil
+        }
+
+        var createdID = playlistID(in: result.json)
+        if createdID == nil {
+            // Some Lane regions acknowledge the write before returning its ID.
+            // Poll the read model briefly, excluding playlists that existed
+            // before this mutation so duplicate names remain safe.
+            for attempt in 0..<5 {
+                if let playlists = try? await LaneAPI.shared.userPlaylists(token: token),
+                   let created = playlists.first(where: {
+                       $0.playlistName == clean &&
+                       $0.creatorLid == creator &&
+                       !previousIDs.contains($0.playlistId ?? "")
+                   }),
+                   let id = created.playlistId,
+                   !id.isEmpty {
+                    createdID = id
+                    break
+                }
+                if attempt < 4 {
+                    try await Task.sleep(nanoseconds: 350_000_000)
+                }
+            }
+        }
+
+        guard let createdID, !createdID.isEmpty else {
+            throw LaneAPIError.decoding("Lane created the playlist but did not return its ID")
+        }
+
+        let created = LanePlaylist(
+            playlistId: createdID,
+            playlistImageUrl: nil,
+            playlistName: clean,
+            playlistDescription: description,
+            playlistTracksIds: trackIDs,
+            playlistTracks: nil,
+            creatorLid: creator,
+            platform: "lane",
+            tracksCount: trackIDs.count,
+            visibility: "public",
+            collaboratorIds: []
+        )
+        pendingSavedPlaylists[createdID] = created
+        serverPlaylists.removeAll { $0.playlistId == createdID }
+        serverPlaylists.insert(created, at: 0)
+        output = "Created playlist \(clean)."
+        return created
     }
 
     func deleteServerPlaylist(_ playlist: LanePlaylist) async throws {
@@ -2073,6 +2147,32 @@ final class LaneSession: ObservableObject {
         output = "Collaborator removed."
     }
 
+    private func applyConfirmedTrackIDs(_ ids: [String], to playlistID: String) {
+        guard let index = serverPlaylists.firstIndex(where: { $0.playlistId == playlistID }) else { return }
+
+        let value = serverPlaylists[index]
+        var seen = Set<String>()
+        let combined = ((value.playlistTracksIds ?? []) + ids)
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+        let updated = LanePlaylist(
+            playlistId: value.playlistId,
+            playlistImageUrl: value.playlistImageUrl,
+            playlistName: value.playlistName,
+            playlistDescription: value.playlistDescription,
+            playlistTracksIds: combined,
+            playlistTracks: value.playlistTracks,
+            creatorLid: value.creatorLid,
+            platform: value.platform,
+            tracksCount: max(value.tracksCount ?? 0, combined.count),
+            visibility: value.visibility,
+            collaboratorIds: value.collaboratorIds
+        )
+        serverPlaylists[index] = updated
+        if pendingSavedPlaylists[playlistID] != nil {
+            pendingSavedPlaylists[playlistID] = updated
+        }
+    }
+
     func addTrack(_ track: TrackCandidate, to playlist: LanePlaylist) async throws {
         guard let playlistID = playlist.playlistId,
               let trackID = track.trackID,
@@ -2090,8 +2190,10 @@ final class LaneSession: ObservableObject {
         status = result.status
         try result.requireSuccess()
 
-        if var cached = playlistTrackCache[playlistID],
-           !cached.contains(where: { $0.trackID == trackID }) {
+        applyConfirmedTrackIDs([trackID], to: playlistID)
+
+        var cached = playlistTrackCache[playlistID] ?? []
+        if !cached.contains(where: { $0.trackID == trackID }) {
             cached.append(applyingRefID(playlistID, to: [track]).first ?? track)
             rememberPlaylistTracks(cached, playlistID: playlistID)
         }
@@ -2110,6 +2212,7 @@ final class LaneSession: ObservableObject {
         soundCloudProfileURL: String? = nil
     ) async throws -> LanePlaylist {
         await configureAPI()
+        let normalizedYandexID = yandexPlaylistID.map(YandexPlaylistSource.normalize)
         return try await LaneAPI.shared.importPreview(
             token: token,
             platform: platform,
@@ -2117,7 +2220,7 @@ final class LaneSession: ObservableObject {
             spotifyClientToken: spotifyClientToken,
             spotifyPlaylistId: spotifyPlaylistID,
             soundcloudPlaylistId: soundCloudPlaylistID,
-            yandexPlaylistId: yandexPlaylistID,
+            yandexPlaylistId: normalizedYandexID,
             soundcloudProfileUrl: soundCloudProfileURL
         )
     }
@@ -2205,9 +2308,8 @@ final class LaneSession: ObservableObject {
     }
 
     func yandexPlaylistTracks(from source: String) async throws -> [YandexImportTrack] {
-        let clean = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let pageURL = URL(string: clean),
-              let playlistUUID = pageURL.pathComponents.last(where: { $0.hasPrefix("lk.") }) else {
+        let normalizedSource = YandexPlaylistSource.normalize(source)
+        guard let pageURL = URL(string: normalizedSource) else {
             throw LaneAPIError.decoding("Invalid Yandex Music playlist link")
         }
 
@@ -2225,27 +2327,43 @@ final class LaneSession: ObservableObject {
         }
 
         let html = rawHTML.replacingOccurrences(of: "\\\"", with: "\"")
-        let marker = "\"playlistUuid\":\"\(playlistUUID)\""
-        var cursor = html.startIndex
-        var ownerAndKind: (String, String)?
+        let resolvedURL = pageHTTP.url ?? pageURL
+        let components = resolvedURL.pathComponents.filter { $0 != "/" }
+        var ownerAndKind: (String, String)? = {
+            guard let usersIndex = components.firstIndex(of: "users"),
+                  let playlistsIndex = components.firstIndex(of: "playlists"),
+                  components.indices.contains(usersIndex + 1),
+                  components.indices.contains(playlistsIndex + 1) else { return nil }
+            return (components[usersIndex + 1], components[playlistsIndex + 1])
+        }()
+
+        let playlistUUID: String? = {
+            guard let index = components.firstIndex(of: "playlists"),
+                  components.indices.contains(index + 1) else { return nil }
+            return components[index + 1]
+        }()
         let expression = try NSRegularExpression(pattern: #"\"uid\":([0-9]+),\"kind\":([0-9]+)"#)
 
-        while cursor < html.endIndex,
-              let markerRange = html.range(of: marker, range: cursor..<html.endIndex) {
-            let windowEnd = html.index(
-                markerRange.upperBound,
-                offsetBy: 2_000,
-                limitedBy: html.endIndex
-            ) ?? html.endIndex
-            let window = String(html[markerRange.lowerBound..<windowEnd])
-            let fullRange = NSRange(window.startIndex..<window.endIndex, in: window)
-            if let match = expression.firstMatch(in: window, range: fullRange),
-               let uidRange = Range(match.range(at: 1), in: window),
-               let kindRange = Range(match.range(at: 2), in: window) {
-                ownerAndKind = (String(window[uidRange]), String(window[kindRange]))
-                break
+        if ownerAndKind == nil, let playlistUUID, !playlistUUID.isEmpty {
+            let marker = "\"playlistUuid\":\"\(playlistUUID)\""
+            var cursor = html.startIndex
+            while cursor < html.endIndex,
+                  let markerRange = html.range(of: marker, range: cursor..<html.endIndex) {
+                let windowEnd = html.index(
+                    markerRange.upperBound,
+                    offsetBy: 2_000,
+                    limitedBy: html.endIndex
+                ) ?? html.endIndex
+                let window = String(html[markerRange.lowerBound..<windowEnd])
+                let fullRange = NSRange(window.startIndex..<window.endIndex, in: window)
+                if let match = expression.firstMatch(in: window, range: fullRange),
+                   let uidRange = Range(match.range(at: 1), in: window),
+                   let kindRange = Range(match.range(at: 2), in: window) {
+                    ownerAndKind = (String(window[uidRange]), String(window[kindRange]))
+                    break
+                }
+                cursor = markerRange.upperBound
             }
-            cursor = markerRange.upperBound
         }
 
         guard let (uid, kind) = ownerAndKind,
@@ -2288,18 +2406,25 @@ final class LaneSession: ObservableObject {
         }
     }
 
-    private func serverTrackIDs(in playlistID: String) async throws -> Set<String> {
+    private func serverTrackIDs(
+        in playlistID: String,
+        forceRemoteRead: Bool = false
+    ) async throws -> Set<String> {
         let cached = serverPlaylists.first { $0.playlistId == playlistID }
 
         // Newly created/empty playlists already carry enough information in
         // Library. Do not block the first import on a second details request.
-        if let ids = cached?.playlistTracksIds {
+        if !forceRemoteRead,
+           let ids = cached?.playlistTracksIds,
+           !ids.isEmpty || cached?.tracksCount == 0 {
             return Set(ids.filter { !$0.isEmpty })
         }
-        if let tracks = cached?.playlistTracks {
+        if !forceRemoteRead,
+           let tracks = cached?.playlistTracks,
+           !tracks.isEmpty || cached?.tracksCount == 0 {
             return Set(tracks.compactMap(\.songId).filter { !$0.isEmpty })
         }
-        if cached?.tracksCount == 0 {
+        if !forceRemoteRead, cached?.tracksCount == 0 {
             return []
         }
 
@@ -2309,10 +2434,12 @@ final class LaneSession: ObservableObject {
             platform: cached?.platform
         )
 
-        if let ids = playlist.playlistTracksIds {
+        if let ids = playlist.playlistTracksIds,
+           !ids.isEmpty || playlist.tracksCount == 0 {
             return Set(ids.filter { !$0.isEmpty })
         }
-        if let tracks = playlist.playlistTracks {
+        if let tracks = playlist.playlistTracks,
+           !tracks.isEmpty || playlist.tracksCount == 0 {
             return Set(tracks.compactMap(\.songId).filter { !$0.isEmpty })
         }
         if playlist.tracksCount == 0 {
@@ -2333,6 +2460,39 @@ final class LaneSession: ObservableObject {
         throw LaneAPIError.decoding(
             "Lane could not read the target playlist before importing."
         )
+    }
+
+    private func waitForServerTrackIDs(
+        in playlistID: String,
+        expecting expected: Set<String>,
+        attempts: Int = 4
+    ) async throws -> Set<String> {
+        var lastIDs = Set<String>()
+        var lastError: Error?
+        var didReadServerState = false
+
+        for attempt in 0..<max(attempts, 1) {
+            try Task.checkCancellation()
+            do {
+                let ids = try await serverTrackIDs(in: playlistID, forceRemoteRead: true)
+                lastIDs = ids
+                lastError = nil
+                didReadServerState = true
+                if expected.isSubset(of: ids) { return ids }
+            } catch {
+                lastError = error
+            }
+
+            if attempt + 1 < attempts {
+                // Read replicas can lag successful playlist mutations. Poll
+                // read-only state before repeating any POST.
+                let delay = UInt64(250 * (attempt + 1)) * 1_000_000
+                try await Task.sleep(nanoseconds: delay)
+            }
+        }
+
+        if didReadServerState { return lastIDs }
+        throw lastError ?? LaneAPIError.emptyResponse
     }
 
     private func canonicalImportBatch(_ sourceIDs: [String]) async throws -> [String] {
@@ -2416,16 +2576,20 @@ final class LaneSession: ObservableObject {
         }
 
         await configureAPI()
-
-        var imported = 0
+        progress(0, clean.count, "Checking Lane playlist…")
+        var existing = try await serverTrackIDs(in: playlistID, forceRemoteRead: true)
         var processedSources = 0
-        var skippedSources = 0
         var importedCanonical = Set<String>()
+        var confirmedSet = Set<String>()
+        var confirmedOrder: [String] = []
 
         for start in stride(from: 0, to: clean.count, by: 15) {
             try Task.checkCancellation()
             let end = min(start + 15, clean.count)
             let sourceBatch = Array(clean[start..<end])
+            let alreadyPresent = sourceBatch.filter { existing.contains($0) }
+            let pendingSource = sourceBatch.filter { !existing.contains($0) }
+            var accepted = alreadyPresent
 
             progress(
                 processedSources,
@@ -2437,80 +2601,121 @@ final class LaneSession: ObservableObject {
             // return IDs that /user/playlist/add-tracks accepts directly, so
             // do not add an unnecessary /user/tracks round-trip for every
             // batch. This restores the much faster Android-style import path.
-            var checked = 0
-            var added = try await addImportIDsBySplitting(
-                sourceBatch,
-                into: playlistID
-            ) { count in
-                checked += count
-                progress(
-                    processedSources,
-                    clean.count,
-                    "Adding \(checked)/\(sourceBatch.count) tracks…"
-                )
-            }
+            if !pendingSource.isEmpty {
+                var checked = 0
+                let directAdded = try await addImportIDsBySplitting(
+                    pendingSource,
+                    into: playlistID
+                ) { count in
+                    checked += count
+                    progress(
+                        processedSources,
+                        clean.count,
+                        "Adding \(checked)/\(pendingSource.count) tracks…"
+                    )
+                }
+                accepted.append(contentsOf: directAdded)
 
-            let directAdded = Set(added)
-            let rejectedSource = sourceBatch.filter { !directAdded.contains($0) }
+                let directAddedSet = Set(directAdded)
+                let rejectedSource = pendingSource.filter { !directAddedSet.contains($0) }
 
-            // Some platform previews contain source IDs rather than canonical
-            // Lane songIds. Resolve only the rejected subset, then retry those
-            // canonical IDs instead of resolving every track up front.
-            if !rejectedSource.isEmpty {
-                progress(
-                    processedSources,
-                    clean.count,
-                    "Resolving \(rejectedSource.count) unmatched tracks…"
-                )
+                // Some platform previews contain source IDs rather than
+                // canonical Lane songIds. Resolve only the rejected subset.
+                if !rejectedSource.isEmpty {
+                    progress(
+                        processedSources,
+                        clean.count,
+                        "Resolving \(rejectedSource.count) unmatched tracks…"
+                    )
 
-                let canonical = try await canonicalImportBatch(rejectedSource)
-                    .filter { importedCanonical.insert($0).inserted }
+                    let canonical = try await canonicalImportBatch(rejectedSource)
+                        .filter { importedCanonical.insert($0).inserted }
+                    let canonicalPresent = canonical.filter { existing.contains($0) }
+                    let canonicalPending = canonical.filter { !existing.contains($0) }
+                    accepted.append(contentsOf: canonicalPresent)
 
-                if !canonical.isEmpty {
-                    var canonicalChecked = 0
-                    let canonicalAdded = try await addImportIDsBySplitting(
-                        canonical,
-                        into: playlistID
-                    ) { count in
-                        canonicalChecked += count
-                        progress(
-                            processedSources,
-                            clean.count,
-                            "Adding resolved tracks \(canonicalChecked)/\(canonical.count)…"
-                        )
+                    if !canonicalPending.isEmpty {
+                        var canonicalChecked = 0
+                        let canonicalAdded = try await addImportIDsBySplitting(
+                            canonicalPending,
+                            into: playlistID
+                        ) { count in
+                            canonicalChecked += count
+                            progress(
+                                processedSources,
+                                clean.count,
+                                "Adding resolved tracks \(canonicalChecked)/\(canonicalPending.count)…"
+                            )
+                        }
+                        accepted.append(contentsOf: canonicalAdded)
                     }
-                    added.append(contentsOf: canonicalAdded)
                 }
             }
 
-            let uniqueAdded = Array(Set(added))
-            imported += uniqueAdded.count
-            skippedSources += max(0, sourceBatch.count - uniqueAdded.count)
+            for id in accepted where confirmedSet.insert(id).inserted {
+                confirmedOrder.append(id)
+            }
+            existing.formUnion(accepted)
+            applyConfirmedTrackIDs(accepted, to: playlistID)
             processedSources += sourceBatch.count
-            importedBatch(uniqueAdded)
             progress(processedSources, clean.count, "")
 
             if end < clean.count {
+                // Keep mutations ordered and below Lane's burst-rate limits.
                 try await Task.sleep(nanoseconds: 120_000_000)
             }
         }
 
-        guard imported > 0 else {
+        guard !confirmedSet.isEmpty else {
             throw LaneAPIError.decoding(
                 "Lane did not accept any tracks from the import preview."
             )
         }
 
-        output = skippedSources > 0
-            ? "Imported \(imported) tracks; skipped \(skippedSources)."
-            : "Imported all \(imported) tracks to Lane."
+        // A 2xx mutation response is not enough. Wait for the canonical
+        // playlist state, retry only missing accepted IDs once, then report
+        // exactly what the server actually persisted.
+        progress(processedSources, clean.count, "Verifying Lane playlist…")
+        var verified = try await waitForServerTrackIDs(
+            in: playlistID,
+            expecting: confirmedSet
+        )
+        var missing = confirmedOrder.filter { !verified.contains($0) }
 
-        // Reconcile in the background so the UI does not wait for a complete
-        // library/likes refresh before reporting a successful import.
+        if !missing.isEmpty {
+            progress(processedSources, clean.count, "Retrying \(missing.count) missing tracks…")
+            _ = try await addImportIDsBySplitting(
+                missing,
+                into: playlistID,
+                onChecked: { _ in }
+            )
+            verified = try await waitForServerTrackIDs(
+                in: playlistID,
+                expecting: confirmedSet
+            )
+            missing = confirmedOrder.filter { !verified.contains($0) }
+        }
+
+        let verifiedInOrder = confirmedOrder.filter { verified.contains($0) }
+        guard !verifiedInOrder.isEmpty else {
+            throw LaneAPIError.decoding(
+                "Lane acknowledged the import but no tracks appeared in the playlist."
+            )
+        }
+
+        applyConfirmedTrackIDs(verifiedInOrder, to: playlistID)
+        importedBatch(verifiedInOrder)
+        progress(clean.count, clean.count, "")
+        output = missing.isEmpty
+            ? "Verified all \(verifiedInOrder.count) imported tracks in Lane."
+            : "Verified \(verifiedInOrder.count) tracks; \(missing.count) were not persisted."
+
+        // Keep the rest of Library fresh without hiding verified optimistic
+        // state when a read replica is briefly behind.
         Task { @MainActor in
             await loadLibrary()
         }
-        return imported
+        return verifiedInOrder.count
     }
 
     // MARK: Social
@@ -2703,15 +2908,37 @@ final class LaneSession: ObservableObject {
     // MARK: Track metadata
 
     func loadTrackStats(_ track: TrackCandidate) {
-        guard let id = track.trackID else { return }
-        Task {
+        guard let id = track.trackID, !id.isEmpty else { return }
+
+        if currentTrack?.trackID == id, let cached = trackStatsCache[id] {
+            trackStats = cached
+        }
+
+        trackStatsTask?.cancel()
+        trackStatsTask = Task { [weak self] in
+            guard let self else { return }
             do {
-                await configureAPI()
-                let stats = try await LaneAPI.shared.trackStats(token: token, trackId: id)
-                trackStats = stats
-                output = "Likes: \(stats.likesCount)\nComments: \(stats.commentsCount)"
+                await self.configureAPI()
+                try Task.checkCancellation()
+                let stats = try await LaneAPI.shared.trackStats(token: self.token, trackId: id)
+                try Task.checkCancellation()
+
+                self.trackStatsCache[id] = stats
+                if let data = try? JSONEncoder().encode(self.trackStatsCache) {
+                    UserDefaults.standard.set(data, forKey: "lane.cachedTrackStats")
+                }
+
+                // A slow response for the previous song must never overwrite
+                // the counters for the track now shown in the full player.
+                if self.currentTrack?.trackID == id {
+                    self.trackStats = stats
+                }
+                self.output = "Likes: \(stats.likesCount)\nComments: \(stats.commentsCount)"
+            } catch is CancellationError {
+                return
             } catch {
-                output = error.localizedDescription
+                guard self.currentTrack?.trackID == id else { return }
+                self.output = error.localizedDescription
             }
         }
     }
@@ -2889,7 +3116,7 @@ final class LaneSession: ObservableObject {
         streamURL = ""
         playbackPosition = 0
         playbackDuration = parseDuration(track.duration) ?? 0
-        trackStats = nil
+        trackStats = track.trackID.flatMap { trackStatsCache[$0] }
         currentLyrics = nil
         lyricsError = ""
 
@@ -3204,6 +3431,10 @@ final class LaneSession: ObservableObject {
             asset = AVURLAsset(url: url)
         }
         let item = AVPlayerItem(asset: asset)
+        // AVPlayer supports progressive HTTP range loading. Keep a short
+        // forward buffer so audio starts while the remaining file arrives.
+        item.preferredForwardBufferDuration = 3
+        item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
         let newPlayer = AVPlayer(playerItem: item)
         // Media3 starts promptly; AVPlayer's default conservative buffering
         // could delay the first audible frame for several seconds on LTE.
@@ -3339,7 +3570,7 @@ final class LaneSession: ObservableObject {
             }
         }
 
-        newPlayer.play()
+        newPlayer.playImmediately(atRate: 1)
 
         // AVPlayer can remain in waitingToPlayAtSpecifiedRate indefinitely for
         // some signed CDN URLs without ever transitioning to .failed. Android
@@ -3356,16 +3587,7 @@ final class LaneSession: ObservableObject {
                   self.playbackPosition < 0.25,
                   !self.streamURL.isEmpty else { return }
 
-            if !self.playerRetriedWithLocalDownload,
-               let stalledURL = self.normalizedStreamURL(self.streamURL),
-               ["laneapi.com", "ru.laneapi.com", "cdn.laneapi.com"].contains(stalledURL.host ?? "") {
-                self.playerRetriedWithLocalDownload = true
-                self.downloadCompatibilityAudio(
-                    self.streamURL,
-                    requestID: requestID,
-                    track: track
-                )
-            } else if !useCompatibilityHeaders && !self.playerRetriedWithCompatibilityHeaders {
+            if !useCompatibilityHeaders && !self.playerRetriedWithCompatibilityHeaders {
                 self.playerRetriedWithCompatibilityHeaders = true
                 try? self.play(
                     urlString: self.streamURL,

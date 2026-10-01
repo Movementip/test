@@ -59,12 +59,17 @@ enum LaneAPIError: LocalizedError {
 actor LaneAPI {
     static let shared = LaneAPI()
 
+    private let urlSession: URLSession
     private var base = URL(string: "https://laneapi.com")!
     private var serviceLDI = ""
     private var signingConfiguration = LaneSigningConfiguration.official
     private var timeOffsetMilliseconds: Int64 = 0
     private let lastWorkingRegionalBaseKey = "lane.lastWorkingRegionalBase"
     private let diagnosticTraceKey = "lane.diag.trace"
+
+    init(urlSession: URLSession = .shared) {
+        self.urlSession = urlSession
+    }
 
     private func diagnosticSetting(_ key: String, default fallback: String) -> String {
         UserDefaults.standard.string(forKey: key) ?? fallback
@@ -124,7 +129,7 @@ actor LaneAPI {
             request.timeoutInterval = 4
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             let started = Date()
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (_, response) = try await urlSession.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             parts.append("system=\(status)/\(elapsedMS(started))ms")
         } catch {
@@ -160,7 +165,7 @@ actor LaneAPI {
                 let response = try await AndroidNetworkTransport.data(for: request, timeout: 4)
                 status = response.response.statusCode
             } else {
-                let (_, response) = try await URLSession.shared.data(for: request)
+                let (_, response) = try await urlSession.data(for: request)
                 status = (response as? HTTPURLResponse)?.statusCode ?? 0
             }
             guard (200..<300).contains(status) else { return nil }
@@ -257,7 +262,7 @@ actor LaneAPI {
                 raw = response.data
                 http = response.response
             } else {
-                let (data, response) = try await URLSession.shared.data(for: signed)
+                let (data, response) = try await urlSession.data(for: signed)
                 guard let response = response as? HTTPURLResponse else {
                     return (false, 0, Int(Date().timeIntervalSince(started) * 1000))
                 }
@@ -382,7 +387,7 @@ actor LaneAPI {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("close", forHTTPHeaderField: "Connection")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await urlSession.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw LaneAPIError.nonHTTP
         }
@@ -410,7 +415,7 @@ actor LaneAPI {
         }
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await urlSession.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw LaneAPIError.nonHTTP
             }
@@ -521,7 +526,7 @@ actor LaneAPI {
 
             let signer = signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
             let signed = try signer.sign(reserveRequest, body: nil)
-            let (rawData, response) = try await URLSession.shared.data(for: signed)
+            let (rawData, response) = try await urlSession.data(for: signed)
 
             guard let http = response as? HTTPURLResponse else {
                 throw LaneAPIError.nonHTTP
@@ -841,7 +846,7 @@ actor LaneAPI {
                 do {
                     let signer = signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
                     let signedReq = try signer.sign(req, body: nil)
-                    let (rawData, response) = try await URLSession.shared.data(for: signedReq)
+                    let (rawData, response) = try await urlSession.data(for: signedReq)
                     guard let http = response as? HTTPURLResponse else { continue }
 
                     let data = try decodeOfficialTransport(rawData, response: http)

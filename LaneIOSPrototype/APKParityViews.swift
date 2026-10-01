@@ -251,6 +251,8 @@ struct APKTrackActionsSheet: View {
     @State private var actionError: String?
     @State private var actionNotice: String?
     @State private var sharing = false
+    @State private var addingPlaylistID: String?
+    @State private var showCreatePlaylist = false
 
     var body: some View {
         NavigationStack {
@@ -286,10 +288,21 @@ struct APKTrackActionsSheet: View {
                             .font(.system(size: 20, weight: .bold))
                             .padding(.vertical, 10)
 
-                        ForEach(Array(session.serverPlaylists.enumerated()), id: \.offset) { _, playlist in
+                        actionRow("Create new playlist", icon: "plus") {
+                            showCreatePlaylist = true
+                        }
+
+                        ForEach(
+                            Array(session.serverPlaylists.filter { $0.playlistId != "lane_likes" }.enumerated()),
+                            id: \.offset
+                        ) { _, playlist in
                             actionRow(playlist.playlistName ?? "Playlist", icon: "music.note.list") {
+                                guard addingPlaylistID == nil,
+                                      let playlistID = playlist.playlistId else { return }
+                                addingPlaylistID = playlistID
                                 actionError = nil
                                 Task {
+                                    defer { addingPlaylistID = nil }
                                     do {
                                         try await session.addTrack(track, to: playlist)
                                         dismiss()
@@ -304,6 +317,22 @@ struct APKTrackActionsSheet: View {
                                 session.add(track, to: playlist.id)
                                 dismiss()
                             }
+                        }
+
+                        if addingPlaylistID != nil {
+                            HStack(spacing: 10) {
+                                ProgressView().tint(apkPink)
+                                Text("Adding track…")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.top, 10)
+                        }
+                        if let actionError {
+                            Text(actionError)
+                                .font(.system(size: 13))
+                                .foregroundStyle(apkPink)
+                                .padding(.top, 10)
                         }
                     } else {
                         actionRow(session.isFavorite(track) ? "Remove from liked" : "Like",
@@ -378,6 +407,13 @@ struct APKTrackActionsSheet: View {
         .presentationDragIndicator(.hidden)
         .sheet(item: $shareItem) { item in
             LaneShareActivitySheet(url: item.url)
+        }
+        .sheet(isPresented: $showCreatePlaylist) {
+            CreatePlaylistSheet(
+                initialTrackIDs: track.trackID.map { [$0] } ?? [],
+                onCreated: { _ in dismiss() }
+            )
+            .environmentObject(session)
         }
     }
 
@@ -1218,6 +1254,7 @@ struct APKAlbumDetailScreen: View {
         .background(apkBackground.ignoresSafeArea())
         .tint(.white)
         .navigationBarBackButtonHidden(true)
+        .laneIOSBackSwipe()
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
@@ -2227,6 +2264,10 @@ struct APKFullPlayerView: View {
                     dismiss()
                 }
         )
+        .task(id: session.currentTrack?.trackID) {
+            guard let track = session.currentTrack else { return }
+            session.loadTrackStats(track)
+        }
         .sheet(isPresented: $showComments) {
             if let track = session.currentTrack {
                 APKCommentsScreen(track: track)

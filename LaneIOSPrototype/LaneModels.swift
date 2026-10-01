@@ -26,9 +26,30 @@ struct TrackStreamingResult: Decodable {
     let ttl: Int64?
 }
 
-struct TrackStatsDTO: Decodable {
+struct TrackStatsDTO: Codable, Equatable {
     let likesCount: Int64
     let commentsCount: Int64
+}
+
+struct PlaylistCreationResponse: Decodable, Equatable {
+    let playlistId: String
+}
+
+enum YandexPlaylistSource {
+    static func normalize(_ source: String) -> String {
+        let clean = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.lowercased().hasPrefix("http://") || clean.lowercased().hasPrefix("https://") {
+            return clean
+        }
+        if clean.contains("/") {
+            let pieces = clean.split(separator: "/", omittingEmptySubsequences: true)
+            if pieces.count == 2 {
+                return "https://music.yandex.ru/users/\(pieces[0])/playlists/\(pieces[1])"
+            }
+            return "https://music.yandex.ru/\(clean)"
+        }
+        return "https://music.yandex.ru/playlists/\(clean)"
+    }
 }
 
 struct LaneShareItem: Decodable {
