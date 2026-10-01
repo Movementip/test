@@ -4766,9 +4766,14 @@ private struct DiagnosticsScreen: View {
                 Button(session.diagnosticsRunning ? "Running diagnostics…" : "Run safe diagnostics") {
                     session.runLaneDiagnostics()
                 }
-                .disabled(session.diagnosticsRunning)
+                .disabled(session.diagnosticsRunning || session.mutationDiagnosticsRunning)
 
-                Text("Auto-tune tests the official Lane hosts/transports on this iPhone and selects the fastest working read profile. It also detects the accepted track-body formats without changing a real playlist.")
+                Button(session.mutationDiagnosticsRunning ? "Testing writes…" : "Test playlist writes and clean up") {
+                    session.runLaneMutationDiagnostics()
+                }
+                .disabled(session.diagnosticsRunning || session.mutationDiagnosticsRunning)
+
+                Text("Auto-tune tests the official Lane hosts/transports on this iPhone and selects the fastest working read profile. The write test creates a temporary diagnostic playlist, adds one already-known track, verifies it, and deletes the playlist again.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
