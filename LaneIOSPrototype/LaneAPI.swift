@@ -146,6 +146,89 @@ actor LaneAPI {
         return parts.joined(separator: " ")
     }
 
+    private func timeProbeMilliseconds(baseURL: String, transport: String) async -> Int? {
+        guard let base = URL(string: baseURL) else { return nil }
+        var request = URLRequest(url: base.appendingPathComponent("time"))
+        request.httpMethod = "GET"
+        request.timeoutInterval = 4
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let started = Date()
+
+        do {
+            let status: Int
+            if transport == "direct" {
+                let response = try await AndroidNetworkTransport.data(for: request, timeout: 4)
+                status = response.response.statusCode
+            } else {
+                let (_, response) = try await URLSession.shared.data(for: request)
+                status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            }
+            guard (200..<300).contains(status) else { return nil }
+            return Int(Date().timeIntervalSince(started) * 1000)
+        } catch {
+            return nil
+        }
+    }
+
+    func autoTuneNetworkProfile() async -> String {
+        guard signingConfiguration.mode == .official else {
+            return "custom backend"
+        }
+
+        let hosts = [
+            ("global", "https://laneapi.com"),
+            ("ru", "https://ru.laneapi.com")
+        ]
+
+        // Prefer the normal iOS stack whenever it works because AVPlayer,
+        // artwork and API calls can then share the system networking path.
+        var systemResults: [(String, Int)] = []
+        await withTaskGroup(of: (String, Int?).self) { group in
+            for (name, url) in hosts {
+                group.addTask {
+                    let ms = await self.timeProbeMilliseconds(baseURL: url, transport: "system")
+                    return (name, ms)
+                }
+            }
+            for await (name, ms) in group {
+                if let ms { systemResults.append((name, ms)) }
+            }
+        }
+
+        if let best = systemResults.min(by: { $0.1 < $1.1 }) {
+            UserDefaults.standard.set(best.0, forKey: "lane.diag.host")
+            UserDefaults.standard.set("system", forKey: "lane.diag.transport")
+            let selected = best.0 == "ru" ? "https://ru.laneapi.com" : "https://laneapi.com"
+            if let url = URL(string: selected) { rememberWorkingRegionalBase(url) }
+            return "\(best.0)/system \(best.1)ms"
+        }
+
+        var directResults: [(String, Int)] = []
+        await withTaskGroup(of: (String, Int?).self) { group in
+            for (name, url) in hosts {
+                group.addTask {
+                    let ms = await self.timeProbeMilliseconds(baseURL: url, transport: "direct")
+                    return (name, ms)
+                }
+            }
+            for await (name, ms) in group {
+                if let ms { directResults.append((name, ms)) }
+            }
+        }
+
+        if let best = directResults.min(by: { $0.1 < $1.1 }) {
+            UserDefaults.standard.set(best.0, forKey: "lane.diag.host")
+            UserDefaults.standard.set("direct", forKey: "lane.diag.transport")
+            let selected = best.0 == "ru" ? "https://ru.laneapi.com" : "https://laneapi.com"
+            if let url = URL(string: selected) { rememberWorkingRegionalBase(url) }
+            return "\(best.0)/direct \(best.1)ms"
+        }
+
+        UserDefaults.standard.set("auto", forKey: "lane.diag.host")
+        UserDefaults.standard.set("system", forKey: "lane.diag.transport")
+        return "no reachable official host"
+    }
+
     func setServiceLDI(_ value: String) {
         serviceLDI = value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
