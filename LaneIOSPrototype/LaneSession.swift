@@ -749,6 +749,136 @@ final class LaneSession: ObservableObject {
         }
     }
 
+    func autoTuneLaneNetwork() {
+        guard !diagnosticsRunning else { return }
+        diagnosticsRunning = true
+        diagnosticReport = "Testing Lane network profiles…"
+
+        Task { @MainActor in
+            defer {
+                diagnosticsRunning = false
+                refreshDiagnosticTrace()
+            }
+
+            await configureAPI()
+            let language = Locale.current.language.languageCode?.identifier ?? "en"
+            let candidates: [(host: String, transport: String)] = [
+                ("auto", "system"),
+                ("global", "system"),
+                ("ru", "system"),
+                ("global", "direct"),
+                ("ru", "direct"),
+                ("auto", "auto")
+            ]
+
+            var report: [String] = ["Lane auto-tune"]
+            var best: (host: String, transport: String, ms: Int)?
+
+            for candidate in candidates {
+                diagnosticHostMode = candidate.host
+                diagnosticTransportMode = candidate.transport
+                let started = Date()
+
+                do {
+                    if token.isEmpty {
+                        let result = try await LaneAPI.shared.request(path: "/time")
+                        try result.requireSuccess()
+                    } else {
+                        _ = try await LaneAPI.shared.account(
+                            token: token,
+                            deviceLanguage: language
+                        )
+                    }
+
+                    let ms = Int(Date().timeIntervalSince(started) * 1000)
+                    report.append("\(candidate.host)/\(candidate.transport): PASS \(ms)ms")
+                    if best == nil || ms < best!.ms {
+                        best = (candidate.host, candidate.transport, ms)
+                    }
+                } catch {
+                    let ms = Int(Date().timeIntervalSince(started) * 1000)
+                    report.append("\(candidate.host)/\(candidate.transport): FAIL \(ms)ms \(error.localizedDescription)")
+                }
+            }
+
+            if let best {
+                diagnosticHostMode = best.host
+                diagnosticTransportMode = best.transport
+                report.append("selected network=\(best.host)/\(best.transport) \(best.ms)ms")
+            } else {
+                diagnosticHostMode = "auto"
+                diagnosticTransportMode = "system"
+                report.append("No authenticated API profile succeeded.")
+            }
+
+            guard !token.isEmpty else {
+                diagnosticReport = report.joined(separator: "\n")
+                return
+            }
+
+            let sampleTrackID =
+                currentTrack?.trackID ??
+                recentTracks.first?.trackID ??
+                history.first?.trackID ??
+                homeTracks.first?.trackID ??
+                searchTracks.first?.trackID
+
+            if let sampleTrackID, !sampleTrackID.isEmpty {
+                var selectedTrackBody: String?
+                for mode in ["object", "raw"] {
+                    diagnosticTrackBodyMode = mode
+                    do {
+                        let tracks = try await LaneAPI.shared.tracksByIds(
+                            token: token,
+                            ids: [sampleTrackID],
+                            prefetch: false
+                        )
+                        if !tracks.isEmpty {
+                            selectedTrackBody = mode
+                            report.append("/user/tracks \(mode): PASS")
+                            break
+                        }
+                        report.append("/user/tracks \(mode): empty")
+                    } catch {
+                        report.append("/user/tracks \(mode): FAIL \(error.localizedDescription)")
+                    }
+                }
+                diagnosticTrackBodyMode = selectedTrackBody ?? "object"
+                report.append("selected track body=\(diagnosticTrackBodyMode)")
+            } else {
+                report.append("track body auto-detect: SKIP no local track")
+            }
+
+            var selectedAddBody: String?
+            for mode in ["raw", "object"] {
+                diagnosticAddBodyMode = mode
+                do {
+                    let result = try await LaneAPI.shared.addTracks(
+                        token: token,
+                        playlistId: "__lane_diagnostics_missing_playlist__",
+                        trackIds: ["__lane_diagnostics_missing_track__"]
+                    )
+                    let bodyRejected =
+                        result.status == 400 &&
+                        result.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY")
+                    if bodyRejected {
+                        report.append("add-tracks \(mode): body rejected")
+                    } else {
+                        report.append("add-tracks \(mode): body accepted (HTTP \(result.status))")
+                        selectedAddBody = mode
+                        break
+                    }
+                } catch {
+                    report.append("add-tracks \(mode): transport FAIL \(error.localizedDescription)")
+                }
+            }
+            diagnosticAddBodyMode = selectedAddBody ?? "raw"
+            report.append("selected add body=\(diagnosticAddBodyMode)")
+            report.append("media route kept=\(diagnosticMediaRoute)")
+            diagnosticReport = report.joined(separator: "\n")
+        }
+    }
+
     func runLaneDiagnostics() {
         guard !diagnosticsRunning else { return }
         diagnosticsRunning = true
