@@ -229,6 +229,104 @@ actor LaneAPI {
         return "no reachable official host"
     }
 
+    private func authenticatedAccountProbe(
+        token: String,
+        deviceLanguage: String,
+        baseURL: URL,
+        transport: String
+    ) async -> (ok: Bool, status: Int, ms: Int) {
+        let started = Date()
+        do {
+            let unsigned = try build(
+                path: "/account",
+                method: "GET",
+                token: token,
+                query: [.init(name: "deviceLanguage", value: deviceLanguage)],
+                headers: [:],
+                json: nil,
+                baseURL: baseURL
+            )
+            let signer = signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
+            var signed = try signer.sign(unsigned, body: nil)
+            signed.timeoutInterval = 5
+
+            let raw: Data
+            let http: HTTPURLResponse
+            if transport == "direct" {
+                let response = try await AndroidNetworkTransport.data(for: signed, timeout: 5)
+                raw = response.data
+                http = response.response
+            } else {
+                let (data, response) = try await URLSession.shared.data(for: signed)
+                guard let response = response as? HTTPURLResponse else {
+                    return (false, 0, Int(Date().timeIntervalSince(started) * 1000))
+                }
+                raw = data
+                http = response
+            }
+
+            _ = try? decodeOfficialTransport(raw, response: http)
+            return (
+                (200..<300).contains(http.statusCode),
+                http.statusCode,
+                Int(Date().timeIntervalSince(started) * 1000)
+            )
+        } catch {
+            return (false, 0, Int(Date().timeIntervalSince(started) * 1000))
+        }
+    }
+
+    func autoTuneAuthenticatedProfile(token: String, deviceLanguage: String) async -> String {
+        guard signingConfiguration.mode == .official, !token.isEmpty else {
+            return "skipped"
+        }
+
+        let global = URL(string: "https://laneapi.com")!
+        let ru = URL(string: "https://ru.laneapi.com")!
+        let currentHost = diagnosticSetting("lane.diag.host", default: "auto")
+        let currentTransport = diagnosticSetting("lane.diag.transport", default: "system")
+
+        var profiles: [(name: String, base: URL, transport: String)] = []
+        func appendProfile(_ name: String, _ base: URL, _ transport: String) {
+            guard !profiles.contains(where: { $0.base.host == base.host && $0.transport == transport }) else { return }
+            profiles.append((name, base, transport))
+        }
+
+        if currentHost == "ru" {
+            appendProfile("ru", ru, currentTransport)
+        } else if currentHost == "global" {
+            appendProfile("global", global, currentTransport)
+        } else {
+            appendProfile(base.host == "ru.laneapi.com" ? "ru" : "global", base, currentTransport)
+        }
+
+        // Then try the remaining combinations. These are read-only /account
+        // probes, each signed independently, so they are safe to compare.
+        appendProfile("global", global, "system")
+        appendProfile("ru", ru, "system")
+        appendProfile("global", global, "direct")
+        appendProfile("ru", ru, "direct")
+
+        var attempts: [String] = []
+        for profile in profiles {
+            let result = await authenticatedAccountProbe(
+                token: token,
+                deviceLanguage: deviceLanguage,
+                baseURL: profile.base,
+                transport: profile.transport
+            )
+            attempts.append("\(profile.name)/\(profile.transport)=\(result.status)/\(result.ms)ms")
+            if result.ok {
+                UserDefaults.standard.set(profile.name, forKey: "lane.diag.host")
+                UserDefaults.standard.set(profile.transport, forKey: "lane.diag.transport")
+                rememberWorkingRegionalBase(profile.base)
+                return "selected \(profile.name)/\(profile.transport) \(result.ms)ms; " + attempts.joined(separator: ", ")
+            }
+        }
+
+        return "no authenticated profile succeeded; " + attempts.joined(separator: ", ")
+    }
+
     func setServiceLDI(_ value: String) {
         serviceLDI = value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
