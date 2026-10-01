@@ -1060,7 +1060,7 @@ actor LaneAPI {
             .filter { !$0.isEmpty && seen.insert($0).inserted }
         guard !clean.isEmpty else { return [] }
 
-        let mode = diagnosticSetting("lane.diag.trackBody", default: "object")
+        let mode = diagnosticSetting("lane.diag.trackBody", default: "auto")
         let payloads: [Any]
         switch mode {
         case "raw":
@@ -1262,7 +1262,7 @@ actor LaneAPI {
             .filter { !$0.isEmpty }
         guard !clean.isEmpty else { throw LaneAPIError.emptyResponse }
 
-        let mode = diagnosticSetting("lane.diag.addBody", default: "raw")
+        let mode = diagnosticSetting("lane.diag.addBody", default: "auto")
         let payloads: [Any]
         switch mode {
         case "object":
