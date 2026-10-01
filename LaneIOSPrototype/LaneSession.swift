@@ -85,6 +85,9 @@ final class LaneSession: ObservableObject {
     @Published var diagnosticAddBodyMode = UserDefaults.standard.string(forKey: "lane.diag.addBody") ?? "raw" {
         didSet { UserDefaults.standard.set(diagnosticAddBodyMode, forKey: "lane.diag.addBody") }
     }
+    @Published var diagnosticMediaRoute = UserDefaults.standard.string(forKey: "lane.diag.mediaRoute") ?? "original" {
+        didSet { UserDefaults.standard.set(diagnosticMediaRoute, forKey: "lane.diag.mediaRoute") }
+    }
     @Published var diagnosticsRunning = false
     @Published var diagnosticReport = ""
     @Published var diagnosticTraceText = ""
@@ -728,7 +731,8 @@ final class LaneSession: ObservableObject {
         diagnosticTransportMode = "system"
         diagnosticTrackBodyMode = "object"
         diagnosticAddBodyMode = "raw"
-        diagnosticReport = "Stable profile restored: Auto host, System transport, TrackIds object, Add-tracks raw array."
+        diagnosticMediaRoute = "original"
+        diagnosticReport = "Stable profile restored: Auto host, System transport, original media URLs, TrackIds object, Add-tracks raw array."
     }
 
     func clearDiagnosticTrace() {
