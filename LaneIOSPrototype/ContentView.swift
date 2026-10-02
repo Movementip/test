@@ -3693,6 +3693,10 @@ struct LaneUserProfileScreen: View {
                         }.buttonStyle(.plain).disabled(saving).padding(.horizontal, 24)
                             .accessibilityIdentifier("user.follow")
                     }
+                    if let error {
+                        Text(error).font(.callout).foregroundStyle(lanePink).padding(.horizontal, 20)
+                        Button("Refresh profile") { Task { await load() } }.disabled(loading || saving)
+                    }
                     if let status = user.statusTrack {
                         Button {
                             let track = TrackCandidate(status)
@@ -3718,7 +3722,7 @@ struct LaneUserProfileScreen: View {
                     }
                 }
                 if loading { ProgressView("Loading profile…") }
-                if let error {
+                if let error, user == nil {
                     Text(error).font(.callout).foregroundStyle(lanePink).padding(.horizontal, 20)
                     Button("Try again") { Task { await load() } }.disabled(loading || saving)
                 }
@@ -3776,7 +3780,11 @@ struct LanePeopleListScreen: View {
         .listStyle(.plain).scrollContentBackground(.hidden).background(laneBackground)
         .navigationTitle(following ? "Following" : "Followers").navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar).tint(.white).laneIOSBackSwipe()
-        .task { await load(reset: true) }.refreshable { await load(reset: true) }
+        // NavigationStack starts view tasks again after returning from a
+        // profile. Keep already loaded pages/scroll position on that return;
+        // pull-to-refresh is the explicit server reset.
+        .task { if users.isEmpty { await load(reset: true) } }
+        .refreshable { await load(reset: true) }
     }
 
     private func load(reset: Bool) async {
