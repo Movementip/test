@@ -1694,6 +1694,7 @@ struct APKArtistDetailScreen: View {
         // Pushed artist pages use UIKit's own back button/interactive pop.
         // Only the player modal needs an explicit close action at its root.
         .navigationBarBackButtonHidden(onClose != nil)
+        .laneIOSBackSwipe(action: onClose)
         .toolbarRole(.editor)
         .tint(.white)
         .navigationBarTitleDisplayMode(.inline)
