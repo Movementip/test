@@ -3510,6 +3510,7 @@ struct EditProfileSheet: View {
     @State private var saving = false
     @State private var uploading = false
     @State private var errorMessage: String?
+    @State private var loadedInitialProfile = false
 
     var body: some View {
         NavigationStack {
@@ -3574,6 +3575,8 @@ struct EditProfileSheet: View {
                 }
             }
             .onAppear {
+                guard !loadedInitialProfile else { return }
+                loadedInitialProfile = true
                 name = session.account?.displayedName ?? ""
                 username = session.account?.userName ?? ""
                 statusText = session.account?.statusText ?? ""

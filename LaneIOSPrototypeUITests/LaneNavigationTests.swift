@@ -60,6 +60,18 @@ final class LaneNavigationTests: XCTestCase {
         screenshot("iPhone13-earned-badge-details")
         app.buttons["Close"].tap()
         XCTAssertTrue(detail.waitForExistence(timeout: 5))
+        app.navigationBars.buttons.firstMatch.tap()
+        app.buttons["Edit profile"].tap()
+        let name = app.textFields["profile.name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        let initial = name.value as? String ?? ""
+        name.tap(); name.typeText(" draft")
+        app.swipeUp()
+        let badgeEditor = app.buttons["profile.badges"]
+        scrollTo(badgeEditor); badgeEditor.tap()
+        XCTAssertTrue(app.buttons["badge.back"].waitForExistence(timeout: 10))
+        app.buttons["badge.back"].tap()
+        XCTAssertEqual(name.value as? String, initial + " draft", "Navigating to badges must retain unsaved profile edits")
     }
 
     func testMemorialRetryPaginationConfirmedCandleAndBack() {
