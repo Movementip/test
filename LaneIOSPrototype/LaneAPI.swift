@@ -1711,6 +1711,7 @@ actor LaneAPI {
         orderReference: [YandexImportTrack] = [],
         shouldContinue: @escaping @MainActor () -> Bool = { true },
         stage: @escaping @MainActor (String) -> Void = { _ in },
+        confirmedOrder: @escaping @MainActor ([String], [TrackData]) -> Void = { _, _ in },
         progress: @MainActor (_ processed: Int, _ total: Int, _ savedIDs: [String], _ tracks: [TrackData]) -> Void = { _, _, _, _ in }
     ) async throws -> Int {
         let ids = LaneTrackBatching.unique(sourceIDs)
@@ -1794,6 +1795,11 @@ actor LaneAPI {
             throw LaneImportConfirmationError.order(saved: accepted.count,
                 detail: "Lane returned incomplete playlist membership. Ordering is paused to keep the other tracks safe.")
         }
+        if resolveSourceIDs, !orderReference.isEmpty, sort == .original || sort == .oldest,
+           LaneImportOrdering.sourceOrder(resolvedTracks, reference: orderReference).matched == 0 {
+            throw LaneImportConfirmationError.order(saved: accepted.count,
+                detail: "Lane track metadata did not match the Yandex source order. No guessed ordering was submitted; retry the preview.")
+        }
         let ordered = resolveSourceIDs
             ? LaneImportOrdering.ordered(resolvedTracks, sort: sort, reference: orderReference).compactMap(\.songId)
             : (sort == .oldest ? Array(acceptedOrder.reversed()) : acceptedOrder)
@@ -1813,7 +1819,12 @@ actor LaneAPI {
                 let confirmed = LaneTrackBatching.unique((destination.playlistTracksIds ?? []) +
                                                         (destination.playlistTracks?.compactMap(\.songId) ?? []))
                 if accepted.isSubset(of: Set(confirmed)), confirmed.filter({ accepted.contains($0) }) == LaneTrackBatching.unique(ordered) {
-                    UserDefaults.standard.removeObject(forKey: checkpointKey)
+                    await confirmedOrder(confirmed, resolvedTracks)
+                    // Keep the resolved canonical pages for a bounded period.
+                    // Choosing another order can then repair an already saved
+                    // import without resolving/writing all 1,151 tracks again.
+                    checkpoint.updated = Date()
+                    saveImportCheckpoint(checkpoint, key: checkpointKey)
                     return accepted.count
                 }
                 if attempt == 3, accepted.isSubset(of: Set(confirmed)), destination.effectiveTrackCount <= confirmed.count {

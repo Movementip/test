@@ -4219,6 +4219,15 @@ private struct FavoriteTracksScreen: View {
 
     var body: some View {
         List {
+            if let stage = session.playlistImportStages["lane_likes"] {
+                ProgressView(stage)
+                    .accessibilityIdentifier("playlist.import.progress")
+                Text("You can leave this screen. The selected order is confirmed after all batches are saved.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let error = session.playlistImportErrors["lane_likes"] {
+                Text(error).foregroundStyle(lanePink)
+            }
             if session.clearingPlaylistIDs.contains("lane_likes") {
                 ProgressView(session.playlistClearStages["lane_likes"] ?? "Removing \(clearCompleted)/\(clearTotal) tracks…")
                     .accessibilityIdentifier("playlist.clear.progress")
@@ -4295,7 +4304,7 @@ private struct FavoriteTracksScreen: View {
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .accessibilityIdentifier("playlist.clear")
-                .disabled(session.isGuest || session.clearingPlaylistIDs.contains("lane_likes"))
+                .disabled(session.isGuest || session.clearingPlaylistIDs.contains("lane_likes") || session.importingPlaylistIDs.contains("lane_likes"))
                 Button("Cancel") { showActions = false }
             }
             .padding(20)
@@ -4492,7 +4501,7 @@ private enum MusicImportStep: Equatable {
     case preview
 }
 
-private struct ImportTracksScreen: View {
+struct ImportTracksScreen: View {
     @EnvironmentObject private var session: LaneSession
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
@@ -4518,6 +4527,18 @@ private struct ImportTracksScreen: View {
     @State private var importSort: LaneMusicImportSort = .original
     @State private var yandexMetadataTask: Task<[YandexImportTrack], Never>?
     @State private var previewRequestID = UUID()
+
+    init() {}
+
+    #if DEBUG
+    init(fixture: LanePlaylist, source: [YandexImportTrack]) {
+        _preview = State(initialValue: fixture)
+        _yandexTracks = State(initialValue: source)
+        _platform = State(initialValue: .yandex)
+        _step = State(initialValue: .preview)
+        _targetPlaylistID = State(initialValue: "lane_likes")
+    }
+    #endif
 
     var body: some View {
         ZStack {
@@ -4559,10 +4580,9 @@ private struct ImportTracksScreen: View {
                 targetPlaylistID = session.serverPlaylists.first?.playlistId ?? ""
             }
         }
-        .onDisappear {
-            importTask?.cancel()
-            importTask = nil
-        }
+        // This unstructured task finishes its read-back/reorder even when the
+        // user returns to Library. Leaving a screen is not a cancellation of
+        // the already accepted server writes. Account changes still cancel it.
         .toolbar(.hidden, for: .navigationBar)
         .laneIOSBackSwipe()
     }
@@ -4570,6 +4590,7 @@ private struct ImportTracksScreen: View {
     private var importTopBar: some View {
         HStack {
             APKImportBackButton(action: navigateBack)
+                .accessibilityIdentifier("import.back")
 
             Spacer()
 
@@ -4859,6 +4880,7 @@ private struct ImportTracksScreen: View {
                     Text(playlist.playlistName ?? "Import preview")
                         .font(.headline)
                     Text("\(previewDisplayCount) tracks in Lane preview")
+                        .accessibilityIdentifier("import.count")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -4872,6 +4894,10 @@ private struct ImportTracksScreen: View {
             .disabled(loading)
             Text("This order will be saved in the Lane playlist. Existing unrelated tracks will be kept.")
                 .font(.caption2).foregroundStyle(.secondary)
+            if !importStage.isEmpty {
+                Text(importStage).font(.caption).foregroundStyle(lanePink)
+                    .accessibilityIdentifier("import.stage")
+            }
 
             if !yandexTracks.isEmpty {
                 if yandexTracks.count != importSourceCount {
@@ -4930,6 +4956,7 @@ private struct ImportTracksScreen: View {
                     enabled: !targetPlaylistID.isEmpty && importSourceCount > 0,
                     action: importPreviewTracks
                 )
+                .accessibilityIdentifier("import.start")
             }
 
             if !importedTrackIDs.isEmpty {
@@ -5178,7 +5205,15 @@ private struct ImportTracksScreen: View {
     }
 
     private func performImport(_ ids: [String]) {
-        importTask?.cancel()
+        guard !session.importingPlaylistIDs.contains(targetPlaylistID) else {
+            message = "This playlist is still importing and confirming its order. You can follow its progress in Library."
+            return
+        }
+        let destination = targetPlaylistID
+        let selectedSort = importSort
+        let selectedPlatform = platform
+        let metadataRequest = yandexMetadataTask
+        let sourceReference = yandexTracks
         loading = true
         message = ""
         importCompleted = 0
@@ -5195,11 +5230,15 @@ private struct ImportTracksScreen: View {
                 // Public metadata loads alongside the first 15-row preview.
                 // If Import is tapped immediately, await that existing request
                 // rather than silently sending the unsorted resolver ID list.
-                var reference = yandexTracks
-                if platform == .yandex, reference.isEmpty, let metadata = yandexMetadataTask {
+                var reference = sourceReference
+                if selectedPlatform == .yandex, reference.isEmpty, let metadata = metadataRequest {
                     importStage = "Loading Yandex playlist order…"
                     reference = await metadata.value
                     try Task.checkCancellation()
+                }
+                if selectedPlatform == .yandex, reference.isEmpty,
+                   selectedSort == .original || selectedSort == .oldest {
+                    throw LaneAPIError.decoding("The Yandex source order could not be loaded. Retry the preview; no tracks have been added by this attempt.")
                 }
                 let updateProgress: (Int, Int, String) -> Void = { completed, total, stage in
                     importCompleted = completed
@@ -5208,9 +5247,9 @@ private struct ImportTracksScreen: View {
                 }
                 let imported = try await session.importTracks(
                     ids,
-                    into: targetPlaylistID,
+                    into: destination,
                     resolvingSourceIDs: true,
-                    sort: importSort,
+                    sort: selectedSort,
                     orderReference: reference,
                     progress: updateProgress
                 ) { batch in

@@ -685,6 +685,27 @@ struct LaneContractTestRunner {
         precondition(LaneMockURLProtocol.savedIDs("import-large") == sourceIDs.map { $0.replacingOccurrences(of: "source-", with: "lane-") })
         precondition(Array(LaneMockURLProtocol.batchSizes().suffix(77)) == Array(repeating: 15, count: 76) + [11])
 
+        // The real Yandex source has 1,394 available entries, while Lane's
+        // importable subset has 1,151. Its ID order can be opposite to Yandex.
+        // Repair a completed import using its cached metadata, with no new
+        // playlist writes or resolver calls, even through a fresh API client.
+        let largeReference = (0..<1394).map { index in
+            YandexImportTrack(yandexID: "yandex-\(1393 - index)", originalIndex: index,
+                title: "source-\(1393 - index)", artists: [], coverURL: nil)
+        }
+        let beforeRepairResolutions = LaneMockURLProtocol.resolverCount()
+        let beforeRepairWrites = LaneMockURLProtocol.batchSizes().count
+        var readBackOrder: [String] = []
+        _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-large", sourceIDs: sourceIDs,
+            orderReference: largeReference, confirmedOrder: { ids, _ in readBackOrder = ids })
+        let sourceOrder = sourceIDs.reversed().map { $0.replacingOccurrences(of: "source-", with: "lane-") }
+        precondition(readBackOrder == sourceOrder && LaneMockURLProtocol.savedIDs("import-large") == sourceOrder)
+        precondition(LaneMockURLProtocol.resolverCount() == beforeRepairResolutions)
+        precondition(LaneMockURLProtocol.batchSizes().count == beforeRepairWrites)
+        _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-large", sourceIDs: sourceIDs,
+            sort: .oldest, orderReference: largeReference)
+        precondition(LaneMockURLProtocol.savedIDs("import-large") == Array(sourceOrder.reversed()))
+
         // Stop at the failed middle batch; a new client can continue without
         // losing the first 15 or sending duplicate playlist writes.
         do {
@@ -702,6 +723,18 @@ struct LaneContractTestRunner {
 
         // Cross-batch sort is durable, not just a reversed eight-row preview.
         let small = Array(sourceIDs.prefix(31))
+        let duplicateTitleTracks = try JSONDecoder().decode([TrackData].self, from: Data(#"[{"songId":"wrong-artist","title":"Днями ночами","artistsDisplayedName":"Other artist"},{"songId":"right-artist","title":"Днями ночами","artistsDisplayedName":"МУККА & pyrokinesis"}]"#.utf8))
+        let punctuationSource = [YandexImportTrack(yandexID: "63606604", originalIndex: 1515,
+            title: "Днями-ночами", artists: ["pyrokinesis", "МУККА"], coverURL: nil)]
+        precondition(LaneImportOrdering.sourceOrder(duplicateTitleTracks, reference: punctuationSource).matched == 1)
+        precondition(LaneImportOrdering.ordered(duplicateTitleTracks, sort: .original, reference: punctuationSource).first?.songId == "right-artist")
+        do {
+            _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-unmatched", sourceIDs: small,
+                orderReference: [YandexImportTrack(yandexID: "unknown", originalIndex: 0, title: "Unmatched metadata", artists: [], coverURL: nil)])
+            preconditionFailure("No source matches must not be presented as confirmed source order")
+        } catch let LaneImportConfirmationError.order(saved, detail) {
+            precondition(saved == 31 && detail.contains("No guessed ordering"))
+        }
         _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-oldest", sourceIDs: small, sort: .oldest)
         precondition(LaneMockURLProtocol.savedIDs("import-oldest") == small.reversed().map { $0.replacingOccurrences(of: "source-", with: "lane-") })
         try await api.addTracks(token: "test-token", playlistId: "import-reference", trackIds: ["unrelated"]).requireSuccess()
@@ -792,6 +825,6 @@ struct LaneContractTestRunner {
             "/user/import/preview"
         ]
         precondition(expectedPaths.allSatisfy(LaneMockURLProtocol.received))
-        print("Lane contract tests passed: APK-native cipher/signature, 1151 tracks in batches of 15, 429 fresh-signature retries, minimum 60-second deletion cooldown/cancellation, delayed membership/order readback, truthful saved-vs-order states, ordering-only resume without re-resolving/rewriting, durable source/reverse order, partial clear/retry, canonical albums, server likes, privacy, notifications, multipart uploads, ranges/effects.")
+        print("Lane contract tests passed: APK-native cipher/signature, 1151 tracks in batches of 15, source order from 1394-entry reference, confirmed-order callback, completed-import order repair without new resolver calls/writes, punctuation and collaborator matching, 429 fresh-signature retries, minimum 60-second deletion cooldown/cancellation, delayed membership/order readback, truthful saved-vs-order states, ordering-only resume without re-resolving/rewriting, durable source/reverse order, partial clear/retry, canonical albums, server likes, privacy, notifications, multipart uploads, ranges/effects.")
     }
 }

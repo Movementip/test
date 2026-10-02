@@ -21,6 +21,11 @@ struct LaneIOSPrototypeApp: App {
             value.queue = [LaneUITestFixtures.track]
             value.currentIndex = 0
             value.currentTrack = LaneUITestFixtures.track
+            if ProcessInfo.processInfo.arguments.contains("--lane-import-fixture") {
+                LaneUITestURLProtocol.prepareImportFixture()
+                value.serverPlaylists = [LanePlaylist(playlistId: "lane_likes", playlistName: "Favorite tracks",
+                    playlistTracksIds: ["lane-1", "lane-2", "lane-3", "lane-4"])]
+            }
             if ProcessInfo.processInfo.arguments.contains("--lane-queue-fixture") || ProcessInfo.processInfo.arguments.contains("--lane-rate-fixture") {
                 LaneUITestURLProtocol.prepareLikedFixture(rateLimited: ProcessInfo.processInfo.arguments.contains("--lane-rate-fixture"))
                 value.queue = [LaneUITestFixtures.track, TrackCandidate(id: "lane-2", title: "Old playlist second", subtitle: "Lane", trackID: "lane-2")]
@@ -79,6 +84,7 @@ private struct LaneUITestRoot: View {
     @State private var showPlayer = false
     @State private var showEdit = false
     @State private var showFullApp = false
+    @State private var showImport = false
     @State private var result = ""
     @State private var gestureReport = "Waiting for edge swipe"
 
@@ -98,6 +104,10 @@ private struct LaneUITestRoot: View {
                 Button("Run recovery checks") { Task { await checkPlaybackRecovery() } }
                 Button("Edit profile") { showEdit = true }
                 Button("Open full app") { showFullApp = true }
+                if ProcessInfo.processInfo.arguments.contains("--lane-import-fixture") {
+                    Button("Open import fixture") { showImport = true }
+                    Button("Check imported order") { Task { await checkImportedOrder() } }
+                }
                 Button("Open shared album") { session.receiveShareURL(URL(string: "lane://share/fixture-album-share")!) }
                 Text(result).accessibilityIdentifier("session.result")
             }
@@ -106,6 +116,18 @@ private struct LaneUITestRoot: View {
         .fullScreenCover(isPresented: $showPlayer) { APKFullPlayerView().environmentObject(session) }
         .sheet(isPresented: $showEdit) { EditProfileSheet().environmentObject(session) }
         .fullScreenCover(isPresented: $showFullApp) { ContentView().environmentObject(session) }
+        .fullScreenCover(isPresented: $showImport) {
+            ImportTracksScreen(fixture: LanePlaylist(playlistName: "Already saved source", playlistTracksIds: (1...4).map { "source-\($0)" }),
+                source: (1...4).reversed().enumerated().map { offset, id in
+                    YandexImportTrack(yandexID: "yandex-\(id)", originalIndex: offset,
+                        title: "Fixture track \(id)", artists: ["shadowraze"], coverURL: nil)
+                })
+                .environmentObject(session)
+                .overlay(alignment: .bottom) {
+                    Button("Leave import fixture") { showImport = false }
+                        .padding(12).background(Color.black)
+                }
+        }
         .preferredColorScheme(.dark)
         .overlay(alignment: .bottom) {
             Text(gestureReport).font(.system(size: 9)).accessibilityIdentifier("gesture.report")
@@ -204,6 +226,25 @@ private struct LaneUITestRoot: View {
         } catch {
             result = "Session checks failed: \(error.localizedDescription)"
         }
+    }
+
+    private func checkImportedOrder() async {
+        do {
+            for _ in 0..<100 where session.importingPlaylistIDs.contains("lane_likes") {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            let expected = ["lane-4", "lane-3", "lane-2", "lane-1"]
+            guard session.likedTracks.compactMap(\.trackID) == expected else {
+                throw LaneAPIError.decoding("Visible liked tracks did not adopt confirmed source order")
+            }
+            let fresh = LaneSession()
+            fresh.backendMode = .custom; fresh.baseURL = "https://lane-ui.test"; fresh.token = "ui-fixture-token"
+            await fresh.refreshAfterLogin()
+            guard fresh.likedTracks.compactMap(\.trackID) == expected else {
+                throw LaneAPIError.decoding("New client did not read the saved source order")
+            }
+            result = "Background import order passed"
+        } catch { result = "Background import order failed: \(error.localizedDescription)" }
     }
 
     private func checkEffects() async {
@@ -453,6 +494,15 @@ private final class LaneUITestURLProtocol: URLProtocol {
     private static var saved: [String: [String]] = ["fixture-playlist": ["lane-1", "lane-2"]]
     private static var rateLimitDeletion = false
     private static var deletionDeadline: Date?
+    private static var importFixture = false
+    private static var delayImportRead = false
+
+    static func prepareImportFixture() {
+        lock.lock(); defer { lock.unlock() }
+        saved["lane_likes"] = ["lane-1", "lane-2", "lane-3", "lane-4"]
+        importFixture = true
+        delayImportRead = false
+    }
 
     static func prepareLikedFixture(rateLimited: Bool) {
         lock.lock(); defer { lock.unlock() }
@@ -520,6 +570,7 @@ private final class LaneUITestURLProtocol: URLProtocol {
             var contentType = "application/json"
             var statusCode = 200
             var delayResponse = false
+            var responseDelay: TimeInterval = 2
             let isRaceClient = request.value(forHTTPHeaderField: "Authorization") == "Bearer ui-fixture-race"
             Self.lock.lock()
             defer { Self.lock.unlock() }
@@ -556,6 +607,9 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 }
                 let object = try JSONSerialization.jsonObject(with: body)
                 let ids = (object as? [String]) ?? (object as? [String: Any])?["trackIds"] as? [String] ?? []
+                if Self.importFixture, ids == ["source-1", "source-2", "source-3", "source-4"] {
+                    Self.delayImportRead = true
+                }
                 if isRaceClient, Self.favoriteReadRace, !Self.favoriteReadStarted, ids == ["lane-1"] {
                     Self.favoriteReadStarted = true
                     delayResponse = true
@@ -613,6 +667,11 @@ private final class LaneUITestURLProtocol: URLProtocol {
                     let ids = isRaceClient && Self.favoriteReadRace && id == "lane_likes" ? [] : (Self.saved[id] ?? [])
                     data = try JSONSerialization.data(withJSONObject: ["items": ids.reversed().map { ["songId": $0, "title": "Fixture track \($0.split(separator: "-").last!)", "platform": "spotify"] }, "totalItems": ids.count, "page": 1, "pageSize": 100, "totalPages": 1])
                 } else {
+                    if Self.delayImportRead, id == "lane_likes" {
+                        Self.delayImportRead = false
+                        delayResponse = true
+                        responseDelay = 6
+                    }
                     data = try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": Self.saved[id] ?? [], "tracksCount": (Self.saved[id] ?? []).count])
                 }
             } else if path == "/account" {
@@ -696,7 +755,7 @@ private final class LaneUITestURLProtocol: URLProtocol {
                     client?.urlProtocolDidFinishLoading(self)
                 }
                 delayedDelivery = delivery
-                DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: delivery)
+                DispatchQueue.global().asyncAfter(deadline: .now() + responseDelay, execute: delivery)
             } else {
                 client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
                 client?.urlProtocol(self, didLoad: data)

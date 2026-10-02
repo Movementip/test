@@ -94,6 +94,37 @@ final class LaneNavigationTests: XCTestCase {
         screenshot("iPhone13-session-import-and-likes")
     }
 
+    func testImportSourceOrderFinishesAfterLeavingPreviewAndSurvivesFreshClient() {
+        app.terminate()
+        app.launchArguments = ["--lane-ui-test", "--lane-import-fixture"]
+        app.launch()
+        app.buttons["Open import fixture"].tap()
+        XCTAssertTrue(app.staticTexts["import.count"].waitForExistence(timeout: 10))
+        app.swipeUp()
+        let start = app.buttons["import.start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 10))
+        start.tap()
+        // A delayed membership read keeps the task before its final reorder.
+        // Navigating away used to cancel it and leave all saved tracks reversed.
+        let waiting = app.staticTexts["import.stage"]
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Confirming saved tracks on Lane…"), object: waiting)], timeout: 10), .completed)
+        app.buttons["Leave import fixture"].tap()
+        XCTAssertTrue(app.buttons["Check imported order"].waitForExistence(timeout: 5))
+        app.buttons["Check imported order"].tap()
+        XCTAssertTrue(app.staticTexts["Background import order passed"].waitForExistence(timeout: 20), app.staticTexts["session.result"].label)
+        app.buttons["Open full app"].tap()
+        app.buttons["Library"].firstMatch.tap()
+        let liked = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Favorite tracks")).firstMatch
+        XCTAssertTrue(liked.waitForExistence(timeout: 15))
+        liked.tap()
+        let first = app.buttons["track.row.lane-4"]
+        let last = app.buttons["track.row.lane-1"]
+        XCTAssertTrue(first.waitForExistence(timeout: 15))
+        XCTAssertTrue(last.waitForExistence(timeout: 15))
+        XCTAssertLessThan(first.frame.minY, last.frame.minY)
+        screenshot("iPhone13-source-order-after-leaving-import")
+    }
+
     func testLikedRowReplacesAnotherPlaylistQueueForNextAndPrevious() {
         app.terminate()
         app.launchArguments = ["--lane-ui-test", "--lane-queue-fixture"]

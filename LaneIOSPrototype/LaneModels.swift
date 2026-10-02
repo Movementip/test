@@ -275,38 +275,60 @@ enum LaneMusicImportSort: String, CaseIterable, Identifiable {
 }
 
 enum LaneImportOrdering {
+    private static func normalized(_ value: String) -> String {
+        let folded = value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+        return String(folded.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? Character(String($0)) : " " })
+            .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    private static func artistTokens(_ value: String) -> Set<String> {
+        Set(normalized(value).split(separator: " ").map(String.init))
+    }
+
+    static func sourceOrder(_ tracks: [TrackData], reference: [YandexImportTrack]) -> (tracks: [TrackData], matched: Int) {
+        guard !reference.isEmpty else { return (tracks, 0) }
+        let source = reference.enumerated().sorted {
+            $0.element.originalIndex == $1.element.originalIndex ? $0.offset < $1.offset : $0.element.originalIndex < $1.element.originalIndex
+        }.map(\.element)
+        // Normalize each Lane row once, not once per source row. A large
+        // favourites playlist otherwise repeats this work millions of times.
+        var byID: [String: [Int]] = [:]
+        var byTitle: [String: [Int]] = [:]
+        let artists = tracks.map { artistTokens($0.artistsDisplayedName ?? "") }
+        for (index, track) in tracks.enumerated() {
+            if let id = track.songId { byID[id, default: []].append(index) }
+            byTitle[normalized(track.title ?? ""), default: []].append(index)
+        }
+        var remaining = Set(tracks.indices)
+        var matched: [Int] = []
+        for item in source {
+            let title = normalized(item.title)
+            let artist = artistTokens(item.artistText)
+            let titleMatches = (byTitle[title] ?? []).filter { remaining.contains($0) }
+            let index = (byID[item.yandexID] ?? []).first { remaining.contains($0) } ?? titleMatches.first {
+                artists[$0] == artist
+            } ?? (titleMatches.count == 1 ? titleMatches.first : nil)
+            if let index { remaining.remove(index); matched.append(index) }
+        }
+        return ((matched + tracks.indices.filter { remaining.contains($0) }).map { tracks[$0] }, matched.count)
+    }
+
     /// Provider IDs and resolved Lane IDs need not be equal. Use the public
     /// source metadata to restore its order, without discarding unmatched or
     /// duplicate-title songs. Stable ties retain the resolver's input order.
     static func ordered(_ tracks: [TrackData], sort: LaneMusicImportSort,
                         reference: [YandexImportTrack] = []) -> [TrackData] {
-        func normalized(_ value: String) -> String {
-            value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
-                .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        }
-        let source = reference.sorted { $0.originalIndex < $1.originalIndex }
-        var remaining = Array(tracks.enumerated())
-        var matched: [(offset: Int, element: TrackData)] = []
-        for item in source {
-            let title = normalized(item.title)
-            let artist = normalized(item.artistText)
-            let titleMatches = remaining.indices.filter { normalized(remaining[$0].element.title ?? "") == title }
-            let index = remaining.firstIndex { $0.element.songId == item.yandexID } ?? remaining.firstIndex {
-                normalized($0.element.title ?? "") == title && normalized($0.element.artistsDisplayedName ?? "") == artist
-            } ?? (titleMatches.count == 1 ? titleMatches.first : nil)
-            if let index { matched.append(remaining.remove(at: index)) }
-        }
-        let baseline = matched + remaining
+        let baseline = sourceOrder(tracks, reference: reference).tracks
         switch sort {
-        case .original: return baseline.map(\.element)
-        case .oldest: return baseline.reversed().map(\.element)
+        case .original: return baseline
+        case .oldest: return Array(baseline.reversed())
         case .title, .artist:
             return baseline.enumerated().sorted { left, right in
-                let lhs = sort == .title ? left.element.element.title : left.element.element.artistsDisplayedName
-                let rhs = sort == .title ? right.element.element.title : right.element.element.artistsDisplayedName
+                let lhs = sort == .title ? left.element.title : left.element.artistsDisplayedName
+                let rhs = sort == .title ? right.element.title : right.element.artistsDisplayedName
                 let comparison = (lhs ?? "").localizedStandardCompare(rhs ?? "")
                 return comparison == .orderedSame ? left.offset < right.offset : comparison == .orderedAscending
-            }.map { $0.element.element }
+            }.map(\.element)
         }
     }
 }

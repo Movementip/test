@@ -163,7 +163,9 @@ final class LaneSession: ObservableObject {
     @Published private(set) var clearingPlaylistIDs: Set<String> = []
     @Published private(set) var playlistClearStages: [String: String] = [:]
     private var cancelledPlaylistClears: Set<String> = []
-    private var importingPlaylistIDs: Set<String> = []
+    @Published private(set) var importingPlaylistIDs: Set<String> = []
+    @Published private(set) var playlistImportStages: [String: String] = [:]
+    @Published private(set) var playlistImportErrors: [String: String] = [:]
     @Published var serverAlbums: [LaneAlbum] = []
     private var cachedAlbumDetails: [String: LaneAlbum] = [:]
     @Published var serverArtists: [LaneArtist] = []
@@ -687,6 +689,8 @@ final class LaneSession: ObservableObject {
         }
 
         if token != clean {
+            playlistImportStages = [:]
+            playlistImportErrors = [:]
             favorites = []
             likedTracks = []
             favoriteMutationsInFlight = []
@@ -719,6 +723,8 @@ final class LaneSession: ObservableObject {
         account = nil
         publicProfile = nil
         serverPlaylists = []
+        playlistImportStages = [:]
+        playlistImportErrors = [:]
         favorites = []
         likedTracks = []
         favoriteMutationsInFlight = []
@@ -2830,17 +2836,20 @@ final class LaneSession: ObservableObject {
         guard !playlistID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw LaneAPIError.invalidURL
         }
+        let requestToken = token
         guard !clearingPlaylistIDs.contains(playlistID), importingPlaylistIDs.insert(playlistID).inserted else {
             throw LaneAPIError.decoding("This playlist already has an import or deletion in progress.")
         }
-        defer { importingPlaylistIDs.remove(playlistID) }
+        playlistImportErrors.removeValue(forKey: playlistID)
+        defer { importingPlaylistIDs.remove(playlistID); playlistImportStages.removeValue(forKey: playlistID) }
 
         await configureAPI()
         try Task.checkCancellation()
-        let requestToken = token
+        guard token == requestToken else { throw CancellationError() }
         playlistContentGenerations[playlistID] = UUID()
         progress(0, clean.count, "Adding \(clean.count) tracks to Lane…")
         var currentStage = "Adding \(clean.count) tracks to Lane…"
+        playlistImportStages[playlistID] = currentStage
         var completed = 0
 
         let imported: Int
@@ -2856,7 +2865,12 @@ final class LaneSession: ObservableObject {
                 stage: { stage in
                     guard self.token == requestToken else { return }
                     currentStage = stage
+                    self.playlistImportStages[playlistID] = stage
                     progress(completed, clean.count, stage)
+                },
+                confirmedOrder: { ids, metadata in
+                    guard self.token == requestToken else { return }
+                    self.applyConfirmedPlaylistOrder(ids, metadata: metadata, playlistID: playlistID)
                 },
                 progress: { processed, total, savedIDs, resolved in
                     guard self.token == requestToken else { return }
@@ -2868,6 +2882,7 @@ final class LaneSession: ObservableObject {
                 })
         } catch {
             if token == requestToken {
+                playlistImportErrors[playlistID] = error.localizedDescription
                 playlistTrackCache.removeValue(forKey: playlistID)
                 playlistContentGenerations[playlistID] = UUID()
                 // An ordering failure must not hide tracks whose membership
@@ -2879,7 +2894,6 @@ final class LaneSession: ObservableObject {
         guard token == requestToken else { throw CancellationError() }
         progress(clean.count, clean.count, "")
         output = "Lane confirmed \(imported) imported tracks in the playlist."
-        playlistTrackCache.removeValue(forKey: playlistID)
         playlistContentGenerations[playlistID] = UUID()
 
         // Membership has been read back by the batch coordinator. Refresh the
@@ -2888,6 +2902,37 @@ final class LaneSession: ObservableObject {
             await loadLibrary()
         }
         return imported
+    }
+
+    /// Install only the order actually read back from Lane. Membership progress
+    /// alone must not leave the liked screen showing the server's prepend order.
+    private func applyConfirmedPlaylistOrder(_ ids: [String], metadata: [TrackData], playlistID: String) {
+        libraryLoadGeneration = UUID()
+        playlistContentGenerations[playlistID] = UUID()
+        let candidates = metadata.map { TrackCandidate($0, refID: playlistID) } +
+            (playlistTrackCache[playlistID] ?? []) + cachedTracksForIDs(ids) +
+            (playlistID == "lane_likes" ? likedTracks : [])
+        let memberIDs = Set(ids)
+        let ordered = LaneTrackBatching.ordered(candidates, sourceIDs: ids)
+            .filter { $0.trackID.map(memberIDs.contains) ?? false }
+        rememberPlaylistTracks(ordered, playlistID: playlistID)
+        if let index = serverPlaylists.firstIndex(where: { $0.playlistId == playlistID }) {
+            let value = serverPlaylists[index]
+            serverPlaylists[index] = LanePlaylist(playlistId: playlistID, playlistImageUrl: value.playlistImageUrl,
+                playlistName: value.playlistName, playlistDescription: value.playlistDescription,
+                playlistTracksIds: ids, playlistTracks: metadata, creatorLid: value.creatorLid,
+                platform: value.platform, tracksCount: ids.count, visibility: value.visibility,
+                collaboratorIds: value.collaboratorIds)
+        }
+        if playlistID == "lane_likes" {
+            favorites = memberIDs
+            for (id, desired) in pendingFavoriteStates {
+                if desired { favorites.insert(id) } else { favorites.remove(id) }
+            }
+            likedTracks = ordered.filter { isFavorite($0) }
+            restorePendingFavoriteTracks()
+            persistFavoriteState()
+        }
     }
 
     // MARK: Social
