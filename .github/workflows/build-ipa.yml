@@ -29,11 +29,18 @@ jobs:
             -resultBundlePath Output/Lane-Simulator.xcresult \
             -parallel-testing-enabled NO \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test
+      - name: Export simulator screenshots and diagnostics
+        if: always()
+        run: |
+          if [ -d Output/Lane-Simulator.xcresult ]; then
+            xcrun xcresulttool export attachments --path Output/Lane-Simulator.xcresult --output-path Output/Attachments
+            xcrun xcresulttool get test-results summary --path Output/Lane-Simulator.xcresult > Output/Test-Summary.json
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: Lane-iPhone13-Test-Results
-          path: Output/Lane-Simulator.xcresult
+          path: Output/
 
   build:
     needs: simulator

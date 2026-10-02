@@ -74,7 +74,11 @@ struct BNITLaneRequestSigner: LaneRequestSigner {
         // libbnit.so cdrl encrypts non-empty bodies BEFORE calculating HMAC.
         // Signing plaintext with the encrypted-body flag set makes the edge
         // decrypt JSON as ciphertext and reject all POST bodies with HTTP 400.
-        let plaintext = body ?? request.httpBody ?? Data()
+        // Android excludes multipart uploads from body encryption/signing;
+        // preserve their original boundary and bytes (e.g. avatar uploads).
+        let isMultipart = request.value(forHTTPHeaderField: "Content-Type")?
+            .lowercased().hasPrefix("multipart/") == true
+        let plaintext = isMultipart ? Data() : (body ?? request.httpBody ?? Data())
         let requestBody = Self.encryptRequestBody(plaintext, nonce: nonce, timestamp: timestamp)
 
         var canonical = Data()

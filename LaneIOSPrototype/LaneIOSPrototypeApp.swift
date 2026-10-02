@@ -16,6 +16,7 @@ struct LaneIOSPrototypeApp: App {
             value.serverArtists = [LaneUITestFixtures.artist]
             value.queue = [LaneUITestFixtures.track]
             value.currentIndex = 0
+            value.currentTrack = LaneUITestFixtures.track
         }
         #endif
         _session = StateObject(wrappedValue: value)
@@ -72,6 +73,9 @@ private struct LaneUITestRoot: View {
 
     private func checkSession() async {
         do {
+            let preview = LanePlaylist(playlistTracksIds: (0..<1151).map { "source-\($0)" })
+            let firstPage = try await session.tracksForImportPreview(preview)
+            guard firstPage.count == 15 else { throw LaneAPIError.decoding("Preview must resolve only the first 15 tracks") }
             let imported = try await session.importTracks((0..<31).map { "source-\($0)" }, into: "fixture-import", resolvingSourceIDs: true)
             guard imported == 31 else { throw LaneAPIError.emptyResponse }
             session.toggleFavorite(LaneUITestFixtures.track)

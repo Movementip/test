@@ -12,11 +12,14 @@ private struct LaneInteractivePopGestureEnabler: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
-        uiViewController.enableLaneInteractivePopFromHierarchy()
+        (uiViewController as? LaneInteractivePopController)?.activateLaneInteractivePop()
     }
 }
 
-private final class LaneInteractivePopController: UIViewController {
+private final class LaneInteractivePopController: UIViewController, UIGestureRecognizerDelegate {
+    private weak var laneNavigationController: UINavigationController?
+    private weak var previousDelegate: UIGestureRecognizerDelegate?
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         activateLaneInteractivePop()
@@ -27,23 +30,40 @@ private final class LaneInteractivePopController: UIViewController {
         activateLaneInteractivePop()
     }
 
-    func activateLaneInteractivePop() {
-        navigationController?.interactivePopGestureRecognizer?.isEnabled = true
-        navigationController?.interactivePopGestureRecognizer?.delegate = nil
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        activateLaneInteractivePop()
     }
-}
 
-private extension UIViewController {
-    func enableLaneInteractivePopFromHierarchy() {
-        var controller: UIViewController? = self
-        while let current = controller {
-            if let navigation = current.navigationController {
-                navigation.interactivePopGestureRecognizer?.isEnabled = true
-                navigation.interactivePopGestureRecognizer?.delegate = nil
-                return
-            }
-            controller = current.parent
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if let gesture = laneNavigationController?.interactivePopGestureRecognizer,
+           gesture.delegate === self {
+            gesture.delegate = previousDelegate
         }
+    }
+
+    func activateLaneInteractivePop() {
+        // SwiftUI updates its navigation/gesture delegate after the child is
+        // mounted. Install on the following run-loop, not before that update.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.view.window != nil,
+                  let navigation = self.navigationController,
+                  let gesture = navigation.interactivePopGestureRecognizer else { return }
+            self.laneNavigationController = navigation
+            if gesture.delegate !== self {
+                self.previousDelegate = gesture.delegate
+                gesture.delegate = self
+            }
+            gesture.isEnabled = navigation.viewControllers.count > 1
+        }
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard let navigation = laneNavigationController else { return false }
+        // Keep the native interactive transition, including cancellation, and
+        // never start a pop at the root or during another push/pop transition.
+        return navigation.viewControllers.count > 1 && navigation.transitionCoordinator == nil
     }
 }
 

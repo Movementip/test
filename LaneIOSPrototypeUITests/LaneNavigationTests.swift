@@ -25,6 +25,10 @@ final class LaneNavigationTests: XCTestCase {
         let window = app.windows.firstMatch.frame
         XCTAssertGreaterThanOrEqual(back.frame.minX, window.minX)
         XCTAssertLessThanOrEqual(back.frame.maxX, window.maxX)
+        let title = app.staticTexts["Автостопом по фазе сна"].firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 10))
+        XCTAssertGreaterThanOrEqual(title.frame.minX, window.minX)
+        XCTAssertLessThanOrEqual(title.frame.maxX, window.maxX)
         screenshot("iPhone13-artist-wide-artwork")
         back.tap()
         XCTAssertTrue(app.buttons["Recommended artist"].waitForExistence(timeout: 5))
