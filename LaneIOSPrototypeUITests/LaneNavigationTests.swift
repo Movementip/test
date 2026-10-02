@@ -46,8 +46,11 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(app.buttons["Recommended artist"].waitForExistence(timeout: 5))
         app.buttons["Recommended artist"].tap()
         XCTAssertTrue(app.navigationBars.buttons.firstMatch.waitForExistence(timeout: 5))
-        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
-        start.press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)))
+        let window = app.windows.firstMatch
+        print("Swipe geometry: application=\(app.frame), window=\(window.frame)")
+        XCTAssertGreaterThan(window.frame.width, 300)
+        let start = window.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
+        start.press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)))
         screenshot("iPhone13-native-swipe-back")
         XCTAssertTrue(app.buttons["Recommended artist"].waitForExistence(timeout: 5))
     }
