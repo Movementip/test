@@ -1309,28 +1309,22 @@ final class LaneSession: ObservableObject {
         }
     }
 
-    func saveProfile(name: String, username: String, statusText: String) {
-        guard !isGuest else { return }
-        busy = true
-        Task {
-            defer { busy = false }
-            do {
-                await configureAPI()
-                let result = try await LaneAPI.shared.editProfile(
-                    token: token,
-                    name: name,
-                    username: username,
-                    avatarURL: account?.avatarUrl ?? "",
-                    headerURL: account?.headerUrl ?? "",
-                    statusText: statusText
-                )
-                status = result.status
-                output = result.pretty
-                await loadAccount()
-            } catch {
-                output = error.localizedDescription
-            }
-        }
+    func saveProfile(name: String, username: String, statusText: String, avatarURL: String, headerURL: String) async throws {
+        guard !isGuest else { throw LaneAPIError.decoding("Sign in to edit your profile.") }
+        await configureAPI()
+        let requestToken = token
+        let result = try await LaneAPI.shared.editProfile(token: requestToken, name: name, username: username,
+                                                          avatarURL: avatarURL, headerURL: headerURL, statusText: statusText)
+        try result.requireSuccess()
+        let value = try await LaneAPI.shared.account(token: requestToken, deviceLanguage: Locale.current.language.languageCode?.identifier ?? "en")
+        guard token == requestToken else { throw CancellationError() }
+        account = value
+        if let id = value.laneId { publicProfile = try? await LaneAPI.shared.userInfo(token: requestToken, laneId: id) }
+    }
+
+    func uploadProfileImage(_ data: Data, target: String, isGIF: Bool) async throws -> String {
+        await configureAPI()
+        return try await LaneAPI.shared.uploadProfileImage(token: token, data: data, target: target, isGIF: isGIF)
     }
 
     func loadPrivacySettings() async throws -> LanePrivacySettings {
@@ -2772,6 +2766,15 @@ final class LaneSession: ObservableObject {
 
     func refreshNotifications() {
         Task { await loadNotifications(reset: true) }
+    }
+
+    func refreshUnreadNotifications() async {
+        guard !isGuest else { return }
+        let requestToken = token
+        await configureAPI()
+        if let count = try? await LaneAPI.shared.notificationUnreadCount(token: requestToken), token == requestToken {
+            unreadNotificationCount = count
+        }
     }
 
     func loadNotifications(reset: Bool = false) async {

@@ -645,6 +645,7 @@ actor LaneAPI {
         query: [URLQueryItem] = [],
         headers: [String: String] = [:],
         json: Any? = nil,
+        rawBody: Data? = nil,
         candidateBases: [URL]? = nil
     ) async throws -> APIResult {
         let upperMethod = method.uppercased()
@@ -700,6 +701,7 @@ actor LaneAPI {
         // Large Yandex favourites playlists are assembled server-side and can
         // legitimately exceed the generic request timeout used elsewhere.
         case "/user/import/preview": timeout = 60
+        case "/user/upload/photo": timeout = 30
         default: timeout = upperMethod == "GET" ? 7 : 20
         }
 
@@ -709,7 +711,7 @@ actor LaneAPI {
         for (index, targetBase) in candidates.enumerated() {
             let started = Date()
             do {
-                let unsigned = try build(
+                var unsigned = try build(
                     path: path,
                     method: method,
                     token: token,
@@ -718,6 +720,7 @@ actor LaneAPI {
                     json: json,
                     baseURL: targetBase
                 )
+                if let rawBody { unsigned.httpBody = rawBody }
                 let signer = requestSignerOverride ?? signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
                 let signed = try signer.sign(unsigned, body: unsigned.httpBody)
                 var request = signed
@@ -1125,6 +1128,29 @@ actor LaneAPI {
 
     func checkUsername(token: String, username: String) async throws -> APIResult {
         try await request(path: "/user/check-user-name", token: token, query: [.init(name: "username", value: username)])
+    }
+
+    /// APK multipart field is `file`; avatar/header (including GIF variants)
+    /// are distinguished by the `type` query, not by the form field name.
+    func uploadProfileImage(token: String, data: Data, target: String, isGIF: Bool = false) async throws -> String {
+        guard ["avatar", "header"].contains(target), !data.isEmpty, data.count <= 3_145_728 else {
+            throw LaneAPIError.decoding("Choose a profile image smaller than 3 MB.")
+        }
+        let boundary = "Lane-\(UUID().uuidString)"
+        let ext = isGIF ? "gif" : "jpg"
+        let mime = isGIF ? "image/gif" : "image/jpeg"
+        var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"profile.\(ext)\"\r\nContent-Type: \(mime)\r\n\r\n".utf8)
+        body.append(data)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        let result = try await request(path: "/user/upload/photo", method: "POST", token: token,
+                                       query: [.init(name: "type", value: target + (isGIF ? "_gif" : ""))],
+                                       headers: ["Content-Type": "multipart/form-data; boundary=\(boundary)"], rawBody: body)
+        try result.requireSuccess()
+        let value = try JSONDecoder().decode(LaneImageUploadResponse.self, from: result.data)
+        guard let url = URL(string: value.url), ["https", "http"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else {
+            throw LaneAPIError.invalidURL
+        }
+        return value.url
     }
 
     // MARK: Library

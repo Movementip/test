@@ -470,6 +470,8 @@ struct LaneDownloadedTrack: Codable {
     let fileName: String
 }
 
+struct LaneImageUploadResponse: Decodable { let url: String }
+
 struct UserInfoDTO: Decodable, Hashable {
     let displayedName: String?
     let premiumExpiresIn: Int64?

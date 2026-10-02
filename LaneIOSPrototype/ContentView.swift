@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 import UIKit
 
 private let lanePink = Color(red: 1.0, green: 130.0 / 255.0, blue: 132.0 / 255.0)
@@ -484,7 +485,7 @@ private struct HomeHeader: View {
                             .foregroundStyle(.white)
                             .frame(width: 36, height: 36)
 
-                        if !session.notificationCards.isEmpty {
+                        if session.unreadNotificationCount > 0 {
                             Circle()
                                 .fill(lanePink)
                                 .frame(width: 8, height: 8)
@@ -497,6 +498,7 @@ private struct HomeHeader: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
+        .task(id: session.token) { await session.refreshUnreadNotifications() }
     }
 }
 
@@ -2375,6 +2377,7 @@ private struct APKPlaylistOrderSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .disabled(saving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(saving ? "Saving…" : "Save") {
@@ -3444,42 +3447,109 @@ private struct TelegramLoginScreen: View {
     }
 }
 
-private struct EditProfileSheet: View {
+struct EditProfileSheet: View {
     @EnvironmentObject private var session: LaneSession
     @Environment(\.dismiss) private var dismiss
 
     @State private var name = ""
     @State private var username = ""
     @State private var statusText = ""
+    @State private var avatarURL = ""
+    @State private var headerURL = ""
+    @State private var avatarSelection: PhotosPickerItem?
+    @State private var headerSelection: PhotosPickerItem?
+    @State private var saving = false
+    @State private var uploading = false
+    @State private var errorMessage: String?
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Profile images") {
+                    PhotosPicker(selection: $avatarSelection, matching: .images) {
+                        HStack {
+                            AvatarView(url: avatarURL, size: 60)
+                            Text("Change avatar")
+                        }
+                    }
+                    PhotosPicker(selection: $headerSelection, matching: .images) {
+                        VStack(alignment: .leading) {
+                            APKRemoteImage(url: headerURL).frame(height: 110)
+                            Text("Change profile header")
+                        }
+                    }
+                    if uploading { ProgressView("Uploading image…") }
+                }
+                .disabled(saving || uploading)
                 Section("Profile") {
-                    TextField("Name", text: $name)
+                    TextField("Name", text: $name).accessibilityIdentifier("profile.name")
                     TextField("Username", text: $username)
                         .textInputAutocapitalization(.never)
                     TextField("About me", text: $statusText, axis: .vertical)
                 }
+                .disabled(saving || uploading)
+                if let errorMessage { Text(errorMessage).foregroundStyle(lanePink) }
             }
             .navigationTitle("Edit Profile")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .disabled(saving || uploading)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        session.saveProfile(name: name, username: username, statusText: statusText)
-                        dismiss()
+                        saving = true
+                        errorMessage = nil
+                        Task {
+                            defer { saving = false }
+                            do {
+                                try await session.saveProfile(name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                                                              username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+                                                              statusText: statusText, avatarURL: avatarURL, headerURL: headerURL)
+                                dismiss()
+                            } catch { errorMessage = error.localizedDescription }
+                        }
                     }
+                    .disabled(saving || uploading || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier("profile.save")
                 }
             }
             .onAppear {
                 name = session.account?.displayedName ?? ""
                 username = session.account?.userName ?? ""
                 statusText = session.account?.statusText ?? ""
+                avatarURL = session.account?.avatarUrl ?? ""
+                headerURL = session.account?.headerUrl ?? ""
             }
+            .onChange(of: avatarSelection) { selection in Task { await upload(selection, target: "avatar") } }
+            .onChange(of: headerSelection) { selection in Task { await upload(selection, target: "header") } }
         }
+        .interactiveDismissDisabled(saving || uploading)
+    }
+
+    private func upload(_ selection: PhotosPickerItem?, target: String) async {
+        guard let selection, !uploading else { return }
+        uploading = true
+        errorMessage = nil
+        defer { uploading = false }
+        do {
+            guard let original = try await selection.loadTransferable(type: Data.self) else { throw LaneAPIError.emptyResponse }
+            let isGIF = original.starts(with: Data("GIF8".utf8))
+            let data: Data
+            if isGIF { data = original }
+            else {
+                guard let image = UIImage(data: original) else { throw LaneAPIError.decoding("Could not open this image.") }
+                let maximum: CGFloat = target == "avatar" ? 800 : 1800
+                let scale = min(1, maximum / max(image.size.width, image.size.height))
+                let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+                let format = UIGraphicsImageRendererFormat(); format.scale = 1
+                let rendered = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+                guard let jpeg = rendered.jpegData(compressionQuality: 0.82) else { throw LaneAPIError.emptyResponse }
+                data = jpeg
+            }
+            let url = try await session.uploadProfileImage(data, target: target, isGIF: isGIF)
+            if target == "avatar" { avatarURL = url } else { headerURL = url }
+        } catch { errorMessage = error.localizedDescription }
     }
 }
 

@@ -58,6 +58,7 @@ enum LaneUITestFixtures {
 private struct LaneUITestRoot: View {
     @EnvironmentObject private var session: LaneSession
     @State private var showPlayer = false
+    @State private var showEdit = false
     @State private var result = ""
     @State private var gestureReport = "Waiting for edge swipe"
 
@@ -71,11 +72,13 @@ private struct LaneUITestRoot: View {
                 Button("Open player") { showPlayer = true }
                 Button("Run session checks") { Task { await checkSession() } }
                 Button("Run playback checks") { Task { await checkPlayback() } }
+                Button("Edit profile") { showEdit = true }
                 Text(result).accessibilityIdentifier("session.result")
             }
             .toolbar(.hidden, for: .navigationBar)
         }
         .fullScreenCover(isPresented: $showPlayer) { APKFullPlayerView().environmentObject(session) }
+        .sheet(isPresented: $showEdit) { EditProfileSheet().environmentObject(session) }
         .preferredColorScheme(.dark)
         .overlay(alignment: .bottom) {
             Text(gestureReport).font(.system(size: 9)).accessibilityIdentifier("gesture.report")
@@ -257,6 +260,8 @@ private final class LaneUITestURLProtocol: URLProtocol {
     private static var notificationRead = false
     private static var invitationAccepted = false
     private static var invitationFailedOnce = false
+    private static var profileName = "Lane fixture"
+    private static var profileFailedOnce = false
 
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "lane-ui.test" }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -328,7 +333,14 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 }
             } else if path == "/account" {
                 let privacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(Self.privacy))
-                data = try JSONSerialization.data(withJSONObject: ["laneId": "fixture-user", "userPlaylists": ["lane_likes"], "privacySettings": privacy])
+                data = try JSONSerialization.data(withJSONObject: ["laneId": "fixture-user", "displayedName": Self.profileName, "userPlaylists": ["lane_likes"], "privacySettings": privacy])
+            } else if path == "/user/edit" {
+                if !Self.profileFailedOnce { Self.profileFailedOnce = true; statusCode = 503 }
+                else {
+                    let value = try JSONSerialization.jsonObject(with: readBody()) as? [String: Any]
+                    Self.profileName = value?["name"] as? String ?? ""
+                }
+                data = Data((statusCode == 200 ? #"{"ok":true}"# : #"{"message":"Retry profile"}"#).utf8)
             } else if path == "/user/settings/privacy" {
                 Self.privacy = try JSONDecoder().decode(LanePrivacySettings.self, from: readBody())
                 data = Data(#"{"ok":true}"#.utf8)

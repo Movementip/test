@@ -124,4 +124,20 @@ final class LaneNavigationTests: XCTestCase {
     private func waitEnabled(_ element: XCUIElement) -> Bool {
         XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: element)], timeout: 10) == .completed
     }
+
+    func testProfileFailureKeepsEditorAndSuccessfulWriteReloads() {
+        app.buttons["Edit profile"].tap()
+        let name = app.textFields["profile.name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 10))
+        name.tap(); name.typeText("Updated Lane")
+        app.buttons["profile.save"].tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "503")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(name.exists, "A failed save must keep the editor open")
+        app.buttons["profile.save"].tap()
+        XCTAssertTrue(app.buttons["Edit profile"].waitForExistence(timeout: 10))
+        app.buttons["Edit profile"].tap()
+        XCTAssertTrue(name.waitForExistence(timeout: 10))
+        XCTAssertEqual(name.value as? String, "Updated Lane")
+        screenshot("iPhone13-profile-save-retry")
+    }
 }

@@ -176,7 +176,8 @@ final class LaneMockURLProtocol: URLProtocol {
         let path = request.url?.path ?? ""
         let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let wire = try requestBody(request)
-        let body = try BNITWireFixture.plaintext(request, wireBody: wire)
+        let multipart = request.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("multipart/") == true
+        let body = try BNITWireFixture.plaintext(request, wireBody: multipart ? Data() : wire)
 
         if query.contains(where: { $0.name == "transportProbe" }) {
             let nonce = try BNITWireFixture.metadata(request)[2]
@@ -191,6 +192,21 @@ final class LaneMockURLProtocol: URLProtocol {
         }
 
         switch path {
+        case "/user/upload/photo":
+            try require(request.httpMethod == "POST" && multipart, "Image upload is multipart POST")
+            let type = query.first { $0.name == "type" }?.value
+            try require(type == "avatar" || type == "header_gif", "Image upload target must match the APK")
+            let text = String(data: wire, encoding: .utf8) ?? ""
+            try require(text.contains("name=\"file\"") && text.contains(type == "header_gif" ? "image/gif" : "image/jpeg"), "Multipart file name/media type changed")
+            try require(wire.contains(Data("fixture-image".utf8)), "Multipart bytes must not be encrypted")
+            return (200, Data(#"{"url":"https://lane.test/uploaded-image.jpg"}"#.utf8))
+
+        case "/user/edit":
+            try require(request.httpMethod == "POST", "Profile edit must be POST")
+            let json = try object(body)
+            try require(Set(json.keys) == ["name", "username", "avatarUrl", "headerUrl", "statusText"], "EditProfileData fields changed")
+            try require(json["name"] as? String == "Updated Lane", "Profile name mismatch")
+            return (200, Data(#"{"ok":true}"#.utf8))
         case "/create-playlist":
             try require(request.httpMethod == "POST", "create-playlist must be POST")
             let json = try object(body)
@@ -486,6 +502,10 @@ struct LaneContractTestRunner {
         try await api.markNotificationRead(token: "test-token", id: "n1").requireSuccess()
         try await api.markAllNotificationsRead(token: "test-token").requireSuccess()
         try await api.respondToPlaylistInvitation(token: "test-token", invitationId: "invite-1", accept: true).requireSuccess()
+        let image = try await api.uploadProfileImage(token: "test-token", data: Data("fixture-image".utf8), target: "avatar")
+        precondition(image == "https://lane.test/uploaded-image.jpg")
+        _ = try await api.uploadProfileImage(token: "test-token", data: Data("fixture-image".utf8), target: "header", isGIF: true)
+        try await api.editProfile(token: "test-token", name: "Updated Lane", username: "lane", avatarURL: image, headerURL: "", statusText: "Music").requireSuccess()
 
         let preview = try await api.importPreview(
             token: "test-token",
