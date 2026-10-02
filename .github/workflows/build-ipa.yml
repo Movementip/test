@@ -26,9 +26,21 @@ jobs:
           xcodebuild -project LaneIOSPrototype.xcodeproj -scheme LaneIOSPrototype \
             -configuration Debug -destination "platform=iOS Simulator,id=$UDID" \
             -derivedDataPath /tmp/lane-simulator-build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build-for-testing
+
+          # Fail before booting/running the suite if Xcode drops or rewrites
+          # original APK artwork. Android PNGs must bypass pngcrush entirely.
+          APP_BUNDLE=/tmp/lane-simulator-build/Build/Products/Debug-iphonesimulator/LaneIOSPrototype.app
+          for asset in LaneAssets/*.png LaneAssets/amen.gif; do
+            cmp "$asset" "$APP_BUNDLE/${asset##*/}"
+          done
+
+          xcodebuild -project LaneIOSPrototype.xcodeproj -scheme LaneIOSPrototype \
+            -configuration Debug -destination "platform=iOS Simulator,id=$UDID" \
+            -derivedDataPath /tmp/lane-simulator-build \
             -resultBundlePath Output/Lane-Simulator.xcresult \
             -parallel-testing-enabled NO \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test-without-building
       - name: Export simulator screenshots and diagnostics
         if: always()
         run: |
