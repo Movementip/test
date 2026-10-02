@@ -1,4 +1,71 @@
 import Foundation
+import CryptoKit
+
+// Injectable clock lets contract tests exercise the full minute-long cooldown
+// without shortening the production policy or waiting a minute per fixture.
+struct LaneRetryTiming: Sendable {
+    let now: @Sendable () -> Date
+    let sleep: @Sendable (TimeInterval) async throws -> Void
+    static let live = LaneRetryTiming(now: { Date() }, sleep: { seconds in
+        try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+    })
+}
+
+enum LaneRateLimitPolicy {
+    static func delay(headers: [AnyHashable: Any], data: Data, now: Date, deleting: Bool) -> TimeInterval {
+        let header = headers.first { String(describing: $0.key).lowercased() == "retry-after" }
+            .map { String(describing: $0.value) }
+        var delays: [TimeInterval] = [deleting ? 60 : 3]
+        if let header {
+            if let seconds = TimeInterval(header), seconds.isFinite { delays.append(seconds) }
+            else {
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+                if let date = formatter.date(from: header) { delays.append(date.timeIntervalSince(now)) }
+            }
+        }
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for key in ["retryAfter", "retryAfterSeconds", "retry_after"] {
+                if let value = json[key] as? NSNumber, value.doubleValue.isFinite { delays.append(value.doubleValue) }
+                else if let value = json[key] as? String, let seconds = TimeInterval(value), seconds.isFinite { delays.append(seconds) }
+            }
+            // Lane's RATE_LIMITED response sometimes only includes prose.
+            if let message = json["message"] as? String,
+               let regex = try? NSRegularExpression(pattern: "(?i)retry after ([0-9]+(?:\\.[0-9]+)?) seconds?"),
+               let match = regex.firstMatch(in: message, range: NSRange(message.startIndex..., in: message)),
+               let range = Range(match.range(at: 1), in: message), let seconds = TimeInterval(message[range]) {
+                delays.append(seconds)
+            }
+        }
+        return max(1, delays.max() ?? 3)
+    }
+}
+
+enum LaneImportConfirmationError: LocalizedError {
+    case membership(saved: Int, expected: Int)
+    case order(saved: Int, detail: String)
+    var errorDescription: String? {
+        switch self {
+        case let .membership(saved, expected):
+            return "Lane confirmed \(saved)/\(expected) saved tracks. Continue to check the remaining tracks; accepted batches are kept."
+        case let .order(saved, detail):
+            return "All \(saved) tracks are saved on Lane. The selected order is not confirmed yet. Continue to finish ordering without importing the tracks again. \(detail)"
+        }
+    }
+}
+
+private struct LaneImportCheckpoint: Codable {
+    struct Page: Codable {
+        let ids: [String]
+        let tracks: [TrackData]
+    }
+    let sourceIDs: [String]
+    let resolvesIDs: Bool
+    var pages: [Page]
+    var updated: Date
+}
 
 private struct LaneReserveResponse: Decodable {
     let apiUrl: String
@@ -67,10 +134,14 @@ actor LaneAPI {
     private var timeOffsetMilliseconds: Int64 = 0
     private let lastWorkingRegionalBaseKey = "lane.lastWorkingRegionalBase"
     private let diagnosticTraceKey = "lane.diag.trace"
+    private let retryTiming: LaneRetryTiming
+    private var rateLimitDeadlines: [String: Date] = [:]
 
-    init(urlSession: URLSession = .shared, requestSigner: (any LaneRequestSigner)? = nil) {
+    init(urlSession: URLSession = .shared, requestSigner: (any LaneRequestSigner)? = nil,
+         retryTiming: LaneRetryTiming = .live) {
         self.urlSession = urlSession
         self.requestSignerOverride = requestSigner
+        self.retryTiming = retryTiming
     }
 
     private func diagnosticSetting(_ key: String, default fallback: String) -> String {
@@ -601,6 +672,9 @@ actor LaneAPI {
         }
 
         var request = URLRequest(url: url)
+        if clean.hasPrefix("playlist/") || ["user/playlists", "account"].contains(clean) {
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+        }
         request.httpMethod = method
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -640,6 +714,55 @@ actor LaneAPI {
     }
 
     func request(
+        path: String,
+        method: String = "GET",
+        token: String? = nil,
+        query: [URLQueryItem] = [],
+        headers: [String: String] = [:],
+        json: Any? = nil,
+        rawBody: Data? = nil,
+        candidateBases: [URL]? = nil,
+        shouldContinue: @escaping @MainActor () -> Bool = { true },
+        waiting: @escaping @MainActor (Int) -> Void = { _ in }
+    ) async throws -> APIResult {
+        let normalized = "/" + path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let deleting = normalized == "/user/playlist/remove-track"
+        let mutatingGET: Set<String> = ["/createUserOrLogin", "/delete-playlist", "/import/telegram/start",
+            "/import/telegram/finish", "/share/create", "/user/history-bump-item", "/user/history-delete-item", "/user/playlist/add"]
+        // Retry only reads/idempotent writes. A rejected reorder can be retried;
+        // its permutation is never replayed after a timeout or a 5xx response.
+        let mayRetry = method.uppercased() == "GET" && !mutatingGET.contains(normalized) ||
+            method.uppercased() == "POST" && ["/user/tracks", "/user/playlist/add-tracks", "/playlist/reorder"].contains(normalized)
+        let service = signingConfiguration.mode == .official ? "lane-official" : currentBaseURL()
+        let accountKey = SHA256.hash(data: Data((service + "|" + (token ?? "public")).utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        let bucket = accountKey + (deleting ? ":deletion" : ":requests")
+        for attempt in 0..<4 {
+            while let deadline = rateLimitDeadlines[bucket], deadline > retryTiming.now() {
+                try Task.checkCancellation()
+                guard await shouldContinue() else { throw CancellationError() }
+                let seconds = deadline.timeIntervalSince(retryTiming.now())
+                await waiting(Int(ceil(seconds)))
+                // Short cancellable waits keep logout/cancel responsive.
+                try await retryTiming.sleep(min(1, max(0, seconds)))
+            }
+            try Task.checkCancellation()
+            guard await shouldContinue() else { throw CancellationError() }
+            let result = try await requestOnce(path: path, method: method, token: token, query: query,
+                headers: headers, json: json, rawBody: rawBody, candidateBases: candidateBases)
+            guard result.status == 429 else { return result }
+            let delay = LaneRateLimitPolicy.delay(headers: result.headers, data: result.data, now: retryTiming.now(), deleting: deleting)
+            // Extremely long/invalid server deadlines are explicit errors,
+            // not an unbounded background loop or an overflowing countdown.
+            guard delay.isFinite, delay <= 3600 else { return result }
+            rateLimitDeadlines[bucket] = max(rateLimitDeadlines[bucket] ?? .distantPast, retryTiming.now().addingTimeInterval(delay))
+            appendDiagnosticTrace("\(method.uppercased()) \(normalized) rate-limited; wait \(Int(ceil(delay)))s, retry \(attempt + 1)/3")
+            guard mayRetry, attempt < 3 else { return result }
+        }
+        throw LaneAPIError.emptyResponse
+    }
+
+    private func requestOnce(
         path: String,
         method: String = "GET",
         token: String? = nil,
@@ -757,7 +880,6 @@ actor LaneAPI {
 
                 let retryable = http.statusCode == 408 ||
                     http.statusCode == 425 ||
-                    http.statusCode == 429 ||
                     (normalizedPath == "/user/tracks" && http.statusCode == 400) ||
                     (500...599).contains(http.statusCode)
 
@@ -1301,7 +1423,8 @@ actor LaneAPI {
             LanePlaylist.self,
             path: "/playlist/\(playlistId)",
             token: token,
-            query: [.init(name: "platform", value: platform)]
+            query: [.init(name: "platform", value: platform)],
+            headers: ["Cache-Control": "no-cache, no-store"]
         )
     }
 
@@ -1412,7 +1535,8 @@ actor LaneAPI {
         )
     }
 
-    func reorderPlaylist(token: String, playlistId: String, newOrder: [String]) async throws -> APIResult {
+    func reorderPlaylist(token: String, playlistId: String, newOrder: [String],
+                         shouldContinue: @escaping @MainActor () -> Bool = { true }) async throws -> APIResult {
         // ReorderPlaylistRequest recovered from Lane Android 1.4.7:
         // { playlistId: String, newOrder: List<String> }.
         try await request(
@@ -1422,7 +1546,8 @@ actor LaneAPI {
             json: [
                 "playlistId": playlistId,
                 "newOrder": newOrder
-            ]
+            ],
+            shouldContinue: shouldContinue
         )
     }
 
@@ -1442,7 +1567,8 @@ actor LaneAPI {
         )
     }
 
-    func addTracks(token: String, playlistId: String, trackIds: [String]) async throws -> APIResult {
+    func addTracks(token: String, playlistId: String, trackIds: [String],
+                   shouldContinue: @escaping @MainActor () -> Bool = { true }) async throws -> APIResult {
         let clean = trackIds
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -1469,7 +1595,8 @@ actor LaneAPI {
                 method: "POST",
                 token: token,
                 query: [.init(name: "playlistId", value: playlistId)],
-                json: payload.body
+                json: payload.body,
+                shouldContinue: shouldContinue
             )
             last = result
 
@@ -1493,22 +1620,27 @@ actor LaneAPI {
         return bodyCompatibleFailure ?? last ?? APIResult(status: 0, headers: [:], data: Data())
     }
 
-    func removeTrack(token: String, playlistId: String, trackId: String) async throws -> APIResult {
+    func removeTrack(token: String, playlistId: String, trackId: String,
+                     shouldContinue: @escaping @MainActor () -> Bool = { true },
+                     waiting: @escaping @MainActor (Int) -> Void = { _ in }) async throws -> APIResult {
         try await request(
             path: "/user/playlist/remove-track",
             token: token,
             query: [
                 .init(name: "playlistId", value: playlistId),
                 .init(name: "trackId", value: trackId)
-            ]
+            ],
+            shouldContinue: shouldContinue,
+            waiting: waiting
         )
     }
 
     /// No bulk-delete endpoint exists in APK 1.4.7. Remove only the IDs read
-    /// from this playlist, using its idempotent endpoint, at most 15 in flight.
+    /// from this playlist, one idempotent request at a time with pacing.
     /// Repeating after a partial failure reads the survivors, not an old cache.
     func clearPlaylistTracks(token: String, playlistId: String,
                              shouldContinue: @escaping @MainActor () -> Bool = { true },
+                             stage: @escaping @MainActor (String) -> Void = { _ in },
                              progress: @MainActor (Int, Int) -> Void = { _, _ in }) async throws -> Int {
         guard !playlistId.isEmpty, !token.isEmpty else { throw LaneAPIError.invalidURL }
         let detail = try await playlist(token: token, playlistId: playlistId)
@@ -1518,32 +1650,50 @@ actor LaneAPI {
         let ids = LaneTrackBatching.unique((detail.playlistTracksIds ?? []) + (detail.playlistTracks?.compactMap(\.songId) ?? []))
         var completed = 0
         await progress(0, ids.count)
-        for batch in LaneTrackBatching.batches(ids) {
+        for id in ids {
             try Task.checkCancellation()
             guard await shouldContinue() else { throw CancellationError() }
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                for id in batch {
-                    group.addTask {
-                        try Task.checkCancellation()
-                        guard await shouldContinue() else { throw CancellationError() }
-                        try await self.removeTrack(token: token, playlistId: playlistId, trackId: id).requireSuccess()
-                    }
-                }
-                try await group.waitForAll()
-            }
-            completed += batch.count
+            if completed > 0 { try await retryTiming.sleep(0.25) }
+            await stage("Удаление \(completed)/\(ids.count)…")
+            let completedBeforeRetry = completed
+            try await removeTrack(token: token, playlistId: playlistId, trackId: id,
+                shouldContinue: shouldContinue,
+                waiting: { seconds in stage("Лимит сервера. Продолжим через \(seconds) с · удалено \(completedBeforeRetry)/\(ids.count)") }).requireSuccess()
+            completed += 1
             await progress(completed, ids.count)
         }
-        for attempt in 0..<4 {
+        await stage("Проверяем удаление на сервере…")
+        for attempt in 0..<7 {
             try Task.checkCancellation()
             guard await shouldContinue() else { throw CancellationError() }
             let confirmed = try await playlist(token: token, playlistId: playlistId)
-            if confirmed.playlistTracksIds?.isEmpty == true,
+            if (confirmed.playlistTracksIds?.isEmpty == true || confirmed.playlistTracks?.isEmpty == true),
+               (confirmed.playlistTracksIds ?? []).isEmpty,
                (confirmed.playlistTracks ?? []).isEmpty,
-               (confirmed.tracksCount ?? 0) == 0 { return completed }
-            if attempt < 3 { try await Task.sleep(nanoseconds: 400_000_000) }
+               (confirmed.tracksCount ?? 0) == 0 {
+                UserDefaults.standard.removeObject(forKey: importCheckpointKey(token: token, playlistId: playlistId))
+                return completed
+            }
+            if attempt < 6 { try await retryTiming.sleep(confirmationDelay(attempt)) }
         }
         throw LaneAPIError.decoding("The playlist is not empty on Lane yet. Some tracks may have been removed; retry to remove the remaining tracks.")
+    }
+
+    private func confirmationDelay(_ attempt: Int) -> TimeInterval {
+        [0.5, 1, 2, 3, 5, 8][min(attempt, 5)]
+    }
+
+    private func importCheckpointKey(token: String, playlistId: String) -> String {
+        let service = signingConfiguration.mode == .official ? "lane-official" : currentBaseURL()
+        // No bearer token is stored in preferences; checkpoints are scoped to
+        // the backend, account and destination. They contain only catalog data.
+        let digest = SHA256.hash(data: Data((service + "|" + token + "|" + playlistId).utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        return "lane.importCheckpoint." + digest
+    }
+
+    private func saveImportCheckpoint(_ checkpoint: LaneImportCheckpoint, key: String) {
+        if let data = try? JSONEncoder().encode(checkpoint) { UserDefaults.standard.set(data, forKey: key) }
     }
 
     /// Resolve and commit one page at a time. A failed page never clears pages
@@ -1556,33 +1706,53 @@ actor LaneAPI {
         resolveSourceIDs: Bool = true,
         sort: LaneMusicImportSort = .original,
         orderReference: [YandexImportTrack] = [],
+        shouldContinue: @escaping @MainActor () -> Bool = { true },
+        stage: @escaping @MainActor (String) -> Void = { _ in },
         progress: @MainActor (_ processed: Int, _ total: Int, _ savedIDs: [String], _ tracks: [TrackData]) -> Void = { _, _, _, _ in }
     ) async throws -> Int {
         let ids = LaneTrackBatching.unique(sourceIDs)
         guard !ids.isEmpty else { throw LaneAPIError.emptyResponse }
         guard !playlistId.isEmpty else { throw LaneAPIError.invalidURL }
-        let existing = try? await playlist(token: token, playlistId: playlistId)
-        var present = Set((existing?.playlistTracksIds ?? []) + (existing?.playlistTracks?.compactMap(\.songId) ?? []))
+        await stage("Checking tracks already saved on Lane…")
+        let existing = try await playlist(token: token, playlistId: playlistId)
+        var present = Set((existing.playlistTracksIds ?? []) + (existing.playlistTracks?.compactMap(\.songId) ?? []))
+        let initiallyConfirmed = present
+        let checkpointKey = importCheckpointKey(token: token, playlistId: playlistId)
+        var checkpoint = LaneImportCheckpoint(sourceIDs: ids, resolvesIDs: resolveSourceIDs, pages: [], updated: Date())
+        if let data = UserDefaults.standard.data(forKey: checkpointKey),
+           let saved = try? JSONDecoder().decode(LaneImportCheckpoint.self, from: data),
+           saved.sourceIDs == ids, saved.resolvesIDs == resolveSourceIDs,
+           Date().timeIntervalSince(saved.updated) < 7 * 86400 { checkpoint = saved }
         var accepted = Set<String>()
         var acceptedOrder: [String] = []
         var resolvedTracks: [TrackData] = []
         var processed = 0
 
-        for batch in LaneTrackBatching.batches(ids) {
+        for (index, batch) in LaneTrackBatching.batches(ids).enumerated() {
             try Task.checkCancellation()
-            let tracks = resolveSourceIDs
-                ? try await tracksByIds(token: token, ids: batch, prefetch: false)
-                : []
-            let canonical = resolveSourceIDs
-                ? LaneTrackBatching.unique(tracks.compactMap(\.songId))
-                : batch
+            guard await shouldContinue() else { throw CancellationError() }
+            await stage("Processing \(processed)/\(ids.count) · batches of 15")
+            let page: LaneImportCheckpoint.Page
+            if index < checkpoint.pages.count { page = checkpoint.pages[index] }
+            else {
+                let tracks = resolveSourceIDs ? try await tracksByIds(token: token, ids: batch, prefetch: false) : []
+                page = LaneImportCheckpoint.Page(ids: resolveSourceIDs ? LaneTrackBatching.unique(tracks.compactMap(\.songId)) : batch, tracks: tracks)
+                if !page.ids.isEmpty {
+                    checkpoint.pages.append(page)
+                    checkpoint.updated = Date()
+                    saveImportCheckpoint(checkpoint, key: checkpointKey)
+                }
+            }
+            let tracks = page.tracks
+            let canonical = page.ids
             guard !canonical.isEmpty else {
                 throw LaneAPIError.decoding("Lane returned no importable tracks for a 15-track batch. Retry to continue; earlier batches are preserved.")
             }
             let missing = canonical.filter { !present.contains($0) }
             for writeBatch in LaneTrackBatching.batches(missing) {
                 try Task.checkCancellation()
-                let result = try await addTracks(token: token, playlistId: playlistId, trackIds: writeBatch)
+                guard await shouldContinue() else { throw CancellationError() }
+                let result = try await addTracks(token: token, playlistId: playlistId, trackIds: writeBatch, shouldContinue: shouldContinue)
                 try result.requireSuccess()
                 present.formUnion(writeBatch)
             }
@@ -1590,46 +1760,62 @@ actor LaneAPI {
             acceptedOrder.append(contentsOf: canonical)
             resolvedTracks.append(contentsOf: tracks)
             processed += batch.count
-            await progress(processed, ids.count, canonical, tracks)
+            // 2xx is acceptance, not durable confirmation. Only read-back IDs
+            // receive a checkmark; resolved artwork is still cached immediately.
+            await progress(processed, ids.count, canonical.filter { initiallyConfirmed.contains($0) }, tracks)
         }
 
         // Adding tracks can prepend them on the server. Set the final explicit
         // order using the APK endpoint; retain unrelated destination tracks.
         // Re-read just before reordering so a concurrent addition is not lost.
         var destinationIDs: [String] = []
-        for attempt in 0..<4 {
+        await stage("Confirming saved tracks on Lane…")
+        for attempt in 0..<7 {
             try Task.checkCancellation()
+            guard await shouldContinue() else { throw CancellationError() }
             let destination = try await playlist(token: token, playlistId: playlistId)
             destinationIDs = LaneTrackBatching.unique((destination.playlistTracksIds ?? []) +
                                                       (destination.playlistTracks?.compactMap(\.songId) ?? []))
+            await progress(processed, ids.count, destinationIDs.filter { accepted.contains($0) }, [])
             if accepted.isSubset(of: Set(destinationIDs)) { break }
-            if attempt < 3 { try await Task.sleep(nanoseconds: 400_000_000) }
+            if attempt < 6 { try await retryTiming.sleep(confirmationDelay(attempt)) }
         }
         guard accepted.isSubset(of: Set(destinationIDs)) else {
-            throw LaneAPIError.decoding("Lane has not confirmed the imported tracks yet. Retry to continue.")
+            throw LaneImportConfirmationError.membership(saved: accepted.intersection(destinationIDs).count, expected: accepted.count)
         }
         let ordered = resolveSourceIDs
             ? LaneImportOrdering.ordered(resolvedTracks, sort: sort, reference: orderReference).compactMap(\.songId)
             : (sort == .oldest ? Array(acceptedOrder.reversed()) : acceptedOrder)
         let newOrder = LaneTrackBatching.unique(ordered) + destinationIDs.filter { !accepted.contains($0) }
-        if newOrder != destinationIDs {
-            try await reorderPlaylist(token: token, playlistId: playlistId, newOrder: newOrder).requireSuccess()
-        }
-
-        // A 2xx acknowledgement alone is not proof of durable membership/order.
-        // Read back the destination before showing completion to the user.
-        for attempt in 0..<4 {
-            try Task.checkCancellation()
-            if let destination = try? await playlist(token: token, playlistId: playlistId) {
+        await stage("All \(accepted.count) saved · confirming playlist order…")
+        do {
+            if newOrder != destinationIDs {
+                try await reorderPlaylist(token: token, playlistId: playlistId, newOrder: newOrder, shouldContinue: shouldContinue).requireSuccess()
+            }
+            // Never swallow 429 and turn it into a misleading decode error.
+            // Read metadata and embedded tracks separately: embedded preview
+            // order must not overwrite the explicit playlistTracksIds order.
+            for attempt in 0..<7 {
+                try Task.checkCancellation()
+                guard await shouldContinue() else { throw CancellationError() }
+                let destination = try await playlist(token: token, playlistId: playlistId)
                 let confirmed = LaneTrackBatching.unique((destination.playlistTracksIds ?? []) +
                                                         (destination.playlistTracks?.compactMap(\.songId) ?? []))
                 if accepted.isSubset(of: Set(confirmed)), confirmed.filter({ accepted.contains($0) }) == LaneTrackBatching.unique(ordered) {
+                    UserDefaults.standard.removeObject(forKey: checkpointKey)
                     return accepted.count
                 }
+                if attempt == 3, accepted.isSubset(of: Set(confirmed)) {
+                    // A late batch commit can overtake the first reorder. Read
+                    // the latest membership before one bounded ordering retry.
+                    let retryOrder = LaneTrackBatching.unique(ordered) + confirmed.filter { !accepted.contains($0) }
+                    try await reorderPlaylist(token: token, playlistId: playlistId, newOrder: retryOrder, shouldContinue: shouldContinue).requireSuccess()
+                }
+                if attempt < 6 { try await retryTiming.sleep(confirmationDelay(attempt)) }
             }
-            if attempt < 3 { try await Task.sleep(nanoseconds: 400_000_000) }
-        }
-        throw LaneAPIError.decoding("Lane accepted the batches but has not confirmed all tracks in the playlist yet. Retry to check and continue; accepted batches are not discarded.")
+        } catch is CancellationError { throw CancellationError() }
+        catch { throw LaneImportConfirmationError.order(saved: accepted.count, detail: error.localizedDescription) }
+        throw LaneImportConfirmationError.order(saved: accepted.count, detail: "The server still returns a different order.")
     }
 
     // MARK: Social

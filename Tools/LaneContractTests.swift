@@ -1,6 +1,20 @@
 import Foundation
 import CryptoKit
 
+final class LaneTestClock: @unchecked Sendable {
+    static let shared = LaneTestClock()
+    private let lock = NSLock()
+    private var date = Date(timeIntervalSince1970: 1_700_000_000)
+    func now() -> Date { lock.lock(); defer { lock.unlock() }; return date }
+    private func advance(_ seconds: TimeInterval) { lock.lock(); defer { lock.unlock() }; date.addTimeInterval(seconds) }
+    var timing: LaneRetryTiming { LaneRetryTiming(now: { self.now() }, sleep: { seconds in
+        try Task.checkCancellation()
+        self.advance(seconds)
+        await Task.yield()
+        try Task.checkCancellation()
+    }) }
+}
+
 // Independent inverse of the APK's metadata encoder. Verify the HMAC against
 // the actual ciphertext on the wire, not against the unencrypted test payload.
 enum BNITWireFixture {
@@ -96,6 +110,15 @@ final class LaneMockURLProtocol: URLProtocol {
     private static var followingFriend = false
     private static var clearFailedOnce = false
     private static var reorderFailedOnce = false
+    private static var limitedUntil: [String: Date] = [:]
+    private static var limitedNonce: [String: String] = [:]
+    private static var limitedOnce = Set<String>()
+    private static var resolverCalls = 0
+    private static var membershipReads = 0
+    private static var staleOrder: [String: [String]] = [:]
+    private static var staleOrderReads: [String: Int] = [:]
+
+    static func resolverCount() -> Int { lock.lock(); defer { lock.unlock() }; return resolverCalls }
 
     static func savedIDs(_ id: String) -> [String] {
         lock.lock()
@@ -163,7 +186,7 @@ final class LaneMockURLProtocol: URLProtocol {
                 url: url,
                 statusCode: result.status,
                 httpVersion: "HTTP/1.1",
-                headerFields: ["Content-Type": "application/json"]
+                headerFields: result.status == 429 ? ["Content-Type": "application/json", "Retry-After": "3"] : ["Content-Type": "application/json"]
             )!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: result.data)
@@ -235,6 +258,7 @@ final class LaneMockURLProtocol: URLProtocol {
                 try require(!ids.isEmpty && ids.count <= 15, "Every import write must contain at most 15 canonical IDs")
                 Self.lock.lock()
                 defer { Self.lock.unlock() }
+                if playlistID == "import-rate", let limited = try rateLimited(key: "add", deleting: false, request: request) { return limited }
                 Self.importWriteSizes.append(ids.count)
                 if playlistID == "import-resume", !Self.didFailMiddleBatch, !(Self.playlists[playlistID] ?? []).isEmpty {
                     Self.didFailMiddleBatch = true
@@ -288,6 +312,11 @@ final class LaneMockURLProtocol: URLProtocol {
                 Self.reorderFailedOnce = true
                 return (503, Data(#"{"code":"ORDER_RETRY"}"#.utf8))
             }
+            if id == "import-order-lag", Self.staleOrder[id] == nil {
+                Self.staleOrder[id] = Self.playlists[id] ?? []
+                Self.staleOrderReads[id] = 5
+            }
+            if id == "import-order-ignored" { return (200, Data(#"{"ok":true}"#.utf8)) }
             Self.playlists[id] = ids
             return (200, Data(#"{"ok":true}"#.utf8))
 
@@ -296,6 +325,8 @@ final class LaneMockURLProtocol: URLProtocol {
             let id = query.first { $0.name == "playlistId" }?.value ?? ""
             let track = query.first { $0.name == "trackId" }?.value ?? ""
             Self.lock.lock(); defer { Self.lock.unlock() }
+            if id == "import-clear-rate", let limited = try rateLimited(key: "remove", deleting: true, request: request) { return limited }
+            if id == "import-clear-cancel", let limited = try rateLimited(key: "cancel-remove", deleting: true, request: request) { return limited }
             if id == "import-clear", track == "lane-1", !Self.clearFailedOnce {
                 Self.clearFailedOnce = true
                 return (503, Data(#"{"code":"REMOVE_RETRY"}"#.utf8))
@@ -304,6 +335,7 @@ final class LaneMockURLProtocol: URLProtocol {
             return (200, Data(#"{"ok":true}"#.utf8))
 
         case "/user/tracks":
+            Self.lock.lock(); Self.resolverCalls += 1; Self.lock.unlock()
             try require(request.httpMethod == "POST", "user/tracks must be POST")
             if let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
                let ids = json["trackIds"] as? [String], ids.first?.hasPrefix("source-") == true {
@@ -382,12 +414,40 @@ final class LaneMockURLProtocol: URLProtocol {
         default:
             if path.hasPrefix("/playlist/import-") || path == "/playlist/lane_likes" {
                 let id = String(path.dropFirst("/playlist/".count))
-                return (200, try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": Self.savedIDs(id)]))
+                try require(request.cachePolicy == .reloadIgnoringLocalCacheData, "Membership confirmation must bypass the local HTTP cache")
+                Self.lock.lock(); defer { Self.lock.unlock() }
+                var ids = Self.playlists[id] ?? []
+                if id == "import-membership-lag", !ids.isEmpty {
+                    Self.membershipReads += 1
+                    if Self.membershipReads == 2, let limited = try rateLimited(key: "confirm", deleting: false, request: request) { return limited }
+                    if Self.membershipReads < 5 { ids = Array(ids.prefix(15)) }
+                }
+                if let stale = Self.staleOrder[id], (Self.staleOrderReads[id] ?? 0) > 0 {
+                    Self.staleOrderReads[id, default: 0] -= 1
+                    ids = stale
+                }
+                return (200, try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": ids]))
             }
             throw NSError(domain: "LaneContractTests", code: 404, userInfo: [
                 NSLocalizedDescriptionKey: "Unexpected request: \(path)"
             ])
         }
+    }
+
+    // Called while holding the fixture lock. Reject early retries and verify
+    // that a fresh signature authenticates the original body on every retry.
+    private func rateLimited(key: String, deleting: Bool, request: URLRequest) throws -> (status: Int, data: Data)? {
+        let now = LaneTestClock.shared.now()
+        let nonce = try BNITWireFixture.metadata(request)[2]
+        if !Self.limitedOnce.contains(key) {
+            Self.limitedOnce.insert(key)
+            Self.limitedUntil[key] = now.addingTimeInterval(deleting ? 60 : 3)
+            Self.limitedNonce[key] = nonce
+            return (429, Data(#"{"code":"RATE_LIMITED","message":"Rate limit exceeded. Retry after 3 seconds."}"#.utf8))
+        }
+        try require(now >= Self.limitedUntil[key]!, "Client retried before the server cooldown expired")
+        try require(nonce != Self.limitedNonce[key], "429 retry must be freshly signed")
+        return nil
     }
 
     private func object(_ data: Data) throws -> [String: Any] {
@@ -428,6 +488,11 @@ final class LaneMockURLProtocol: URLProtocol {
 @main
 struct LaneContractTestRunner {
     static func main() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        precondition(LaneRateLimitPolicy.delay(headers: ["retry-after": "3"], data: Data(), now: now, deleting: true) == 60)
+        precondition(LaneRateLimitPolicy.delay(headers: ["Retry-After": "90"], data: Data(), now: now, deleting: true) == 90)
+        precondition(LaneRateLimitPolicy.delay(headers: [:], data: Data(#"{"message":"Retry after 17 seconds."}"#.utf8), now: now, deleting: false) == 17)
+        precondition(LaneRateLimitPolicy.delay(headers: ["Retry-After": "Tue, 14 Nov 2023 22:14:20 GMT"], data: Data(), now: now, deleting: false) == 60)
         let range = LaneAudioHTTPRange.parse("bytes 65536-131071/768044")
         precondition(range?.start == 65536 && range?.end == 131071 && range?.total == 768044)
         for invalid in ["bytes */100", "bytes 20-10/100", "bytes 0-100/100", "bytes 0-10/*", "garbage", "bytes -1-2/100"] {
@@ -485,7 +550,7 @@ struct LaneContractTestRunner {
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
 
-        let api = LaneAPI(urlSession: session, requestSigner: BNITLaneRequestSigner())
+        let api = LaneAPI(urlSession: session, requestSigner: BNITLaneRequestSigner(), retryTiming: LaneTestClock.shared.timing)
         await api.setBase("https://lane.test")
         await api.setSigningConfiguration(
             LaneSigningConfiguration(mode: .custom, apiKeyHeader: "", apiKey: "")
@@ -624,7 +689,7 @@ struct LaneContractTestRunner {
         } catch {
             precondition(LaneMockURLProtocol.savedIDs("import-resume").count == 15)
         }
-        let fresh = LaneAPI(urlSession: session, requestSigner: BNITLaneRequestSigner())
+        let fresh = LaneAPI(urlSession: session, requestSigner: BNITLaneRequestSigner(), retryTiming: LaneTestClock.shared.timing)
         await fresh.setBase("https://lane.test")
         await fresh.setSigningConfiguration(LaneSigningConfiguration(mode: .custom, apiKeyHeader: "", apiKey: ""))
         let resumed = try await fresh.importTrackBatches(token: "test-token", playlistId: "import-resume", sourceIDs: Array(sourceIDs.prefix(31)))
@@ -643,8 +708,39 @@ struct LaneContractTestRunner {
             _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-order-retry", sourceIDs: small)
             preconditionFailure("Failed server ordering must not report ordered import success")
         } catch { precondition(LaneMockURLProtocol.savedIDs("import-order-retry").count == 31) }
+        let resolutionsBeforeRetry = LaneMockURLProtocol.resolverCount()
+        let writesBeforeRetry = LaneMockURLProtocol.batchSizes().count
         _ = try await fresh.importTrackBatches(token: "test-token", playlistId: "import-order-retry", sourceIDs: small)
         precondition(LaneMockURLProtocol.savedIDs("import-order-retry") == small.map { $0.replacingOccurrences(of: "source-", with: "lane-") })
+        precondition(LaneMockURLProtocol.resolverCount() == resolutionsBeforeRetry, "Ordering resume must not resolve all source tracks again")
+        precondition(LaneMockURLProtocol.batchSizes().count == writesBeforeRetry, "Ordering resume must not resend already saved batches")
+        _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-rate", sourceIDs: small)
+        _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-order-lag", sourceIDs: small)
+        _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-membership-lag", sourceIDs: small, progress: { processed, _, saved, _ in
+            // The first resolver/write callback cannot show unconfirmed IDs.
+            if processed == 15 { precondition(saved.isEmpty, "A 2xx write must not display durable checkmarks") }
+        })
+        do {
+            _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-order-ignored", sourceIDs: small)
+            preconditionFailure("An ignored reorder must not claim the requested order is durable")
+        } catch let LaneImportConfirmationError.order(saved, _) { precondition(saved == 31) }
+        // The server rejected the first delete for 3 seconds, but the user's
+        // deletion policy requires at least one minute. No regional retry rush.
+        _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-clear-rate", sourceIDs: small)
+        let beforeCooldown = LaneTestClock.shared.now()
+        _ = try await api.clearPlaylistTracks(token: "test-token", playlistId: "import-clear-rate", stage: { stage in
+            if stage.contains("Лимит") { precondition(stage.contains("удалено")) }
+        })
+        precondition(LaneTestClock.shared.now().timeIntervalSince(beforeCooldown) >= 60)
+        precondition(LaneMockURLProtocol.savedIDs("import-clear-rate").isEmpty)
+        _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-clear-cancel", sourceIDs: small)
+        var allowDeletion = true
+        do {
+            _ = try await api.clearPlaylistTracks(token: "test-token", playlistId: "import-clear-cancel",
+                shouldContinue: { allowDeletion }, stage: { if $0.contains("Лимит") { allowDeletion = false } })
+            preconditionFailure("Logout/cancel during the minute wait must stop further mutations")
+        } catch is CancellationError { }
+        precondition(LaneMockURLProtocol.savedIDs("import-clear-cancel").count == 31)
 
         _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-clear", sourceIDs: small)
         do {
@@ -682,6 +778,6 @@ struct LaneContractTestRunner {
             "/user/import/preview"
         ]
         precondition(expectedPaths.allSatisfy(LaneMockURLProtocol.received))
-        print("Lane contract tests passed: APK-native cipher/signature, 1151 tracks in batches of 15, durable source/reverse order despite prepending, Yandex metadata mapping, unrelated tracks retained, ordering retry, partial clear/retry/account cancellation, canonical albums, server likes, privacy, notifications, multipart uploads, ranges/effects.")
+        print("Lane contract tests passed: APK-native cipher/signature, 1151 tracks in batches of 15, 429 fresh-signature retries, minimum 60-second deletion cooldown/cancellation, delayed membership/order readback, truthful saved-vs-order states, ordering-only resume without re-resolving/rewriting, durable source/reverse order, partial clear/retry, canonical albums, server likes, privacy, notifications, multipart uploads, ranges/effects.")
     }
 }

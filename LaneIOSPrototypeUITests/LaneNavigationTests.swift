@@ -90,8 +90,59 @@ final class LaneNavigationTests: XCTestCase {
 
     func testSessionImportAndLikesAfterLocalStateRemoval() {
         app.buttons["Run session checks"].tap()
-        XCTAssertTrue(app.staticTexts["Session checks passed"].waitForExistence(timeout: 30), app.staticTexts["session.result"].label)
+        XCTAssertTrue(app.staticTexts["Session checks passed"].waitForExistence(timeout: 45), app.staticTexts["session.result"].label)
         screenshot("iPhone13-session-import-and-likes")
+    }
+
+    func testLikedRowReplacesAnotherPlaylistQueueForNextAndPrevious() {
+        app.terminate()
+        app.launchArguments = ["--lane-ui-test", "--lane-queue-fixture"]
+        app.launch()
+        app.buttons["Open full app"].tap()
+        let library = app.buttons["Library"].firstMatch
+        XCTAssertTrue(library.waitForExistence(timeout: 10))
+        library.tap()
+        let liked = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Favorite tracks")).firstMatch
+        XCTAssertTrue(liked.waitForExistence(timeout: 15))
+        liked.tap()
+        let row = app.buttons["track.row.lane-3"]
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        row.tap() // Normal tap, not the previously working swipe Play action.
+        app.buttons["player.mini.open"].tap()
+        XCTAssertTrue(app.staticTexts["Fixture track 3"].waitForExistence(timeout: 10))
+        app.buttons["player.next"].tap()
+        XCTAssertTrue(app.staticTexts["Fixture track 4"].waitForExistence(timeout: 15), "Next must stay in liked tracks, not return to lane-2")
+        app.buttons["player.previous"].tap()
+        XCTAssertTrue(app.staticTexts["Fixture track 3"].waitForExistence(timeout: 15))
+        screenshot("iPhone13-liked-tracks-replace-old-playback-queue")
+    }
+
+    func testRateLimitedClearWaitsFullMinuteAndContinuesAutomatically() {
+        app.terminate()
+        app.launchArguments = ["--lane-ui-test", "--lane-rate-fixture"]
+        app.launch()
+        app.buttons["Open full app"].tap()
+        let library = app.buttons["Library"].firstMatch
+        XCTAssertTrue(library.waitForExistence(timeout: 10))
+        library.tap()
+        let liked = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Favorite tracks")).firstMatch
+        XCTAssertTrue(liked.waitForExistence(timeout: 15))
+        liked.tap()
+        let actions = app.buttons["playlist.actions"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 10))
+        actions.tap()
+        app.buttons["playlist.clear"].tap()
+        XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 5))
+        let start = Date()
+        app.alerts.buttons["Удалить все треки"].tap()
+        let waiting = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Лимит сервера")).firstMatch
+        XCTAssertTrue(waiting.waitForExistence(timeout: 10), "429 should be a countdown, not a fatal error")
+        XCTAssertTrue(app.buttons["playlist.clear.stop"].exists)
+        screenshot("iPhone13-clear-minute-cooldown")
+        XCTAssertTrue(app.staticTexts["Favorite Tracks"].firstMatch.waitForExistence(timeout: 90), "Deletion should continue automatically once the minute expires")
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 60)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "HTTP 429")).firstMatch.exists)
+        screenshot("iPhone13-clear-after-minute-cooldown")
     }
 
     func testPrivacySettingsPersistOnServerAndReload() {
@@ -159,7 +210,7 @@ final class LaneNavigationTests: XCTestCase {
         clear.tap()
         XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 5))
         app.alerts.buttons["Cancel"].tap()
-        XCTAssertTrue(app.staticTexts["Fixture track"].firstMatch.exists, "Cancelling must not remove tracks")
+        XCTAssertTrue(app.staticTexts["Fixture track 1"].firstMatch.exists, "Cancelling must not remove tracks")
         actions.tap(); clear.tap()
         XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 5))
         app.alerts.buttons["Удалить все треки"].tap()

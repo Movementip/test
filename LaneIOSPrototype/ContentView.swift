@@ -1237,6 +1237,7 @@ private struct MiniPlayerView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("player.mini.open")
                     .padding(.leading, 10)
 
                     Button {
@@ -1610,11 +1611,12 @@ private struct TrackRow: View {
     @EnvironmentObject private var session: LaneSession
     let track: TrackCandidate
     @Binding var showPlayer: Bool
+    let playbackQueue: [TrackCandidate]
 
     var body: some View {
         HStack(spacing: 12) {
             Button {
-                session.requestStream(for: track)
+                session.startPlayback(track, in: playbackQueue)
             } label: {
                 HStack(spacing: 12) {
                     ArtworkView(url: track.coverURL, size: 52, radius: 10)
@@ -1633,6 +1635,7 @@ private struct TrackRow: View {
                 }
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("track.row.\(track.trackID ?? track.id)")
 
             Spacer()
 
@@ -1658,7 +1661,7 @@ private struct TrackRow: View {
         .padding(.vertical, 4)
         .contentShape(Rectangle())
         .onTapGesture {
-            session.requestStream(for: track)
+            session.startPlayback(track, in: playbackQueue)
         }
     }
 }
@@ -1969,7 +1972,9 @@ struct PlaylistDetailScreen: View {
                 }
 
                 if isClearing {
-                    ProgressView("Removing \(clearCompleted)/\(clearTotal) tracks…")
+                    ProgressView(session.playlistClearStages[playlist.playlistId ?? ""] ?? "Removing \(clearCompleted)/\(clearTotal) tracks…")
+                    Button("Остановить удаление") { session.stopClearingPlaylist(playlist.playlistId ?? "") }
+                        .accessibilityIdentifier("playlist.clear.stop")
                         .tint(lanePink).padding()
                 }
 
@@ -4171,7 +4176,7 @@ private struct LocalPlaylistDetailScreen: View {
                 .listRowBackground(Color.clear)
             } else {
                 ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
-                    TrackRow(track: track, showPlayer: $showPlayer)
+                    TrackRow(track: track, showPlayer: $showPlayer, playbackQueue: tracks)
                         .swipeActions(edge: .leading, allowsFullSwipe: true) {
                             Button {
                                 session.queue = tracks
@@ -4212,7 +4217,10 @@ private struct FavoriteTracksScreen: View {
     var body: some View {
         List {
             if session.clearingPlaylistIDs.contains("lane_likes") {
-                ProgressView("Removing \(clearCompleted)/\(clearTotal) tracks…")
+                ProgressView(session.playlistClearStages["lane_likes"] ?? "Removing \(clearCompleted)/\(clearTotal) tracks…")
+                    .accessibilityIdentifier("playlist.clear.progress")
+                Button("Остановить удаление") { session.stopClearingPlaylist("lane_likes") }
+                    .accessibilityIdentifier("playlist.clear.stop")
             }
             if let clearError { Text(clearError).foregroundStyle(lanePink) }
             if tracks.isEmpty {
@@ -4220,7 +4228,7 @@ private struct FavoriteTracksScreen: View {
                     .listRowBackground(Color.clear)
             } else {
                 ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
-                    TrackRow(track: track, showPlayer: $showPlayer)
+                    TrackRow(track: track, showPlayer: $showPlayer, playbackQueue: tracks)
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) {
                                 session.toggleFavorite(track)
@@ -4263,7 +4271,8 @@ private struct FavoriteTracksScreen: View {
                         try await session.clearPlaylistTracks(LanePlaylist(playlistId: "lane_likes")) { completed, total in
                             clearCompleted = completed; clearTotal = total
                         }
-                    } catch { clearError = error.localizedDescription }
+                    } catch is CancellationError { clearError = "Удаление остановлено. Уже удалённые треки не возвращаются; повтор продолжит с оставшихся." }
+                    catch { clearError = error.localizedDescription }
                 }
             }
             Button("Cancel", role: .cancel) {}
@@ -4889,10 +4898,10 @@ private struct ImportTracksScreen: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 12) {
                             ForEach(Array(importedTrackIDs.suffix(12)), id: \.self) { id in
-                                let track = preview?.playlistTracks?.first { $0.songId == id }
+                                let track = session.cachedTracksForIDs([id]).first
                                 VStack(alignment: .leading, spacing: 6) {
                                     ZStack(alignment: .bottomTrailing) {
-                                        ArtworkView(url: track?.coverUrl, size: 72, radius: 10)
+                                        ArtworkView(url: track?.coverURL, size: 72, radius: 10)
                                         Image(systemName: "checkmark.circle.fill")
                                             .foregroundStyle(Color.green)
                                             .background(Color.black, in: Circle())
@@ -5164,7 +5173,7 @@ private struct ImportTracksScreen: View {
                     orderReference: reference,
                     progress: updateProgress
                 ) { batch in
-                    importedTrackIDs.append(contentsOf: batch)
+                    importedTrackIDs = LaneTrackBatching.unique(importedTrackIDs + batch)
                 }
                 if imported >= importTotal {
                     message = "All \(imported) tracks are now in the Lane playlist."
@@ -5172,9 +5181,11 @@ private struct ImportTracksScreen: View {
                     message = "Added \(imported) of \(importTotal) Lane preview tracks. Lane rejected \(importTotal - imported) IDs."
                 }
             } catch {
-                session.output = "Import error: \(error.localizedDescription)"
+                session.output = error is LaneImportConfirmationError ? error.localizedDescription : "Import error: \(error.localizedDescription)"
                 let detail = friendlyImportError(error)
-                if importCompleted > 0 {
+                if error is LaneImportConfirmationError {
+                    message = error.localizedDescription
+                } else if importCompleted > 0 {
                     message = "Processed \(importCompleted) of \(importTotal) tracks. Tap again to continue. \(detail)"
                 } else {
                     message = detail

@@ -2697,6 +2697,8 @@ struct APKFullPlayerView: View {
             Button { session.previous() } label: {
                 APKTemplateIcon(name: "skip_backward", size: 32, color: .white)
             }
+            .accessibilityIdentifier("player.previous")
+            .accessibilityLabel("Previous track")
 
             Spacer()
 
@@ -2726,6 +2728,8 @@ struct APKFullPlayerView: View {
             Button { session.next() } label: {
                 APKTemplateIcon(name: "skip_forward", size: 32, color: .white)
             }
+            .accessibilityIdentifier("player.next")
+            .accessibilityLabel("Next track")
 
             Spacer()
 

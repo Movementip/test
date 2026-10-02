@@ -21,6 +21,10 @@ struct LaneIOSPrototypeApp: App {
             value.queue = [LaneUITestFixtures.track]
             value.currentIndex = 0
             value.currentTrack = LaneUITestFixtures.track
+            if ProcessInfo.processInfo.arguments.contains("--lane-queue-fixture") || ProcessInfo.processInfo.arguments.contains("--lane-rate-fixture") {
+                LaneUITestURLProtocol.prepareLikedFixture(rateLimited: ProcessInfo.processInfo.arguments.contains("--lane-rate-fixture"))
+                value.queue = [LaneUITestFixtures.track, TrackCandidate(id: "lane-2", title: "Old playlist second", subtitle: "Lane", trackID: "lane-2")]
+            }
         }
         #endif
         _session = StateObject(wrappedValue: value)
@@ -447,6 +451,15 @@ private final class LaneUITestAudioServer {
 private final class LaneUITestURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var saved: [String: [String]] = ["fixture-playlist": ["lane-1", "lane-2"]]
+    private static var rateLimitDeletion = false
+    private static var deletionDeadline: Date?
+
+    static func prepareLikedFixture(rateLimited: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        saved["lane_likes"] = ["lane-3", "lane-4"]
+        rateLimitDeletion = rateLimited
+        deletionDeadline = nil
+    }
     private static var privacy = LanePrivacySettings()
     private static var notificationRead = false
     private static var invitationAccepted = false
@@ -582,14 +595,23 @@ private final class LaneUITestURLProtocol: URLProtocol {
             } else if path == "/user/playlist/remove-track" {
                 let id = query.first { $0.name == "playlistId" }?.value ?? ""
                 let track = query.first { $0.name == "trackId" }?.value ?? ""
-                Self.saved[id]?.removeAll { $0 == track }
-                data = Data(#"{"ok":true}"#.utf8)
+                if Self.rateLimitDeletion, id == "lane_likes", Self.deletionDeadline == nil {
+                    Self.deletionDeadline = Date().addingTimeInterval(60)
+                    statusCode = 429
+                    data = Data(#"{"code":"RATE_LIMITED","message":"Retry after 3 seconds."}"#.utf8)
+                } else if let deadline = Self.deletionDeadline, Date() < deadline {
+                    statusCode = 429
+                    data = Data(#"{"code":"EARLY_RETRY","message":"Deletion cooldown has not elapsed."}"#.utf8)
+                } else {
+                    Self.saved[id]?.removeAll { $0 == track }
+                    data = Data(#"{"ok":true}"#.utf8)
+                }
             } else if path.hasPrefix("/playlist/"), path != "/playlist/invite/respond" {
                 let parts = path.split(separator: "/")
                 let id = String(parts[1])
                 if parts.last == "tracks" {
                     let ids = isRaceClient && Self.favoriteReadRace && id == "lane_likes" ? [] : (Self.saved[id] ?? [])
-                    data = try JSONSerialization.data(withJSONObject: ["items": ids.reversed().map { ["songId": $0, "title": "Fixture track"] }, "totalItems": ids.count, "page": 1, "pageSize": 100, "totalPages": 1])
+                    data = try JSONSerialization.data(withJSONObject: ["items": ids.reversed().map { ["songId": $0, "title": "Fixture track \($0.split(separator: "-").last!)", "platform": "spotify"] }, "totalItems": ids.count, "page": 1, "pageSize": 100, "totalPages": 1])
                 } else {
                     data = try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": Self.saved[id] ?? [], "tracksCount": (Self.saved[id] ?? []).count])
                 }
@@ -666,7 +688,7 @@ private final class LaneUITestURLProtocol: URLProtocol {
             } else {
                 data = Data("[]".utf8)
             }
-            let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": contentType])!
+            let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: "HTTP/1.1", headerFields: statusCode == 429 ? ["Content-Type": contentType, "Retry-After": "3"] : ["Content-Type": contentType])!
             if delayResponse {
                 let delivery = DispatchWorkItem { [self] in
                     client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)

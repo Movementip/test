@@ -209,27 +209,27 @@ struct LaneSearchHistoryItem: Identifiable {
     }
 }
 
-struct SpotifyAdditionalData: Decodable, Hashable {
+struct SpotifyAdditionalData: Codable, Hashable {
     let artists: [String]?
     let album: String?
 }
 
-struct SoundCloudAdditionalData: Decodable, Hashable {
+struct SoundCloudAdditionalData: Codable, Hashable {
     let userId: String?
     let streamUrl: String?
     let urn: String?
 }
 
-struct DeezerAdditionalData: Decodable, Hashable {
+struct DeezerAdditionalData: Codable, Hashable {
     let trackId: String?
     let streamUrl: String?
 }
 
-struct TelegramAdditionalData: Decodable, Hashable {
+struct TelegramAdditionalData: Codable, Hashable {
     let trackId: String?
 }
 
-struct TrackData: Decodable, Hashable {
+struct TrackData: Codable, Hashable {
     let songId: String?
     let platform: String?
     let title: String?

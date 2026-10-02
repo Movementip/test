@@ -161,6 +161,9 @@ final class LaneSession: ObservableObject {
         return try await LaneAPI.shared.openShare(id: share.id)
     }
     @Published private(set) var clearingPlaylistIDs: Set<String> = []
+    @Published private(set) var playlistClearStages: [String: String] = [:]
+    private var cancelledPlaylistClears: Set<String> = []
+    private var importingPlaylistIDs: Set<String> = []
     @Published var serverAlbums: [LaneAlbum] = []
     private var cachedAlbumDetails: [String: LaneAlbum] = [:]
     @Published var serverArtists: [LaneArtist] = []
@@ -2410,8 +2413,12 @@ final class LaneSession: ObservableObject {
               id == "lane_likes" || (playlist.creatorLid != nil && playlist.creatorLid == account?.laneId) else {
             throw LaneAPIError.decoding("Only your own playlist or liked tracks can be cleared.")
         }
+        guard !importingPlaylistIDs.contains(id) else {
+            throw LaneAPIError.decoding("Wait for the current import before clearing this playlist.")
+        }
         guard clearingPlaylistIDs.insert(id).inserted else { return }
-        defer { clearingPlaylistIDs.remove(id) }
+        cancelledPlaylistClears.remove(id)
+        defer { clearingPlaylistIDs.remove(id); playlistClearStages.removeValue(forKey: id); cancelledPlaylistClears.remove(id) }
         libraryLoadGeneration = UUID()
         playlistContentGenerations[id] = UUID()
         let requestToken = token
@@ -2429,7 +2436,8 @@ final class LaneSession: ObservableObject {
         }
         do {
             let removed = try await LaneAPI.shared.clearPlaylistTracks(token: requestToken, playlistId: id,
-                shouldContinue: { self.token == requestToken }, progress: progress)
+                shouldContinue: { self.token == requestToken && !self.cancelledPlaylistClears.contains(id) },
+                stage: { if self.token == requestToken { self.playlistClearStages[id] = $0 } }, progress: progress)
             guard token == requestToken else { throw CancellationError() }
             libraryLoadGeneration = UUID()
             playlistContentGenerations[id] = UUID()
@@ -2459,6 +2467,8 @@ final class LaneSession: ObservableObject {
             throw error
         }
     }
+
+    func stopClearingPlaylist(_ id: String) { cancelledPlaylistClears.insert(id) }
 
     func removeTrack(_ track: TrackCandidate, from playlist: LanePlaylist) async throws {
         guard let playlistID = playlist.playlistId,
@@ -2820,25 +2830,53 @@ final class LaneSession: ObservableObject {
         guard !playlistID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw LaneAPIError.invalidURL
         }
+        guard !clearingPlaylistIDs.contains(playlistID), importingPlaylistIDs.insert(playlistID).inserted else {
+            throw LaneAPIError.decoding("This playlist already has an import or deletion in progress.")
+        }
+        defer { importingPlaylistIDs.remove(playlistID) }
 
         await configureAPI()
         try Task.checkCancellation()
+        let requestToken = token
         playlistContentGenerations[playlistID] = UUID()
         progress(0, clean.count, "Adding \(clean.count) tracks to Lane…")
+        var currentStage = "Adding \(clean.count) tracks to Lane…"
+        var completed = 0
 
-        let imported = try await LaneAPI.shared.importTrackBatches(
-            token: token,
-            playlistId: playlistID,
-            sourceIDs: clean,
-            resolveSourceIDs: resolvingSourceIDs,
-            sort: sort,
-            orderReference: orderReference
-        ) { processed, total, savedIDs, resolved in
-            self.rememberResolvedTracks(resolved.map { TrackCandidate($0, refID: playlistID) })
-            self.applyConfirmedTrackIDs(savedIDs, to: playlistID)
-            importedBatch(savedIDs)
-            progress(processed, total, "Processed \(processed)/\(total) · batches of 15")
+        let imported: Int
+        do {
+            imported = try await LaneAPI.shared.importTrackBatches(
+                token: requestToken,
+                playlistId: playlistID,
+                sourceIDs: clean,
+                resolveSourceIDs: resolvingSourceIDs,
+                sort: sort,
+                orderReference: orderReference,
+                shouldContinue: { self.token == requestToken },
+                stage: { stage in
+                    guard self.token == requestToken else { return }
+                    currentStage = stage
+                    progress(completed, clean.count, stage)
+                },
+                progress: { processed, total, savedIDs, resolved in
+                    guard self.token == requestToken else { return }
+                    completed = processed
+                    self.rememberResolvedTracks(resolved.map { TrackCandidate($0, refID: playlistID) })
+                    self.applyConfirmedTrackIDs(savedIDs, to: playlistID)
+                    importedBatch(savedIDs)
+                    progress(processed, total, currentStage)
+                })
+        } catch {
+            if token == requestToken {
+                playlistTrackCache.removeValue(forKey: playlistID)
+                playlistContentGenerations[playlistID] = UUID()
+                // An ordering failure must not hide tracks whose membership
+                // the server has already confirmed (especially lane_likes).
+                Task { @MainActor in await self.loadLibrary() }
+            }
+            throw error
         }
+        guard token == requestToken else { throw CancellationError() }
         progress(clean.count, clean.count, "")
         output = "Lane confirmed \(imported) imported tracks in the playlist."
         playlistTrackCache.removeValue(forKey: playlistID)
@@ -3219,6 +3257,20 @@ final class LaneSession: ObservableObject {
 
     // MARK: Player
 
+    /// A selection from a collection replaces the playback source atomically.
+    /// Navigation/library refreshes do not change the active queue afterwards.
+    func startPlayback(_ track: TrackCandidate, in tracks: [TrackCandidate], at selectedIndex: Int? = nil) {
+        queue = tracks.isEmpty ? [track] : tracks
+        if let selectedIndex, queue.indices.contains(selectedIndex), queue[selectedIndex] == track {
+            currentIndex = selectedIndex
+        } else {
+            currentIndex = queue.firstIndex(of: track)
+        }
+        if currentIndex == nil { queue = [track]; currentIndex = 0 }
+        guard let currentIndex else { return }
+        requestStream(for: queue[currentIndex])
+    }
+
     private func streamCacheKey(trackID: String, refID: String?, quality: String) -> String {
         "\(trackID)|\(refID ?? "")|\(quality)"
     }
@@ -3359,10 +3411,10 @@ final class LaneSession: ObservableObject {
         } else if let index = queue.firstIndex(of: track) {
             currentIndex = index
         } else {
-            if queue.isEmpty {
-                queue = searchTracks
-            }
-            currentIndex = queue.firstIndex(of: track)
+            // A standalone selection must never inherit Next/Previous from a
+            // different playlist. Collection rows pass their queue explicitly.
+            queue = [track]
+            currentIndex = 0
         }
 
         guard let trackID = track.trackID, !trackID.isEmpty else {
