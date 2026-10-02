@@ -158,6 +158,19 @@ private struct LaneUITestRoot: View {
             guard profile.equippedBadgeId == "legend", profile.equippedBadge?.definition.name == "Legend" else {
                 throw LaneAPIError.decoding("Badge did not survive a new client")
             }
+            LaneUITestURLProtocol.prepareBadgeReadRace()
+            let staleRead = Task { try await session.fetchOwnBadgeProfile() }
+            for _ in 0..<40 {
+                if LaneUITestURLProtocol.badgeResolutionStarted { break }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            guard LaneUITestURLProtocol.badgeResolutionStarted else { throw LaneAPIError.decoding("Badge race did not start") }
+            _ = try await session.equipBadgeConfirmed("legend")
+            do { _ = try await staleRead.value; throw LaneAPIError.decoding("An old profile read was not rejected") }
+            catch is CancellationError { }
+            guard session.publicProfile?.equippedBadgeId == "legend" else {
+                throw LaneAPIError.decoding("Delayed profile removed a confirmed badge")
+            }
             result = "Server badge restored on fresh client"
         } catch { result = "Badge check failed: " + error.localizedDescription }
     }
@@ -619,6 +632,14 @@ private final class LaneUITestURLProtocol: URLProtocol {
     private static var followingFriend = false
     private static var equippedBadgeID: String?
     private static var badgeFailedOnce = false
+    private static var badgeReadRace = false
+    private static var badgeReadStarted = false
+    static func prepareBadgeReadRace() {
+        lock.lock(); defer { lock.unlock() }; badgeReadRace = true; badgeReadStarted = false
+    }
+    static var badgeResolutionStarted: Bool {
+        lock.lock(); defer { lock.unlock() }; return badgeReadStarted
+    }
     private static var candleFailedOnce = false
     private static var candleReadFailedOnce = false
     private static var placedCandle: [String: Any]?
@@ -805,7 +826,10 @@ private final class LaneUITestURLProtocol: URLProtocol {
             } else if path == "/user-info" {
                 let id = query.first { $0.name == "laneId" }?.value ?? "friend"
                 let equipped: Any
-                if id == "fixture-user" { equipped = Self.equippedBadgeID as Any? ?? NSNull() }
+                if id == "fixture-user", Self.badgeReadRace {
+                    Self.badgeReadRace = false; Self.badgeReadStarted = true; delayResponse = true
+                    equipped = NSNull()
+                } else if id == "fixture-user" { equipped = Self.equippedBadgeID as Any? ?? NSNull() }
                 else { equipped = "legend" }
                 data = try JSONSerialization.data(withJSONObject: ["laneId": id, "displayedName": id == "friend" ? "Friend profile" : "Second friend", "userName": id,
                     "headerUrl": "https://lane-ui.test/panorama", "followersCount": Self.followingFriend ? 6 : 5, "followingCount": 2,

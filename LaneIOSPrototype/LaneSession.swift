@@ -180,6 +180,7 @@ final class LaneSession: ObservableObject {
     private var pendingSavedPlaylists: [String: LanePlaylist] = [:]
     private var pendingRemovedPlaylistIDs: Set<String> = []
     private var libraryLoadGeneration = UUID()
+    private var profileMutationGeneration = UUID()
     private var favoriteMigrationInProgress = false
     private let favoriteMigrationKey = "lane.favorites.serverMigrationCompleted"
     @Published var localPlaylists: [LocalPlaylist] = []
@@ -1346,38 +1347,42 @@ final class LaneSession: ObservableObject {
     private func loadAccount() async {
         guard !isGuest else { return }
         let requestToken = token
+        let generation = profileMutationGeneration
         do {
             await configureAPI()
             let language = Locale.current.language.languageCode?.identifier ?? "en"
             let accountValue = try await LaneAPI.shared.account(token: requestToken, deviceLanguage: language)
-            guard token == requestToken else { return }
+            guard token == requestToken, profileMutationGeneration == generation else { return }
             account = accountValue
 
             if let laneId = accountValue.laneId, !laneId.isEmpty {
                 let profile = try? await LaneAPI.shared.userInfo(token: requestToken, laneId: laneId)
-                guard token == requestToken else { return }
+                guard token == requestToken, profileMutationGeneration == generation else { return }
                 publicProfile = profile
             }
             status = 200
         } catch {
-            guard token == requestToken else { return }
+            guard token == requestToken, profileMutationGeneration == generation else { return }
             output = error.localizedDescription
         }
     }
 
     func saveProfile(name: String, username: String, statusText: String, avatarURL: String, headerURL: String) async throws {
         guard !isGuest else { throw LaneAPIError.decoding("Sign in to edit your profile.") }
-        await configureAPI()
+        profileMutationGeneration = UUID()
+        let generation = profileMutationGeneration
         let requestToken = token
+        await configureAPI()
+        guard token == requestToken, profileMutationGeneration == generation else { throw CancellationError() }
         let result = try await LaneAPI.shared.editProfile(token: requestToken, name: name, username: username,
                                                           avatarURL: avatarURL, headerURL: headerURL, statusText: statusText)
         try result.requireSuccess()
         let value = try await LaneAPI.shared.account(token: requestToken, deviceLanguage: Locale.current.language.languageCode?.identifier ?? "en")
-        guard token == requestToken else { throw CancellationError() }
+        guard token == requestToken, profileMutationGeneration == generation else { throw CancellationError() }
         account = value
         if let id = value.laneId {
             let profile = try? await LaneAPI.shared.userInfo(token: requestToken, laneId: id)
-            guard token == requestToken else { throw CancellationError() }
+            guard token == requestToken, profileMutationGeneration == generation else { throw CancellationError() }
             publicProfile = profile
         }
     }
@@ -3009,28 +3014,31 @@ final class LaneSession: ObservableObject {
     func fetchOwnBadgeProfile() async throws -> UserInfoDTO {
         guard !isGuest else { throw LaneAPIError.decoding("Sign in to view your badges.") }
         let requestToken = token
+        let generation = profileMutationGeneration
         await configureAPI()
         let value = try await LaneAPI.shared.account(token: requestToken, deviceLanguage: Locale.current.language.languageCode?.identifier ?? "en")
-        guard token == requestToken else { throw CancellationError() }
+        guard token == requestToken, profileMutationGeneration == generation else { throw CancellationError() }
         guard let id = value.laneId, !id.isEmpty else { throw LaneAPIError.decoding("Lane did not return your profile ID.") }
         let profile = try await LaneAPI.shared.userInfo(token: requestToken, laneId: id)
-        guard token == requestToken else { throw CancellationError() }
+        guard token == requestToken, profileMutationGeneration == generation else { throw CancellationError() }
         account = value; publicProfile = profile
         return profile
     }
 
     func equipBadgeConfirmed(_ badgeId: String?) async throws -> UserInfoDTO {
         let requestToken = token
+        profileMutationGeneration = UUID()
+        let generation = profileMutationGeneration
         let profile = try await fetchOwnBadgeProfile()
-        guard token == requestToken else { throw CancellationError() }
+        guard token == requestToken, profileMutationGeneration == generation else { throw CancellationError() }
         guard badgeId == nil || profile.badges?.contains(where: { $0.id == badgeId }) == true else {
             throw LaneAPIError.decoding("This badge has not been earned by your account.")
         }
         try await LaneAPI.shared.equipBadge(token: requestToken, badgeId: badgeId).requireSuccess()
-        guard token == requestToken, let id = profile.laneId else { throw CancellationError() }
+        guard token == requestToken, profileMutationGeneration == generation, let id = profile.laneId else { throw CancellationError() }
         for attempt in 0..<3 {
             let confirmed = try await LaneAPI.shared.userInfo(token: requestToken, laneId: id)
-            guard token == requestToken else { throw CancellationError() }
+            guard token == requestToken, profileMutationGeneration == generation else { throw CancellationError() }
             if confirmed.equippedBadgeId == badgeId {
                 publicProfile = confirmed
                 return confirmed
