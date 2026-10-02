@@ -694,9 +694,8 @@ actor LaneAPI {
         let timeout: TimeInterval
         switch normalizedPath {
         case "/track/stream": timeout = 6
-        // Android resolves the complete import preview with one /user/tracks
-        // request. Large (1,000+) playlists need more than the small-request
-        // timeout, but still avoid the old many-page request chain.
+        // Provider resolution can take longer than a cached catalog read.
+        // Imports limit each resolver call to 15 IDs, including the preview.
         case "/user/tracks": timeout = 15
         // Large Yandex favourites playlists are assembled server-side and can
         // legitimately exceed the generic request timeout used elsewhere.

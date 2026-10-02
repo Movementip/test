@@ -29,6 +29,10 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(title.waitForExistence(timeout: 10))
         XCTAssertGreaterThanOrEqual(title.frame.minX, window.minX)
         XCTAssertLessThanOrEqual(title.frame.maxX, window.maxX)
+        let albumRow = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "bastards")).firstMatch
+        XCTAssertTrue(albumRow.waitForExistence(timeout: 10))
+        XCTAssertGreaterThanOrEqual(albumRow.frame.minX, window.minX)
+        XCTAssertLessThanOrEqual(albumRow.frame.maxX, window.maxX)
         screenshot("iPhone13-artist-wide-artwork")
         back.tap()
         XCTAssertTrue(app.buttons["Recommended artist"].waitForExistence(timeout: 5))

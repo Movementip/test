@@ -958,14 +958,20 @@ struct APKRemoteImage: View {
     var circle = false
 
     var body: some View {
-        LaneResilientImage(url: url) {
-            ZStack {
-                Color.white.opacity(0.07)
-                Image(systemName: circle ? "person.fill" : "music.note")
-                    .foregroundStyle(.secondary)
+        // Constrain the image before clipping. A panorama's fill-sized bounds
+        // must not escape a square thumbnail and cover adjacent text/buttons.
+        GeometryReader { geometry in
+            LaneResilientImage(url: url) {
+                ZStack {
+                    Color.white.opacity(0.07)
+                    Image(systemName: circle ? "person.fill" : "music.note")
+                        .foregroundStyle(.secondary)
+                }
             }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
+            .clipShape(circle ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)))
         }
-        .clipShape(circle ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)))
     }
 }
 
