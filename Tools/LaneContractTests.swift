@@ -17,6 +17,7 @@ final class LaneMockURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var paths = Set<String>()
     private static var didUseObjectAddFallback = false
+    private static var didUsePlaylistTracksFallback = false
 
     static func received(_ path: String) -> Bool {
         lock.lock()
@@ -28,6 +29,12 @@ final class LaneMockURLProtocol: URLProtocol {
         lock.lock()
         defer { lock.unlock() }
         return didUseObjectAddFallback
+    }
+
+    static func usedPlaylistTracksFallback() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didUsePlaylistTracksFallback
     }
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -86,6 +93,19 @@ final class LaneMockURLProtocol: URLProtocol {
                    json["trackIds"] as? [String] == ["track-3"] {
                     Self.lock.lock()
                     Self.didUseObjectAddFallback = true
+                    Self.lock.unlock()
+                    return (200, Data(#"{"ok":true}"#.utf8))
+                }
+                return (
+                    400,
+                    Data(#"{"code":"INVALID_PLAYLIST_TRACKS_BODY","message":"Invalid playlist tracks body"}"#.utf8)
+                )
+            }
+            if playlistID == "playlist-fallback-modern" {
+                if let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                   json["playlistTracks"] as? [String] == ["track-4"] {
+                    Self.lock.lock()
+                    Self.didUsePlaylistTracksFallback = true
                     Self.lock.unlock()
                     return (200, Data(#"{"ok":true}"#.utf8))
                 }
@@ -238,6 +258,19 @@ struct LaneContractTestRunner {
         precondition(LaneMockURLProtocol.usedObjectAddFallback())
         precondition(UserDefaults.standard.string(forKey: "lane.diag.addBody") == "object")
 
+        // A newer edge contract may name the collection after the playlist
+        // field. Exhaust all safe encodings instead of stopping after the two
+        // formats used by older iOS builds.
+        UserDefaults.standard.set("raw", forKey: "lane.diag.addBody")
+        let modernAddResult = try await api.addTracks(
+            token: "test-token",
+            playlistId: "playlist-fallback-modern",
+            trackIds: ["track-4"]
+        )
+        try modernAddResult.requireSuccess()
+        precondition(LaneMockURLProtocol.usedPlaylistTracksFallback())
+        precondition(UserDefaults.standard.string(forKey: "lane.diag.addBody") == "playlistTracks")
+
         UserDefaults.standard.set("raw", forKey: "lane.diag.trackBody")
         let resolved = try await api.tracksByIds(
             token: "test-token",
@@ -276,6 +309,6 @@ struct LaneContractTestRunner {
             "/user/import/preview"
         ]
         precondition(expectedPaths.allSatisfy(LaneMockURLProtocol.received))
-        print("Lane contract tests passed (\(expectedPaths.count + 2) mocked API scenarios).")
+        print("Lane contract tests passed (\(expectedPaths.count + 3) mocked API scenarios).")
     }
 }

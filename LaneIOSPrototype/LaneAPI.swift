@@ -1390,12 +1390,16 @@ actor LaneAPI {
         guard !clean.isEmpty else { throw LaneAPIError.emptyResponse }
 
         let mode = diagnosticSetting("lane.diag.addBody", default: "auto")
-        let payloads: [(name: String, body: Any)]
-        switch mode {
-        case "object":
-            payloads = [("object", ["trackIds": clean]), ("raw", clean)]
-        default:
-            payloads = [("raw", clean), ("object", ["trackIds": clean])]
+        var payloads: [(name: String, body: Any)] = [
+            // Lane Android 1.4.7 Retrofit contract.
+            ("raw", clean),
+            // Body contracts observed on newer official/regional deployments.
+            ("object", ["trackIds": clean]),
+            ("playlistTracks", ["playlistTracks": clean]),
+            ("playlistTracksIds", ["playlistTracksIds": clean])
+        ]
+        if mode != "auto", let preferred = payloads.firstIndex(where: { $0.name == mode }) {
+            payloads.insert(payloads.remove(at: preferred), at: 0)
         }
 
         var last: APIResult?
@@ -1416,8 +1420,9 @@ actor LaneAPI {
             }
 
             // Regional Lane edges have returned both the named validation
-            // code and a generic HTTP 400 for the alternate body shape. Retry
-            // even when an older build persisted an explicit raw/object mode.
+            // code and a generic HTTP 400 for alternate body shapes. Trying
+            // the remaining encodings is safe: validation happens before the
+            // mutation, and a successful add operation is idempotent.
             if result.status == 400 {
                 let bodyMismatch = result.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY")
                 if !bodyMismatch { bodyCompatibleFailure = result }

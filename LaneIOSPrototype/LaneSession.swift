@@ -157,6 +157,7 @@ final class LaneSession: ObservableObject {
     @Published var likedTracks: [TrackCandidate] = []
     private var favoriteMutationsInFlight: Set<String> = []
     private var pendingFavoriteStates: [String: Bool] = [:]
+    private let pendingFavoriteStatesKey = "lane.pendingFavoriteStates"
     private var pendingSavedPlaylists: [String: LanePlaylist] = [:]
     private var pendingRemovedPlaylistIDs: Set<String> = []
     private var libraryLoadGeneration = UUID()
@@ -582,6 +583,7 @@ final class LaneSession: ObservableObject {
            let cache = try? JSONDecoder().decode([String: TrackCandidate].self, from: data) {
             resolvedTrackCache = cache
         }
+        restorePendingFavoriteTracks()
         if let data = UserDefaults.standard.data(forKey: "lane.cachedPlaylistTracks"),
            let cache = try? JSONDecoder().decode([String: [TrackCandidate]].self, from: data) {
             playlistTrackCache = cache
@@ -666,6 +668,7 @@ final class LaneSession: ObservableObject {
             streamResolutionCache = [:]
             favoriteMigrationInProgress = false
             UserDefaults.standard.removeObject(forKey: "lane.favorites")
+            UserDefaults.standard.removeObject(forKey: pendingFavoriteStatesKey)
             UserDefaults.standard.removeObject(forKey: favoriteMigrationKey)
         }
         token = clean
@@ -696,6 +699,7 @@ final class LaneSession: ObservableObject {
         pendingRemovedPlaylistIDs = []
         favoriteMigrationInProgress = false
         UserDefaults.standard.removeObject(forKey: "lane.favorites")
+        UserDefaults.standard.removeObject(forKey: pendingFavoriteStatesKey)
         UserDefaults.standard.removeObject(forKey: favoriteMigrationKey)
         resolvedTrackCache = [:]
         UserDefaults.standard.removeObject(forKey: "lane.cachedTrackMetadata")
@@ -1832,7 +1836,9 @@ final class LaneSession: ObservableObject {
                 for (id, shouldBeLiked) in pendingFavoriteStates {
                     if shouldBeLiked {
                         guard !likedTracks.contains(where: { $0.trackID == id }),
-                              let pendingTrack = previousLikedTracks.first(where: { $0.trackID == id }) else {
+                              let pendingTrack = previousLikedTracks.first(where: { $0.trackID == id })
+                                ?? resolvedTrackCache[id]
+                                ?? localTrackStore[id] else {
                             continue
                         }
                         likedTracks.insert(pendingTrack, at: 0)
@@ -1849,7 +1855,7 @@ final class LaneSession: ObservableObject {
                 } else if needsMigration, legacyIDs.isEmpty, !favoriteMigrationInProgress {
                     UserDefaults.standard.set(true, forKey: favoriteMigrationKey)
                 }
-                UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")
+                persistFavoriteState()
             }
         }
         guard token == requestToken, libraryLoadGeneration == loadGeneration else { return }
@@ -1875,6 +1881,8 @@ final class LaneSession: ObservableObject {
             }
             rememberResolvedTracks(recentTracks)
         }
+
+        retryPendingFavoriteMutations(token: requestToken)
     }
 
     private func rememberPlaylistTracks(_ tracks: [TrackCandidate], playlistID: String) {
@@ -4597,7 +4605,8 @@ final class LaneSession: ObservableObject {
             playlistId: "lane_likes",
             pageSize: 100
         )
-        let (detail, tracks) = await (detailRequest, tracksRequest)
+        async let playlistsRequest = try? LaneAPI.shared.userPlaylists(token: requestToken)
+        let (detail, tracks, playlists) = await (detailRequest, tracksRequest, playlistsRequest)
 
         var didReadState = false
         if let ids = detail?.playlistTracksIds {
@@ -4611,6 +4620,13 @@ final class LaneSession: ObservableObject {
         if let tracks {
             didReadState = true
             if tracks.contains(where: { $0.songId == trackID }) { return true }
+        }
+        if let likedPlaylist = playlists?.first(where: { $0.playlistId == "lane_likes" }) {
+            didReadState = true
+            if likedPlaylist.playlistTracksIds?.contains(trackID) == true ||
+                likedPlaylist.playlistTracks?.contains(where: { $0.songId == trackID }) == true {
+                return true
+            }
         }
         return didReadState ? false : nil
     }
@@ -4637,6 +4653,128 @@ final class LaneSession: ObservableObject {
         favorites.contains(favoriteKey(track))
     }
 
+    private func persistFavoriteState() {
+        UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")
+        if pendingFavoriteStates.isEmpty {
+            UserDefaults.standard.removeObject(forKey: pendingFavoriteStatesKey)
+        } else if let data = try? JSONEncoder().encode(pendingFavoriteStates) {
+            UserDefaults.standard.set(data, forKey: pendingFavoriteStatesKey)
+        }
+    }
+
+    private func restorePendingFavoriteTracks() {
+        for (trackID, shouldBeLiked) in pendingFavoriteStates {
+            if shouldBeLiked {
+                favorites.insert(trackID)
+                guard !likedTracks.contains(where: { $0.trackID == trackID }),
+                      let cached = resolvedTrackCache[trackID] ?? localTrackStore[trackID] else {
+                    continue
+                }
+                likedTracks.append(cached)
+            } else {
+                favorites.remove(trackID)
+                likedTracks.removeAll { $0.trackID == trackID }
+            }
+        }
+        UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")
+    }
+
+    private func retryPendingFavoriteMutations(token requestToken: String) {
+        guard token == requestToken else { return }
+        for (trackID, shouldBeLiked) in pendingFavoriteStates {
+            guard favoriteMutationsInFlight.insert(trackID).inserted else { continue }
+            Task { @MainActor [weak self] in
+                await self?.syncPendingFavoriteMutation(
+                    trackID: trackID,
+                    shouldBeLiked: shouldBeLiked,
+                    token: requestToken
+                )
+            }
+        }
+    }
+
+    private func syncPendingFavoriteMutation(
+        trackID: String,
+        shouldBeLiked: Bool,
+        token requestToken: String
+    ) async {
+        defer {
+            if token == requestToken {
+                favoriteMutationsInFlight.remove(trackID)
+            }
+        }
+
+        await configureAPI()
+        var acceptedByServer = false
+        var confirmedOnServer = false
+        var lastError: Error?
+
+        // Adding/removing a playlist track is idempotent on Lane. A bounded
+        // retry covers a dead regional route, while the persisted pending
+        // state survives app restarts and later Library refreshes.
+        for attempt in 0..<2 {
+            guard token == requestToken,
+                  pendingFavoriteStates[trackID] == shouldBeLiked else { return }
+            do {
+                let result: APIResult
+                if shouldBeLiked {
+                    result = try await LaneAPI.shared.addTracks(
+                        token: requestToken,
+                        playlistId: "lane_likes",
+                        trackIds: [trackID]
+                    )
+                } else {
+                    result = try await LaneAPI.shared.removeTrack(
+                        token: requestToken,
+                        playlistId: "lane_likes",
+                        trackId: trackID
+                    )
+                }
+                status = result.status
+                try result.requireSuccess()
+                acceptedByServer = true
+            } catch {
+                lastError = error
+            }
+
+            confirmedOnServer = await waitForFavoriteState(
+                trackID: trackID,
+                liked: shouldBeLiked,
+                token: requestToken,
+                attempts: acceptedByServer ? 4 : 1
+            )
+            if confirmedOnServer { break }
+
+            if attempt == 0 {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+            }
+        }
+
+        guard token == requestToken,
+              pendingFavoriteStates[trackID] == shouldBeLiked else { return }
+
+        if confirmedOnServer {
+            pendingFavoriteStates.removeValue(forKey: trackID)
+            output = shouldBeLiked ? "Added to liked tracks." : "Removed from liked tracks."
+        } else if acceptedByServer {
+            // A successful write can take a moment to reach a regional read
+            // endpoint. Keep the optimistic state until any Lane read model
+            // confirms it instead of allowing a stale empty replica to win.
+            output = shouldBeLiked
+                ? "Like saved. Lane is updating your Library."
+                : "Like removed. Lane is updating your Library."
+        } else {
+            // Network and regional validation failures are not proof that the
+            // user changed their mind. Keep the operation durable and retry it
+            // on the next Library refresh/app launch.
+            let reason = lastError?.localizedDescription ?? "Lane did not accept the change yet"
+            output = shouldBeLiked
+                ? "Like saved on this iPhone; Lane sync will retry automatically. \(reason)"
+                : "Like removal saved on this iPhone; Lane sync will retry automatically. \(reason)"
+        }
+        persistFavoriteState()
+    }
+
     func toggleFavorite(_ track: TrackCandidate) {
         guard !isGuest else {
             output = "Sign in to save liked tracks to Lane."
@@ -4650,14 +4788,9 @@ final class LaneSession: ObservableObject {
         guard favoriteMutationsInFlight.insert(trackID).inserted else { return }
 
         let requestToken = token
-        let wasLiked = favorites.contains(trackID)
-        let shouldBeLiked = !wasLiked
-        let previousLikedTracks = likedTracks
+        let shouldBeLiked = !favorites.contains(trackID)
         pendingFavoriteStates[trackID] = shouldBeLiked
-        if wasLiked {
-            favorites.remove(trackID)
-            likedTracks.removeAll { $0.trackID == trackID }
-        } else {
+        if shouldBeLiked {
             favorites.insert(trackID)
             likedTracks.removeAll { $0.trackID == trackID }
             likedTracks.insert(
@@ -4677,86 +4810,18 @@ final class LaneSession: ObservableObject {
                 at: 0
             )
             rememberResolvedTracks([track])
+        } else {
+            favorites.remove(trackID)
+            likedTracks.removeAll { $0.trackID == trackID }
         }
-        UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")
+        persistFavoriteState()
 
         Task { @MainActor in
-            defer {
-                if token == requestToken {
-                    favoriteMutationsInFlight.remove(trackID)
-                }
-            }
-            await configureAPI()
-            var acceptedByServer = false
-            var confirmedOnServer = false
-            var lastError: Error?
-
-            // Adding/removing a playlist track is idempotent on Lane. A
-            // bounded retry covers a dead regional route without risking a
-            // duplicate like, and each attempt is verified against the
-            // `lane_likes` read model before UI state is reconciled.
-            for attempt in 0..<2 {
-                guard token == requestToken else { return }
-                do {
-                    let result: APIResult
-                    if wasLiked {
-                        result = try await LaneAPI.shared.removeTrack(
-                            token: requestToken,
-                            playlistId: "lane_likes",
-                            trackId: trackID
-                        )
-                    } else {
-                        result = try await LaneAPI.shared.addTracks(
-                            token: requestToken,
-                            playlistId: "lane_likes",
-                            trackIds: [trackID]
-                        )
-                    }
-                    status = result.status
-                    try result.requireSuccess()
-                    acceptedByServer = true
-                } catch {
-                    lastError = error
-                }
-
-                confirmedOnServer = await waitForFavoriteState(
-                    trackID: trackID,
-                    liked: shouldBeLiked,
-                    token: requestToken,
-                    attempts: acceptedByServer ? 4 : 1
-                )
-                if confirmedOnServer { break }
-
-                if attempt == 0 {
-                    try? await Task.sleep(nanoseconds: 400_000_000)
-                }
-            }
-
-            guard token == requestToken,
-                  pendingFavoriteStates[trackID] == shouldBeLiked else { return }
-
-            if confirmedOnServer {
-                pendingFavoriteStates.removeValue(forKey: trackID)
-                output = shouldBeLiked ? "Added to liked tracks." : "Removed from liked tracks."
-            } else if acceptedByServer {
-                // A successful write can take a moment to reach the regional
-                // read endpoint. Keep the confirmed optimistic state; the
-                // next Library refresh clears this pending marker as soon as
-                // the server exposes the same value.
-                output = shouldBeLiked
-                    ? "Like saved. Lane is updating your Library."
-                    : "Like removed. Lane is updating your Library."
-            } else {
-                pendingFavoriteStates.removeValue(forKey: trackID)
-                if wasLiked {
-                    favorites.insert(trackID)
-                } else {
-                    favorites.remove(trackID)
-                }
-                likedTracks = previousLikedTracks
-                output = "Could not update liked tracks: \(lastError?.localizedDescription ?? "Lane did not confirm the change")"
-            }
-            UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")
+            await syncPendingFavoriteMutation(
+                trackID: trackID,
+                shouldBeLiked: shouldBeLiked,
+                token: requestToken
+            )
         }
     }
 
@@ -4930,6 +4995,17 @@ final class LaneSession: ObservableObject {
     private func loadLocalState() {
         favorites = Set(UserDefaults.standard.stringArray(forKey: "lane.favorites") ?? [])
         downloadedTrackIDs = Set(UserDefaults.standard.stringArray(forKey: "lane.downloads") ?? [])
+        if let data = UserDefaults.standard.data(forKey: pendingFavoriteStatesKey),
+           let decoded = try? JSONDecoder().decode([String: Bool].self, from: data) {
+            pendingFavoriteStates = decoded
+            for (trackID, shouldBeLiked) in decoded {
+                if shouldBeLiked {
+                    favorites.insert(trackID)
+                } else {
+                    favorites.remove(trackID)
+                }
+            }
+        }
 
         if let data = UserDefaults.standard.data(forKey: "lane.localPlaylists"),
            let decoded = try? JSONDecoder().decode([LocalPlaylist].self, from: data) {
