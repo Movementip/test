@@ -83,4 +83,45 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Session checks passed"].waitForExistence(timeout: 30), app.staticTexts["session.result"].label)
         screenshot("iPhone13-session-import-and-likes")
     }
+
+    func testPrivacySettingsPersistOnServerAndReload() {
+        app.buttons["Privacy settings"].tap()
+        let toggle = app.switches["privacy.playlists"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitEnabled(toggle))
+        XCTAssertEqual(toggle.value as? String, "1")
+        toggle.tap()
+        app.buttons["privacy.save"].tap()
+        XCTAssertTrue(app.staticTexts["Privacy settings saved to Lane"].waitForExistence(timeout: 10))
+        app.navigationBars.buttons.firstMatch.tap()
+        app.buttons["Privacy settings"].tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertEqual(toggle.value as? String, "0")
+        screenshot("iPhone13-server-privacy-settings")
+    }
+
+    func testNotificationInvitationCanRetryAndReadAll() {
+        app.buttons["Notification center"].tap()
+        let invitation = app.buttons["notification.fixture-invite"]
+        XCTAssertTrue(invitation.waitForExistence(timeout: 10))
+        app.buttons["Read all"].tap()
+        let read = app.buttons["Read all"]
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == false"), object: read)], timeout: 5), .completed)
+        app.buttons["invitation.accept.fixture-invite"].tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "503")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(invitation.exists, "A failed write must not remove the invitation")
+        app.buttons["invitation.accept.fixture-invite"].tap()
+        XCTAssertTrue(app.staticTexts["No notifications"].waitForExistence(timeout: 10))
+        screenshot("iPhone13-notification-invitation-retry")
+    }
+
+    func testProgressiveHTTPAudioAndOfflineDownloadAfterRelaunch() {
+        app.buttons["Run playback checks"].tap()
+        XCTAssertTrue(app.staticTexts["Playback checks passed"].waitForExistence(timeout: 45), app.staticTexts["session.result"].label)
+        screenshot("iPhone13-streaming-and-offline-download")
+    }
+
+    private func waitEnabled(_ element: XCUIElement) -> Bool {
+        XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: element)], timeout: 10) == .completed
+    }
 }

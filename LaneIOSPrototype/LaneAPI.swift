@@ -1657,6 +1657,26 @@ actor LaneAPI {
     }
 
     // MARK: Notifications / history / import
+    func notificationPage(token: String, page: Int = 0, pageSize: Int = 30) async throws -> PaginatedResult<LaneNotification> {
+        try await decoded(PaginatedResult<LaneNotification>.self, path: "/notifications", token: token,
+                          query: [.init(name: "page", value: String(page)), .init(name: "pageSize", value: String(pageSize))])
+    }
+
+    func notificationUnreadCount(token: String) async throws -> Int {
+        try await decoded(LaneUnreadCount.self, path: "/notifications/unread-count", token: token).unreadCount
+    }
+
+    func respondToPlaylistInvitation(token: String, invitationId: String, accept: Bool) async throws -> APIResult {
+        try await request(path: "/playlist/invite/respond", method: "POST", token: token,
+                          json: ["invitationId": invitationId, "accept": accept])
+    }
+
+    func updatePrivacy(token: String, settings: LanePrivacySettings) async throws -> APIResult {
+        try await request(path: "/user/settings/privacy", method: "POST", token: token,
+                          json: ["showPlaylists": settings.showPlaylists, "showFollowers": settings.showFollowers,
+                                 "showFollowing": settings.showFollowing])
+    }
+
     func notifications(token: String, page: Int = 0, pageSize: Int = 50, filter: String? = nil) async throws -> APIResult {
         try await request(
             path: "/notifications",

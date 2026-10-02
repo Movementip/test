@@ -394,6 +394,80 @@ struct UserAccountDTO: Decodable, Hashable {
     let countryCode: String?
     let isAutoRenewalActive: Bool?
     let statusText: String?
+    let privacySettings: LanePrivacySettings?
+}
+
+/// UserPrivacySettings / UpdatePrivacyRequest from Android 1.4.7.
+struct LanePrivacySettings: Codable, Hashable {
+    var showPlaylists = true
+    var showFollowers = true
+    var showFollowing = true
+
+    init(showPlaylists: Bool = true, showFollowers: Bool = true, showFollowing: Bool = true) {
+        self.showPlaylists = showPlaylists
+        self.showFollowers = showFollowers
+        self.showFollowing = showFollowing
+    }
+
+    private enum CodingKeys: String, CodingKey { case showPlaylists, showFollowers, showFollowing }
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        showPlaylists = try box.decodeIfPresent(Bool.self, forKey: .showPlaylists) ?? true
+        showFollowers = try box.decodeIfPresent(Bool.self, forKey: .showFollowers) ?? true
+        showFollowing = try box.decodeIfPresent(Bool.self, forKey: .showFollowing) ?? true
+    }
+}
+
+struct LaneNotificationPerson: Decodable, Hashable {
+    let laneId: String?
+    let id: String?
+    let name: String?
+    let displayedName: String?
+    let avatarUrl: String?
+}
+
+/// Preserve sealed APK payload IDs required for reads and invitations.
+struct LaneNotification: Decodable, Identifiable, Hashable {
+    let id: String
+    let type: String
+    let timestamp: Int64?
+    var read: Bool?
+    let actorInfo: LaneNotificationPerson?
+    let artistInfo: LaneNotificationPerson?
+    let trackId: String?
+    let commentId: String?
+    let replyId: String?
+    let commentTextPreview: String?
+    let replyTextPreview: String?
+    let invitationId: String?
+    let playlistId: String?
+    let playlistName: String?
+    let playlistCoverUrl: String?
+    let releaseName: String?
+    let releaseCoverUrl: String?
+    let releaseType: String?
+
+    var title: String {
+        let actor = actorInfo?.displayedName ?? "Lane user"
+        switch type {
+        case "NEW_FOLLOWER": return "\(actor) followed you"
+        case "COMMENT_LIKED": return "\(actor) liked your comment"
+        case "COMMENT_REPLIED": return "\(actor) replied to your comment"
+        case "PLAYLIST_INVITATION": return "\(actor) invited you to a playlist"
+        case "NEW_RELEASE": return "New release from \(artistInfo?.name ?? "artist")"
+        default: return "Lane update"
+        }
+    }
+    var subtitle: String { playlistName ?? releaseName ?? replyTextPreview ?? commentTextPreview ?? "" }
+    var imageURL: String? { playlistCoverUrl ?? releaseCoverUrl ?? actorInfo?.avatarUrl ?? artistInfo?.avatarUrl }
+}
+
+struct LaneUnreadCount: Decodable { let unreadCount: Int }
+
+struct LaneDownloadedTrack: Codable {
+    let track: TrackCandidate
+    /// Relative to LaneDownloads, never an absolute/stale sandbox path.
+    let fileName: String
 }
 
 struct UserInfoDTO: Decodable, Hashable {

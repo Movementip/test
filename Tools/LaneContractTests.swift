@@ -276,6 +276,30 @@ final class LaneMockURLProtocol: URLProtocol {
             try require(query.first(where: { $0.name == "trackId" })?.value == "track-1", "stats trackId mismatch")
             return (200, Data(#"{"likesCount":27,"commentsCount":4}"#.utf8))
 
+        case "/user/settings/privacy":
+            try require(request.httpMethod == "POST", "Privacy must be POST")
+            let json = try object(body)
+            try require(Set(json.keys) == ["showPlaylists", "showFollowers", "showFollowing"], "Privacy fields must match UpdatePrivacyRequest")
+            try require(json["showPlaylists"] as? Bool == false && json["showFollowers"] as? Bool == true && json["showFollowing"] as? Bool == false, "Privacy boolean values changed")
+            return (200, Data(#"{"ok":true}"#.utf8))
+
+        case "/notifications":
+            try require(query.first { $0.name == "page" }?.value == "0", "Notification page is zero-based")
+            return (200, Data(#"{"items":[{"id":"n1","type":"PLAYLIST_INVITATION","read":false,"timestamp":1700000000000,"actorInfo":{"laneId":"friend","displayedName":"Friend"},"invitationId":"invite-1","playlistId":"shared-1","playlistName":"Road Trip"}],"totalPages":1}"#.utf8))
+
+        case "/notifications/unread-count":
+            return (200, Data(#"{"unreadCount":7}"#.utf8))
+
+        case "/notifications/n1/read", "/notifications/read-all":
+            try require(request.httpMethod == "POST" && body.isEmpty, "Read acknowledgement is an empty POST")
+            return (200, Data(#"{"ok":true}"#.utf8))
+
+        case "/playlist/invite/respond":
+            try require(request.httpMethod == "POST", "Invitation response must be POST")
+            let json = try object(body)
+            try require(json["invitationId"] as? String == "invite-1" && json["accept"] as? Bool == true, "Invitation response fields changed")
+            return (200, Data(#"{"ok":true}"#.utf8))
+
         case "/user/import/preview":
             try require(query.first(where: { $0.name == "platform" })?.value == "yandex", "Yandex platform must be lowercase")
             try require(query.first(where: { $0.name == "yandexPlaylistId" })?.value == "https://music.yandex.ru/playlists/lk.42", "Yandex source mismatch")
@@ -450,6 +474,19 @@ struct LaneContractTestRunner {
         let stats = try await api.trackStats(token: "test-token", trackId: "track-1")
         precondition(stats == TrackStatsDTO(likesCount: 27, commentsCount: 4))
 
+        let privacyDefaults = try JSONDecoder().decode(LanePrivacySettings.self, from: Data("{}".utf8))
+        precondition(privacyDefaults == LanePrivacySettings())
+        let privacyWrite = try await api.updatePrivacy(token: "test-token", settings: LanePrivacySettings(showPlaylists: false, showFollowers: true, showFollowing: false))
+        try privacyWrite.requireSuccess()
+        let notices = try await api.notificationPage(token: "test-token")
+        precondition(notices.items.first?.invitationId == "invite-1")
+        precondition(notices.items.first?.title == "Friend invited you to a playlist")
+        let unread = try await api.notificationUnreadCount(token: "test-token")
+        precondition(unread == 7)
+        try await api.markNotificationRead(token: "test-token", id: "n1").requireSuccess()
+        try await api.markAllNotificationsRead(token: "test-token").requireSuccess()
+        try await api.respondToPlaylistInvitation(token: "test-token", invitationId: "invite-1", accept: true).requireSuccess()
+
         let preview = try await api.importPreview(
             token: "test-token",
             platform: "Yandex",
@@ -501,6 +538,6 @@ struct LaneContractTestRunner {
             "/user/import/preview"
         ]
         precondition(expectedPaths.allSatisfy(LaneMockURLProtocol.received))
-        print("Lane contract tests passed: APK-native cipher vector, encrypted/signed bodies, 1151-track 15-item batches, interrupted import resume, canonical album IDs, and fresh-client server likes.")
+        print("Lane contract tests passed: APK-native cipher vector, encrypted/signed bodies, 1151-track 15-item batches, interrupted import resume, canonical album IDs, fresh-client server likes, privacy and notification/invitation contracts.")
     }
 }

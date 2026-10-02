@@ -166,6 +166,7 @@ final class LaneSession: ObservableObject {
     @Published var localPlaylists: [LocalPlaylist] = []
     @Published var history: [TrackCandidate] = []
     @Published var downloadedTrackIDs: Set<String> = []
+    @Published private var downloadedTrackRecords: [String: LaneDownloadedTrack] = [:]
     @Published var playlistDownloads: [String: LanePlaylistDownloadState] = [:]
     private var playlistDownloadTasks: [String: Task<Void, Never>] = [:]
     private var localTrackStore: [String: TrackCandidate] = [:]
@@ -505,7 +506,13 @@ final class LaneSession: ObservableObject {
     @Published var comments: [LaneTrackCommentDTO] = []
     @Published var commentReplies: [String: [LaneTrackCommentDTO]] = [:]
     @Published var loadingReplyIDs: Set<String> = []
-    @Published var notificationCards: [LaneCardItem] = []
+    @Published var notifications: [LaneNotification] = []
+    @Published var unreadNotificationCount = 0
+    @Published var notificationsLoading = false
+    @Published var notificationsHaveMore = false
+    @Published var notificationsError: String?
+    @Published var notificationMutations: Set<String> = []
+    private var nextNotificationPage = 0
 
     // MARK: Player
     @Published var currentTrack: TrackCandidate?
@@ -712,6 +719,10 @@ final class LaneSession: ObservableObject {
         activeStreamQuality = nil
         homeSections = []
         friends = []
+        notifications = []
+        unreadNotificationCount = 0
+        nextNotificationPage = 0
+        notificationsHaveMore = false
         comments = []
         output = "Signed out"
     }
@@ -1320,6 +1331,25 @@ final class LaneSession: ObservableObject {
                 output = error.localizedDescription
             }
         }
+    }
+
+    func loadPrivacySettings() async throws -> LanePrivacySettings {
+        guard !isGuest else { throw LaneAPIError.decoding("Sign in to change privacy settings.") }
+        await configureAPI()
+        let value = try await LaneAPI.shared.account(token: token, deviceLanguage: Locale.current.language.languageCode?.identifier ?? "en")
+        account = value
+        return value.privacySettings ?? LanePrivacySettings()
+    }
+
+    func savePrivacySettings(_ settings: LanePrivacySettings) async throws {
+        await configureAPI()
+        let result = try await LaneAPI.shared.updatePrivacy(token: token, settings: settings)
+        try result.requireSuccess()
+        for attempt in 0..<4 {
+            if try await loadPrivacySettings() == settings { return }
+            if attempt < 3 { try await Task.sleep(nanoseconds: 350_000_000) }
+        }
+        throw LaneAPIError.decoding("Lane accepted the settings, but server confirmation is pending. Please refresh.")
     }
 
     // MARK: Search
@@ -2741,19 +2771,58 @@ final class LaneSession: ObservableObject {
     }
 
     func refreshNotifications() {
-        busy = true
-        Task {
-            defer { busy = false }
-            do {
-                await configureAPI()
-                let result = try await LaneAPI.shared.notifications(token: token)
-                status = result.status
-                output = result.pretty
-                notificationCards = JSONProbe.cards(result.json, preferredKind: "notification")
-            } catch {
-                output = error.localizedDescription
-            }
+        Task { await loadNotifications(reset: true) }
+    }
+
+    func loadNotifications(reset: Bool = false) async {
+        guard !isGuest, !notificationsLoading, reset || notificationsHaveMore else { return }
+        notificationsLoading = true
+        notificationsError = nil
+        let requestToken = token
+        defer { notificationsLoading = false }
+        do {
+            await configureAPI()
+            let page = reset ? 0 : nextNotificationPage
+            let response = try await LaneAPI.shared.notificationPage(token: requestToken, page: page)
+            guard token == requestToken else { return }
+            let existing = reset ? [] : notifications
+            var seen = Set<String>()
+            notifications = (existing + response.items).filter { seen.insert($0.id).inserted }
+            nextNotificationPage = page + 1
+            notificationsHaveMore = response.totalPages.map { nextNotificationPage < $0 } ?? (response.items.count == 30)
+            unreadNotificationCount = (try? await LaneAPI.shared.notificationUnreadCount(token: requestToken))
+                ?? notifications.filter { $0.read != true }.count
+            if token != requestToken { unreadNotificationCount = 0 }
+        } catch {
+            if token == requestToken { notificationsError = error.localizedDescription }
         }
+    }
+
+    func markNotificationRead(_ item: LaneNotification) async throws {
+        guard item.read != true else { return }
+        let result = try await LaneAPI.shared.markNotificationRead(token: token, id: item.id)
+        try result.requireSuccess()
+        if let index = notifications.firstIndex(where: { $0.id == item.id }), notifications[index].read != true {
+            notifications[index].read = true
+            unreadNotificationCount = max(0, unreadNotificationCount - 1)
+        }
+    }
+
+    func markAllNotificationsRead() async throws {
+        let result = try await LaneAPI.shared.markAllNotificationsRead(token: token)
+        try result.requireSuccess()
+        for index in notifications.indices { notifications[index].read = true }
+        unreadNotificationCount = 0
+    }
+
+    func respondToInvitation(_ item: LaneNotification, accept: Bool) async throws {
+        guard let id = item.invitationId, !id.isEmpty, notificationMutations.insert(item.id).inserted else { return }
+        defer { notificationMutations.remove(item.id) }
+        let result = try await LaneAPI.shared.respondToPlaylistInvitation(token: token, invitationId: id, accept: accept)
+        try result.requireSuccess()
+        try? await markNotificationRead(item)
+        notifications.removeAll { $0.id == item.id }
+        if accept { await loadLibrary() }
     }
 
     // MARK: Comments
@@ -3115,6 +3184,23 @@ final class LaneSession: ObservableObject {
         activeStreamQuality = nil
         playerRetriedWithCompatibilityHeaders = false
         playerRetriedWithLocalDownload = false
+
+        if let localURL = downloadedFileURL(for: track) {
+            do {
+                streamURL = localURL.absoluteString
+                try playLocalCompatibilityFile(localURL, sourceDescription: "downloaded on this iPhone", requestID: requestID, track: track)
+                history.removeAll { $0.id == track.id }
+                history.insert(track, at: 0)
+                history = Array(history.prefix(100))
+                saveHistory()
+                updateNowPlaying()
+            } catch {
+                isBuffering = false
+                playerError = error.localizedDescription
+            }
+            busy = false
+            return
+        }
 
         // Freeze the user's saved tier at the moment playback is requested.
         // Changing the setting while this track is loading affects only the
@@ -3655,6 +3741,7 @@ final class LaneSession: ObservableObject {
             }
             return (temporaryURL, http)
         } catch {
+            try Task.checkCancellation()
             // AVPlayer/URLSession can lose the carrier route to Lane's CDN
             // without VPN even though the API itself is reachable. Reuse the
             // Android-style direct TLS transport (DoH/IP + original SNI/Host)
@@ -3875,6 +3962,10 @@ final class LaneSession: ObservableObject {
 
         teardownPlayerObservers()
 
+        let audioSession = AVAudioSession.sharedInstance()
+        try audioSession.setCategory(.playback, mode: .default, options: [])
+        try audioSession.setActive(true)
+
         let item = AVPlayerItem(url: url)
         let localPlayer = AVPlayer(playerItem: item)
         localPlayer.automaticallyWaitsToMinimizeStalling = false
@@ -3923,7 +4014,8 @@ final class LaneSession: ObservableObject {
 
         playerTimeControlObserver = localPlayer.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
                 self.isPlaying = player.timeControlStatus == .playing
                 self.isBuffering = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
                 self.updatePlaybackState(self.isPlaying)
@@ -3935,7 +4027,8 @@ final class LaneSession: ObservableObject {
             queue: .main
         ) { [weak self] time in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.playbackRequestID == requestID,
+                      self.currentTrack?.id == track.id else { return }
                 if time.seconds.isFinite {
                     self.playbackPosition = max(0, time.seconds)
                 }
@@ -3951,6 +4044,7 @@ final class LaneSession: ObservableObject {
         case hls
         case ogg
         case webm
+        case wav
         case unknown(String)
 
         var description: String {
@@ -3960,6 +4054,7 @@ final class LaneSession: ObservableObject {
             case .hls: return "HLS"
             case .ogg: return "Ogg/Opus"
             case .webm: return "WebM"
+            case .wav: return "WAV"
             case .unknown(let hex): return "unknown format \(hex)"
             }
         }
@@ -3977,6 +4072,8 @@ final class LaneSession: ObservableObject {
         if data.starts(with: Data("#EXTM3U".utf8)) {
             return .hls
         }
+        if data.starts(with: Data("RIFF".utf8)), data.count >= 12,
+           String(data: data[8..<12], encoding: .ascii) == "WAVE" { return .wav }
         if data.starts(with: Data("OggS".utf8)) {
             return .ogg
         }
@@ -4015,6 +4112,8 @@ final class LaneSession: ObservableObject {
             return "ogg"
         case .webm:
             return "webm"
+        case .wav:
+            return "wav"
         case .unknown:
             // Android Lane uses .m4a for all non-HLS downloads.
             return "m4a"
@@ -4590,42 +4689,79 @@ final class LaneSession: ObservableObject {
         let stream = try await LaneAPI.shared.downloadURL(
             token: token, trackId: trackID, quality: downloadQuality
         )
-        guard let remoteURL = URL(string: stream.url) else {
+        guard let remoteURL = normalizedStreamURL(stream.url) else {
             throw LaneAPIError.invalidURL
         }
 
-        let (temporary, response) = try await URLSession.shared.download(from: remoteURL)
+        // Use the same route selection and DNS/TLS fallback as playback.
+        let (temporary, response) = try await downloadMediaUsingLaneTransport(URLRequest(url: remoteURL))
+        defer { try? FileManager.default.removeItem(at: temporary) }
         try Task.checkCancellation()
-        if let http = response as? HTTPURLResponse,
-           !(200..<300).contains(http.statusCode) {
-            try? FileManager.default.removeItem(at: temporary)
+        if !(200..<300).contains(response.statusCode) {
             throw NSError(
                 domain: "LaneDownload",
-                code: http.statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "Audio download returned HTTP \(http.statusCode)"]
+                code: response.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "Audio download returned HTTP \(response.statusCode)"]
             )
         }
-
-        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("LaneDownloads", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-
-        let safeID = trackID.replacingOccurrences(of: "/", with: "_")
-        let ext = remoteURL.pathExtension.isEmpty ? "m4a" : remoteURL.pathExtension
-        let destination = directory.appendingPathComponent("\(safeID).\(ext)")
-        if FileManager.default.fileExists(atPath: destination.path) {
-            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
-        } else {
-            try FileManager.default.moveItem(at: temporary, to: destination)
+        let signature = Self.mediaSignature(at: temporary)
+        if case .hls = signature {
+            throw LaneAPIError.decoding("This stream needs an adaptive offline download. A playlist URL alone cannot be saved as audio.")
         }
-
+        let directory = downloadsDirectory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileName = "\(UUID().uuidString).\(Self.localAudioExtension(for: signature))"
+        let destination = directory.appendingPathComponent(fileName)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        let previous = downloadedFileURL(for: track)
+        downloadedTrackRecords[trackID] = LaneDownloadedTrack(track: track, fileName: fileName)
         downloadedTrackIDs.insert(trackID)
+        rememberResolvedTracks([track])
+        if let data = try? JSONEncoder().encode(downloadedTrackRecords) {
+            UserDefaults.standard.set(data, forKey: "lane.downloadedTrackRecords")
+        }
         UserDefaults.standard.set(Array(downloadedTrackIDs), forKey: "lane.downloads")
+        if let previous { try? FileManager.default.removeItem(at: previous) }
+    }
+
+    private var downloadsDirectory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("LaneDownloads", isDirectory: true)
+    }
+
+    func downloadedFileURL(for track: TrackCandidate) -> URL? {
+        guard let id = track.trackID, downloadedTrackIDs.contains(id) else { return nil }
+        if let record = downloadedTrackRecords[id],
+           record.fileName == URL(fileURLWithPath: record.fileName).lastPathComponent {
+            let url = downloadsDirectory.appendingPathComponent(record.fileName)
+            return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        }
+        // Recover downloads produced before persistent metadata was added.
+        let legacyName = id.replacingOccurrences(of: "/", with: "_")
+        let files = (try? FileManager.default.contentsOfDirectory(at: downloadsDirectory, includingPropertiesForKeys: nil)) ?? []
+        return files.first { $0.deletingPathExtension().lastPathComponent == legacyName }
+    }
+
+    var downloadedTracks: [TrackCandidate] {
+        let candidates = downloadedTrackRecords.values.map(\.track) + history + Array(resolvedTrackCache.values) + Array(localTrackStore.values)
+        var seen = Set<String>()
+        return candidates.filter { downloadedFileURL(for: $0) != nil && seen.insert($0.trackID ?? $0.id).inserted }
+            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+    }
+
+    func removeDownload(_ track: TrackCandidate) throws {
+        guard let id = track.trackID else { return }
+        if let url = downloadedFileURL(for: track) { try FileManager.default.removeItem(at: url) }
+        downloadedTrackRecords.removeValue(forKey: id)
+        downloadedTrackIDs.remove(id)
+        UserDefaults.standard.set(Array(downloadedTrackIDs), forKey: "lane.downloads")
+        if let data = try? JSONEncoder().encode(downloadedTrackRecords) {
+            UserDefaults.standard.set(data, forKey: "lane.downloadedTrackRecords")
+        }
     }
 
     func isDownloaded(_ track: TrackCandidate) -> Bool {
-        guard let id = track.trackID else { return false }
-        return downloadedTrackIDs.contains(id)
+        downloadedFileURL(for: track) != nil
     }
 
     // MARK: Local storage
@@ -4633,6 +4769,10 @@ final class LaneSession: ObservableObject {
     private func loadLocalState() {
         favorites = Set(UserDefaults.standard.stringArray(forKey: "lane.favorites") ?? [])
         downloadedTrackIDs = Set(UserDefaults.standard.stringArray(forKey: "lane.downloads") ?? [])
+        if let data = UserDefaults.standard.data(forKey: "lane.downloadedTrackRecords"),
+           let records = try? JSONDecoder().decode([String: LaneDownloadedTrack].self, from: data) {
+            downloadedTrackRecords = records
+        }
         if let data = UserDefaults.standard.data(forKey: pendingFavoriteStatesKey),
            let decoded = try? JSONDecoder().decode([String: Bool].self, from: data) {
             pendingFavoriteStates = decoded

@@ -3019,6 +3019,24 @@ private struct ProfileScreen: View {
                         }
 
                         VStack(spacing: 0) {
+                            NavigationLink {
+                                PrivacySettingsScreen()
+                            } label: {
+                                profileMenuRow(icon: "lock.shield", title: "Privacy", subtitle: "Playlists, followers and following")
+                            }
+                            .buttonStyle(.plain)
+
+                            Divider().padding(.leading, 58)
+
+                            NavigationLink {
+                                DownloadsScreen(showPlayer: $showPlayer)
+                            } label: {
+                                profileMenuRow(icon: "arrow.down.circle", title: "Downloads", subtitle: "Music saved on this iPhone")
+                            }
+                            .buttonStyle(.plain)
+
+                            Divider().padding(.leading, 58)
+
                             profileMenuRow(
                                 icon: "waveform",
                                 title: "Audio quality",
@@ -3535,32 +3553,183 @@ private struct UserRow: View {
     }
 }
 
-private struct NotificationsScreen: View {
+struct PrivacySettingsScreen: View {
     @EnvironmentObject private var session: LaneSession
+    @State private var settings = LanePrivacySettings()
+    @State private var loaded = false
+    @State private var saving = false
+    @State private var error: String?
+    @State private var saved = false
+
+    var body: some View {
+        Form {
+            Section("Visible on your profile") {
+                Toggle("Show playlists", isOn: $settings.showPlaylists).accessibilityIdentifier("privacy.playlists")
+                Toggle("Show followers", isOn: $settings.showFollowers)
+                Toggle("Show following", isOn: $settings.showFollowing)
+            }
+            .disabled(!loaded || saving)
+            Section {
+                Button(saving ? "Saving…" : "Save privacy settings") {
+                    saving = true
+                    saved = false
+                    error = nil
+                    Task {
+                        defer { saving = false }
+                        do { try await session.savePrivacySettings(settings); saved = true }
+                        catch { self.error = error.localizedDescription }
+                    }
+                }
+                .disabled(!loaded || saving)
+                .accessibilityIdentifier("privacy.save")
+                if saved { Text("Privacy settings saved to Lane").foregroundStyle(.green) }
+                if let error { Text(error).foregroundStyle(lanePink) }
+                if !loaded {
+                    Button("Load settings") { Task { await load() } }
+                }
+            }
+        }
+        .tint(lanePink)
+        .navigationTitle("Privacy")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .laneIOSBackSwipe()
+        .task { await load() }
+    }
+
+    private func load() async {
+        do { settings = try await session.loadPrivacySettings(); loaded = true; error = nil }
+        catch { self.error = error.localizedDescription }
+    }
+}
+
+struct NotificationsScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    @State private var filter = "All"
+    @State private var actionError: String?
+    @State private var commentTrack: TrackCandidate?
+    @State private var selectedArtist: LaneArtist?
+    @State private var selectedPlaylist: LanePlaylist?
+    @State private var showPlayer = false
+
+    private var filtered: [LaneNotification] {
+        session.notifications.filter {
+            filter == "All" || (filter == "Comments" && $0.type.hasPrefix("COMMENT_")) ||
+                (filter == "Subscriptions" && ["NEW_RELEASE", "NEW_FOLLOWER"].contains($0.type))
+        }
+    }
 
     var body: some View {
         List {
-            if session.notificationCards.isEmpty {
+            Picker("Notifications", selection: $filter) {
+                ForEach(["All", "Comments", "Subscriptions"], id: \.self) { Text($0) }
+            }
+            .pickerStyle(.segmented)
+            .listRowBackground(Color.clear)
+            if filtered.isEmpty && !session.notificationsLoading {
                 EmptyLaneView(icon: "bell", title: "No notifications", subtitle: "Updates from Lane will appear here.")
                     .listRowBackground(Color.clear)
             } else {
-                ForEach(session.notificationCards) { card in
-                    HStack(spacing: 12) {
-                        ArtworkView(url: card.imageURL, size: 46, radius: 23)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(card.title)
-                                .font(.subheadline.weight(.semibold))
-                            Text(card.subtitle)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                ForEach(filtered) { item in
+                    VStack(alignment: .leading, spacing: 12) {
+                        Button { open(item) } label: {
+                            HStack(spacing: 12) {
+                                ArtworkView(url: item.imageURL, size: 46, radius: 23)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(item.title).font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                                    Text(item.subtitle).font(.caption).foregroundStyle(.secondary)
+                                    if let timestamp = item.timestamp {
+                                        Text(Date(timeIntervalSince1970: Double(timestamp > 10_000_000_000 ? timestamp / 1000 : timestamp)), style: .relative)
+                                            .font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                                if item.read != true { Circle().fill(lanePink).frame(width: 7, height: 7) }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("notification.\(item.id)")
+                        if item.type == "PLAYLIST_INVITATION", item.invitationId != nil {
+                            HStack {
+                                invitationButton("Accept", item: item, accept: true)
+                                invitationButton("Decline", item: item, accept: false)
+                            }
+                            .disabled(session.notificationMutations.contains(item.id))
+                        }
+                    }
+                    .swipeActions {
+                        if item.read != true {
+                            Button("Mark read") { Task { await markRead(item) } }.tint(lanePink)
                         }
                     }
                 }
             }
+            if session.notificationsLoading { ProgressView().tint(lanePink) }
+            if session.notificationsHaveMore {
+                Button("Load more") { Task { await session.loadNotifications() } }
+                    .disabled(session.notificationsLoading)
+            }
+            if let error = actionError ?? session.notificationsError { Text(error).foregroundStyle(lanePink) }
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(laneBackground)
         .navigationTitle("Notifications")
-        .onAppear {
-            session.refreshNotifications()
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Read all") {
+                    Task {
+                        do { try await session.markAllNotificationsRead(); actionError = nil }
+                        catch { actionError = error.localizedDescription }
+                    }
+                }
+                .disabled(session.unreadNotificationCount == 0)
+            }
+        }
+        .laneIOSBackSwipe()
+        .task { await session.loadNotifications(reset: true) }
+        .refreshable { await session.loadNotifications(reset: true) }
+        .sheet(item: $commentTrack) { track in APKCommentsScreen(track: track).environmentObject(session) }
+        .navigationDestination(isPresented: Binding(get: { selectedArtist != nil }, set: { if !$0 { selectedArtist = nil } })) {
+            if let artist = selectedArtist { APKArtistDetailScreen(seed: artist) }
+        }
+        .navigationDestination(isPresented: Binding(get: { selectedPlaylist != nil }, set: { if !$0 { selectedPlaylist = nil } })) {
+            if let playlist = selectedPlaylist { PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer) }
+        }
+        .fullScreenCover(isPresented: $showPlayer) { APKFullPlayerView().environmentObject(session) }
+    }
+
+    private func markRead(_ item: LaneNotification) async {
+        do { try await session.markNotificationRead(item); actionError = nil }
+        catch { actionError = error.localizedDescription }
+    }
+
+    private func invitationButton(_ title: String, item: LaneNotification, accept: Bool) -> some View {
+        Button(title) {
+            Task {
+                do { try await session.respondToInvitation(item, accept: accept); actionError = nil }
+                catch { actionError = error.localizedDescription }
+            }
+        }
+        .buttonStyle(.bordered)
+        .tint(accept ? lanePink : .gray)
+        .accessibilityIdentifier("invitation.\(accept ? "accept" : "decline").\(item.id)")
+    }
+
+    private func open(_ item: LaneNotification) {
+        Task {
+            await markRead(item)
+            if let id = item.trackId {
+                let tracks = await session.resolveTracksByIDs([id])
+                commentTrack = tracks.first
+                if commentTrack == nil { actionError = "Lane could not load the track. Please try again." }
+            } else if let id = item.playlistId {
+                selectedPlaylist = LanePlaylist(playlistId: id, playlistImageUrl: item.playlistCoverUrl, playlistName: item.playlistName)
+            } else if let artist = item.artistInfo, let id = artist.id {
+                selectedArtist = LaneArtist(name: artist.name, id: id, avatarUrl: artist.avatarUrl)
+            }
         }
     }
 }
@@ -3778,16 +3947,12 @@ private struct FavoriteTracksScreen: View {
     }
 }
 
-private struct DownloadsScreen: View {
+struct DownloadsScreen: View {
     @EnvironmentObject private var session: LaneSession
     @Binding var showPlayer: Bool
 
     private var downloaded: [TrackCandidate] {
-        let all = session.history + session.searchTracks + session.queue + session.homeTracks + session.recentTracks
-        var seen = Set<String>()
-        return all.filter {
-            session.isDownloaded($0) && seen.insert($0.id).inserted
-        }
+        session.downloadedTracks
     }
 
     var body: some View {
@@ -3796,14 +3961,27 @@ private struct DownloadsScreen: View {
                 EmptyLaneView(icon: "arrow.down.circle", title: "Downloads", subtitle: "Save tracks to listen offline.")
                     .listRowBackground(Color.clear)
             } else {
-                ForEach(downloaded) { track in
-                    TrackRow(track: track, showPlayer: $showPlayer)
+                ForEach(Array(downloaded.enumerated()), id: \.element.id) { index, track in
+                    APKSearchTrackRow(track: track) {
+                        session.queue = downloaded
+                        session.currentIndex = index
+                        session.requestStream(for: track)
+                        showPlayer = true
+                    }
+                    .swipeActions {
+                        Button("Remove download", role: .destructive) {
+                            do { try session.removeDownload(track) }
+                            catch { session.output = error.localizedDescription }
+                        }
+                    }
                 }
             }
         }
         .scrollContentBackground(.hidden)
         .background(laneBackground)
         .navigationTitle("Downloads")
+        .toolbar(.visible, for: .navigationBar)
+        .laneIOSBackSwipe()
     }
 }
 

@@ -1,5 +1,8 @@
 import SwiftUI
 import UIKit
+#if DEBUG
+import Network
+#endif
 
 @main
 struct LaneIOSPrototypeApp: App {
@@ -9,6 +12,7 @@ struct LaneIOSPrototypeApp: App {
         let value = LaneSession()
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--lane-ui-test") {
+            _ = LaneUITestAudioServer.shared
             URLProtocol.registerClass(LaneUITestURLProtocol.self)
             value.backendMode = .custom
             value.baseURL = "https://lane-ui.test"
@@ -62,8 +66,11 @@ private struct LaneUITestRoot: View {
             VStack(spacing: 24) {
                 NavigationLink("Recommended artist") { APKArtistDetailScreen(seed: LaneUITestFixtures.artist) }
                 NavigationLink("Recommended album") { APKAlbumDetailScreen(seed: LaneUITestFixtures.album) }
+                NavigationLink("Privacy settings") { PrivacySettingsScreen() }
+                NavigationLink("Notification center") { NotificationsScreen() }
                 Button("Open player") { showPlayer = true }
                 Button("Run session checks") { Task { await checkSession() } }
+                Button("Run playback checks") { Task { await checkPlayback() } }
                 Text(result).accessibilityIdentifier("session.result")
             }
             .toolbar(.hidden, for: .navigationBar)
@@ -111,11 +118,145 @@ private struct LaneUITestRoot: View {
             result = "Session checks failed: \(error.localizedDescription)"
         }
     }
+
+    private func checkPlayback() async {
+        do {
+            try session.removeDownload(LaneUITestFixtures.track)
+            session.requestStream(for: LaneUITestFixtures.track)
+            for _ in 0..<150 {
+                if session.isPlaying && session.playbackPosition > 0.1 { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard session.isPlaying, session.playbackPosition > 0.1,
+                  !LaneUITestAudioServer.shared.finishedFullResponse else {
+                throw LaneAPIError.decoding("Playback waited for the whole slow HTTP audio file")
+            }
+            guard session.playbackBufferedDuration > 0, session.playbackDuration > 0 else {
+                throw LaneAPIError.decoding("Player did not publish loaded timeline ranges")
+            }
+            session.pause()
+            session.downloadTrack(LaneUITestFixtures.track)
+            for _ in 0..<150 {
+                if session.isDownloaded(LaneUITestFixtures.track) { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard session.isDownloaded(LaneUITestFixtures.track) else {
+                throw LaneAPIError.decoding("Audio download failed: \(session.output)")
+            }
+            session.stop()
+            LaneUITestAudioServer.shared.stop()
+            for key in ["lane.history", "lane.cachedTrackMetadata"] { UserDefaults.standard.removeObject(forKey: key) }
+            let offline = LaneSession()
+            offline.token = ""
+            guard offline.downloadedTracks.contains(where: { $0.trackID == "lane-1" }) else {
+                throw LaneAPIError.decoding("Downloaded metadata did not survive clearing history and relaunch")
+            }
+            offline.requestStream(for: offline.downloadedTracks.first!)
+            for _ in 0..<60 {
+                if offline.isPlaying && offline.playbackPosition > 0.1 { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard offline.isPlaying, URL(string: offline.streamURL)?.isFileURL == true else {
+                throw LaneAPIError.decoding("Offline playback attempted to resolve a network stream: \(offline.output)")
+            }
+            offline.stop()
+            result = "Playback checks passed"
+        } catch { result = "Playback checks failed: \(error.localizedDescription)" }
+    }
+}
+
+/// Real, slow loopback HTTP audio: AVPlayer and URLSession perform actual
+/// range/download requests, not a mock playback-state assignment.
+private final class LaneUITestAudioServer {
+    static let shared = LaneUITestAudioServer()
+    private let queue = DispatchQueue(label: "lane.ui.audio.fixture")
+    private let lock = NSLock()
+    private let listener: NWListener
+    private var connections: [NWConnection] = []
+    private var port: UInt16?
+    private var complete = false
+    private let audio: Data
+    var url: String? { lock.lock(); defer { lock.unlock() }; return port.map { "http://127.0.0.1:\($0)/audio.wav" } }
+    var finishedFullResponse: Bool { lock.lock(); defer { lock.unlock() }; return complete }
+
+    private init() {
+        let sampleRate: UInt32 = 16000
+        let sampleCount = Int(sampleRate) * 24
+        var data = Data()
+        func word<T: FixedWidthInteger>(_ value: T) { var little = value.littleEndian; withUnsafeBytes(of: &little) { data.append(contentsOf: $0) } }
+        data.append(Data("RIFF".utf8)); word(UInt32(36 + sampleCount * 2))
+        data.append(Data("WAVEfmt ".utf8)); word(UInt32(16)); word(UInt16(1)); word(UInt16(1))
+        word(sampleRate); word(sampleRate * 2); word(UInt16(2)); word(UInt16(16))
+        data.append(Data("data".utf8)); word(UInt32(sampleCount * 2))
+        for index in 0..<sampleCount { word(Int16(sin(Double(index) * 2 * .pi * 440 / Double(sampleRate)) * 400)) }
+        audio = data
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try! NWListener(using: parameters)
+        listener.stateUpdateHandler = { [weak self] state in
+            if case .ready = state, let self {
+                self.lock.lock(); self.port = self.listener.port?.rawValue; self.lock.unlock()
+            }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { return }
+            self.connections.append(connection)
+            connection.start(queue: self.queue)
+            self.receive(connection, accumulated: Data())
+        }
+        listener.start(queue: queue)
+    }
+
+    func stop() { queue.async { self.listener.cancel(); self.connections.forEach { $0.cancel() }; self.connections = [] } }
+
+    private func receive(_ connection: NWConnection, accumulated: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] chunk, _, ended, error in
+            guard let self, error == nil else { connection.cancel(); return }
+            let data = accumulated + (chunk ?? Data())
+            guard let text = String(data: data, encoding: .utf8), text.contains("\r\n\r\n") else {
+                if !ended { self.receive(connection, accumulated: data) } else { connection.cancel() }
+                return
+            }
+            var start = 0, end = self.audio.count - 1
+            let range = text.components(separatedBy: "\r\n").first { $0.lowercased().hasPrefix("range:") }
+            if let range, let value = range.components(separatedBy: "bytes=").last {
+                let fields = value.components(separatedBy: "-")
+                start = Int(fields[0]) ?? 0
+                if fields.count > 1, let upper = Int(fields[1]) { end = min(upper, end) }
+            }
+            guard start >= 0, start <= end, start < self.audio.count else { connection.cancel(); return }
+            let length = end - start + 1
+            var headers = "HTTP/1.1 \(range == nil ? "200 OK" : "206 Partial Content")\r\nContent-Type: audio/wav\r\nAccept-Ranges: bytes\r\nContent-Length: \(length)\r\nConnection: close\r\n"
+            if range != nil { headers += "Content-Range: bytes \(start)-\(end)/\(self.audio.count)\r\n" }
+            connection.send(content: Data((headers + "\r\n").utf8), completion: .contentProcessed { error in
+                if error != nil { connection.cancel(); return }
+                if text.hasPrefix("HEAD ") { connection.cancel(); return }
+                self.send(connection, offset: start, end: end, whole: start == 0 && end == self.audio.count - 1)
+            })
+        }
+    }
+
+    private func send(_ connection: NWConnection, offset: Int, end: Int, whole: Bool) {
+        let next = min(offset + 16384, end + 1)
+        connection.send(content: audio.subdata(in: offset..<next), completion: .contentProcessed { [weak self] error in
+            guard let self, error == nil else { connection.cancel(); return }
+            if next > end {
+                if whole { self.lock.lock(); self.complete = true; self.lock.unlock() }
+                connection.cancel()
+            } else {
+                self.queue.asyncAfter(deadline: .now() + 0.25) { self.send(connection, offset: next, end: end, whole: whole) }
+            }
+        })
+    }
 }
 
 private final class LaneUITestURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var saved: [String: [String]] = [:]
+    private static var privacy = LanePrivacySettings()
+    private static var notificationRead = false
+    private static var invitationAccepted = false
+    private static var invitationFailedOnce = false
 
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "lane-ui.test" }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -128,6 +269,7 @@ private final class LaneUITestURLProtocol: URLProtocol {
             let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
             let data: Data
             var contentType = "application/json"
+            var statusCode = 200
             Self.lock.lock()
             defer { Self.lock.unlock() }
             if path == "/panorama" {
@@ -185,19 +327,51 @@ private final class LaneUITestURLProtocol: URLProtocol {
                     data = try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": Self.saved[id] ?? []])
                 }
             } else if path == "/account" {
-                data = Data(#"{"laneId":"fixture-user","userPlaylists":["lane_likes"]}"#.utf8)
+                let privacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(Self.privacy))
+                data = try JSONSerialization.data(withJSONObject: ["laneId": "fixture-user", "userPlaylists": ["lane_likes"], "privacySettings": privacy])
+            } else if path == "/user/settings/privacy" {
+                Self.privacy = try JSONDecoder().decode(LanePrivacySettings.self, from: readBody())
+                data = Data(#"{"ok":true}"#.utf8)
+            } else if path == "/notifications" {
+                let items: [[String: Any]] = Self.invitationAccepted ? [] : [["id": "fixture-invite", "type": "PLAYLIST_INVITATION", "invitationId": "invite-1", "playlistId": "shared-1", "playlistName": "Road Trip", "read": Self.notificationRead, "actorInfo": ["laneId": "friend", "displayedName": "Friend"]]]
+                data = try JSONSerialization.data(withJSONObject: ["items": items, "totalPages": 1])
+            } else if path == "/notifications/unread-count" {
+                data = try JSONSerialization.data(withJSONObject: ["unreadCount": Self.notificationRead ? 0 : 1])
+            } else if path == "/notifications/read-all" || path == "/notifications/fixture-invite/read" {
+                Self.notificationRead = true
+                data = Data(#"{"ok":true}"#.utf8)
+            } else if path == "/playlist/invite/respond" {
+                if !Self.invitationFailedOnce { Self.invitationFailedOnce = true; statusCode = 503 }
+                else { Self.invitationAccepted = true }
+                data = Data((statusCode == 200 ? #"{"ok":true}"# : #"{"message":"Retry invitation"}"#).utf8)
+            } else if path == "/track/stream" || path == "/track/download" {
+                guard let url = LaneUITestAudioServer.shared.url else { throw URLError(.cannotConnectToHost) }
+                data = try JSONSerialization.data(withJSONObject: ["url": url])
             } else if path == "/track/stats" {
                 data = Data(#"{"likesCount":27,"commentsCount":4}"#.utf8)
             } else {
                 data = Data("[]".utf8)
             }
-            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": contentType])!
+            let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": contentType])!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
             client?.urlProtocolDidFinishLoading(self)
         } catch {
             client?.urlProtocol(self, didFailWithError: error)
         }
+    }
+
+    private func readBody() -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open(); defer { stream.close() }
+        var data = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count <= 0 { break }
+            data.append(buffer, count: count)
+        }
+        return data
     }
 }
 #endif
