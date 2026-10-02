@@ -4202,6 +4202,8 @@ private struct FavoriteTracksScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var showPlayer: Bool
     @State private var confirmClear = false
+    @State private var showActions = false
+    @State private var clearAfterActions = false
     @State private var clearCompleted = 0
     @State private var clearTotal = 0
     @State private var clearError: String?
@@ -4266,17 +4268,41 @@ private struct FavoriteTracksScreen: View {
                     .font(.system(size: 17, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
-                Menu {
-                    Button("Удалить все треки", role: .destructive) { confirmClear = true }
-                        .accessibilityIdentifier("playlist.clear")
-                        .disabled(session.isGuest || session.clearingPlaylistIDs.contains("lane_likes"))
-                } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
+                Button { showActions = true } label: {
+                    Image(systemName: "ellipsis")
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
                 .accessibilityIdentifier("playlist.actions")
                 .accessibilityLabel("Playlist actions")
             }
             .padding(.horizontal, 8)
             .frame(height: 52)
             .background(laneBackground.opacity(0.96))
+        }
+        .sheet(isPresented: $showActions, onDismiss: {
+            if clearAfterActions { clearAfterActions = false; confirmClear = true }
+        }) {
+            VStack(spacing: 18) {
+                Text("Liked tracks").font(.headline)
+                Button(role: .destructive) {
+                    clearAfterActions = true
+                    showActions = false
+                } label: {
+                    Label("Удалить все треки", systemImage: "trash")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .accessibilityIdentifier("playlist.clear")
+                .disabled(session.isGuest || session.clearingPlaylistIDs.contains("lane_likes"))
+                Button("Cancel") { showActions = false }
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(laneBackground)
+            .presentationDetents([.height(210)])
+            .presentationDragIndicator(.visible)
         }
         .alert("Удалить все лайкнутые треки?", isPresented: $confirmClear) {
             Button("Удалить все треки", role: .destructive) {

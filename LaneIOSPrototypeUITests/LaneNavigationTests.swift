@@ -130,6 +130,11 @@ final class LaneNavigationTests: XCTestCase {
         liked.tap()
         let actions = app.buttons["playlist.actions"]
         XCTAssertTrue(actions.waitForExistence(timeout: 10))
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "Liked playlist controls before clear"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+        screenshot("iPhone13-liked-menu-before-clear")
         XCTAssertTrue(actions.isHittable, "Liked playlist menu must not be hidden under the status bar")
         actions.tap()
         app.buttons["playlist.clear"].tap()
