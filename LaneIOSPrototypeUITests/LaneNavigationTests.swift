@@ -36,6 +36,14 @@ final class LaneNavigationTests: XCTestCase {
         screenshot("iPhone13-artist-wide-artwork")
         back.tap()
         XCTAssertTrue(app.buttons["Recommended artist"].waitForExistence(timeout: 5))
+    }
+
+    func testRecommendedArtistCanSwipeBackAfterReopening() {
+        app.buttons["Recommended artist"].tap()
+        let back = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 10))
+        back.tap()
+        XCTAssertTrue(app.buttons["Recommended artist"].waitForExistence(timeout: 5))
         app.buttons["Recommended artist"].tap()
         XCTAssertTrue(app.navigationBars.buttons.firstMatch.waitForExistence(timeout: 5))
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))

@@ -972,6 +972,11 @@ struct APKRemoteImage: View {
             .clipped()
             .clipShape(circle ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)))
         }
+        .contentShape(circle ? AnyShape(Circle()) : AnyShape(Rectangle()))
+        // Row titles already describe the artwork. Exclude the fill-sized
+        // image from AX unions, which otherwise expand a button outside its
+        // visible clipped cell; use the cell's own bounds for hit testing.
+        .accessibilityHidden(true)
     }
 }
 
