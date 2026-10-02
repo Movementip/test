@@ -4199,6 +4199,7 @@ private struct LocalPlaylistDetailScreen: View {
 
 private struct FavoriteTracksScreen: View {
     @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
     @Binding var showPlayer: Bool
     @State private var confirmClear = false
     @State private var clearCompleted = 0
@@ -4252,16 +4253,30 @@ private struct FavoriteTracksScreen: View {
         }
         .scrollContentBackground(.hidden)
         .background(laneBackground)
-        .navigationTitle("Liked tracks")
-        .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
+        // The library root hides UINavigationBar. Adding a native toolbar on
+        // this child left a ghost menu under the status bar on iPhone 13.
+        // Use the same safe-area header as the APK-style playlist cards.
+        .toolbar(.hidden, for: .navigationBar)
+        .laneIOSBackSwipe()
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack(spacing: 0) {
+                APKImportBackButton { dismiss() }
+                    .accessibilityIdentifier("liked.back")
+                Text("Liked tracks")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
                 Menu {
                     Button("Удалить все треки", role: .destructive) { confirmClear = true }
                         .accessibilityIdentifier("playlist.clear")
                         .disabled(session.isGuest || session.clearingPlaylistIDs.contains("lane_likes"))
                 } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
                 .accessibilityIdentifier("playlist.actions")
+                .accessibilityLabel("Playlist actions")
             }
+            .padding(.horizontal, 8)
+            .frame(height: 52)
+            .background(laneBackground.opacity(0.96))
         }
         .alert("Удалить все лайкнутые треки?", isPresented: $confirmClear) {
             Button("Удалить все треки", role: .destructive) {

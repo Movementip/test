@@ -130,6 +130,7 @@ final class LaneNavigationTests: XCTestCase {
         liked.tap()
         let actions = app.buttons["playlist.actions"]
         XCTAssertTrue(actions.waitForExistence(timeout: 10))
+        XCTAssertTrue(actions.isHittable, "Liked playlist menu must not be hidden under the status bar")
         actions.tap()
         app.buttons["playlist.clear"].tap()
         XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 5))
