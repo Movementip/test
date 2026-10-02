@@ -164,6 +164,15 @@ private struct LaneUITestRoot: View {
 
     private func checkSession() async {
         do {
+            let originals = Bundle.main.urls(forResourcesWithExtension: "png", subdirectory: nil) ?? []
+            guard originals.count >= 36,
+                  ["lane", "verified", "ic_yandex_music", "candle"].allSatisfy({ name in
+                    Bundle.main.url(forResource: name, withExtension: "png")
+                        .flatMap { UIImage(contentsOfFile: $0.path) } != nil
+                  }),
+                  Bundle.main.url(forResource: "amen", withExtension: "gif") != nil else {
+                throw LaneAPIError.decoding("Original APK artwork is missing from the simulator app")
+            }
             let preview = LanePlaylist(playlistTracksIds: (0..<1151).map { "source-\($0)" })
             let firstPage = try await session.tracksForImportPreview(preview)
             guard firstPage.count == 15 else { throw LaneAPIError.decoding("Preview must resolve only the first 15 tracks") }
