@@ -223,6 +223,7 @@ struct LaneMemorialScreen: View {
     @State private var ownCandle: LaneArtistCandle?
     @State private var error: String?
     @State private var generation = UUID()
+    @State private var accountIdentity: String?
     @FocusState private var messageFocused: Bool
 
     var body: some View {
@@ -300,9 +301,16 @@ struct LaneMemorialScreen: View {
             Spacer(); Button("Done") { messageFocused = false }
         } }
         .task(id: session.token) {
-            generation = UUID(); loading = false; saving = false; candles = []; count = nil
-            ownCandle = nil; composing = false; message = ""; nextPage = 1; hasMore = true
-            await reload()
+            if accountIdentity != session.token {
+                accountIdentity = session.token
+                generation = UUID(); loading = false; saving = false; candles = []; count = nil
+                ownCandle = nil; composing = false; message = ""; nextPage = 1; hasMore = true
+                await reload()
+            } else if count == nil && candles.isEmpty && error == nil {
+                // Restart a cancelled initial read, but preserve the draft,
+                // pagination and confirmed candle when returning from a profile.
+                await reload()
+            }
         }
     }
 
