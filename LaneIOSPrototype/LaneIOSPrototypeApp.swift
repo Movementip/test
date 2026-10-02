@@ -126,6 +126,8 @@ private struct LaneUITestRoot: View {
             guard session.isFavorite(LaneUITestFixtures.track), !session.isFavoriteSyncPending(LaneUITestFixtures.track) else {
                 throw LaneAPIError.decoding("Like not confirmed")
             }
+            _ = try await session.importTracks(["source-2", "source-3", "source-4"], into: "lane_likes",
+                                               resolvingSourceIDs: true, sort: .oldest)
             // Simulate removal of all on-device favorite state while keeping
             // the mock server intact, then sign into the same account again.
             for key in ["lane.favorites", "lane.pendingFavoriteStates", "lane.cachedTrackMetadata", "lane.cachedPlaylistTracks"] {
@@ -138,6 +140,14 @@ private struct LaneUITestRoot: View {
             await fresh.refreshAfterLogin()
             guard fresh.isFavorite(LaneUITestFixtures.track), fresh.likedTracks.contains(where: { $0.trackID == "lane-1" }) else {
                 throw LaneAPIError.decoding("Fresh installation did not restore server likes")
+            }
+            guard fresh.likedTracks.compactMap(\.trackID) == ["lane-4", "lane-3", "lane-2", "lane-1"] else {
+                throw LaneAPIError.decoding("Liked songs ignored the saved import order after a fresh installation")
+            }
+            try await fresh.clearPlaylistTracks(LanePlaylist(playlistId: "lane_likes"))
+            await fresh.refreshAfterLogin()
+            guard fresh.likedTracks.isEmpty, fresh.favorites.isEmpty else {
+                throw LaneAPIError.decoding("Cleared server likes reappeared after refresh")
             }
 
             // Hold an older library read inside metadata resolution. Commit a
@@ -579,7 +589,7 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 let id = String(parts[1])
                 if parts.last == "tracks" {
                     let ids = isRaceClient && Self.favoriteReadRace && id == "lane_likes" ? [] : (Self.saved[id] ?? [])
-                    data = try JSONSerialization.data(withJSONObject: ["items": ids.map { ["songId": $0, "title": "Fixture track"] }, "totalItems": ids.count, "page": 1, "pageSize": 100, "totalPages": 1])
+                    data = try JSONSerialization.data(withJSONObject: ["items": ids.reversed().map { ["songId": $0, "title": "Fixture track"] }, "totalItems": ids.count, "page": 1, "pageSize": 100, "totalPages": 1])
                 } else {
                     data = try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": Self.saved[id] ?? [], "tracksCount": (Self.saved[id] ?? []).count])
                 }

@@ -1821,11 +1821,14 @@ final class LaneSession: ObservableObject {
                     likedIDsBuffer.append(id)
                 }
             }
-            appendLikedIDs(directLikedData?.compactMap(\.songId))
-            appendLikedIDs(likedDetail?.playlistTracks?.compactMap(\.songId))
+            // /playlist/reorder stores its order in playlistTracksIds. Paging
+            // can still return a creation-date order: use it for missing
+            // metadata/membership, not to overwrite the explicit saved order.
             appendLikedIDs(likedDetail?.playlistTracksIds)
-            appendLikedIDs(likedPlaylist?.playlistTracks?.compactMap(\.songId))
+            appendLikedIDs(likedDetail?.playlistTracks?.compactMap(\.songId))
             appendLikedIDs(likedPlaylist?.playlistTracksIds)
+            appendLikedIDs(likedPlaylist?.playlistTracks?.compactMap(\.songId))
+            appendLikedIDs(directLikedData?.compactMap(\.songId))
 
             let didReadLikedState = directLikedData != nil || likedDetail != nil || likedPlaylist != nil
             let expectedLikedCount = max(
