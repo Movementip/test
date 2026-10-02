@@ -3992,6 +3992,7 @@ final class LaneSession: ObservableObject {
         if queue.isEmpty || (nextIndex >= queue.count && repeatMode != 1) {
             isPlaying = false
             isBuffering = false
+            endPlaybackTransition()
             updatePlaybackState(false)
             return
         }
@@ -4777,6 +4778,7 @@ final class LaneSession: ObservableObject {
     func stop() {
         endPlaybackTransition()
         cancelPreparedStream()
+        busy = false
         playbackRequestID = UUID()
         effectRequestID = UUID()
         trackEffectIsLoading = false

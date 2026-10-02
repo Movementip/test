@@ -98,7 +98,17 @@ enum AndroidNetworkTransport {
         }
     }
 
-    private static func resolve(host: String) async throws -> [String] {
+    #if DEBUG
+    static func debugResolvedAddresses(host: String,
+        fetch: @escaping (URLRequest) async throws -> (Data, URLResponse)) async throws -> [String] {
+        try await resolve(host: host, fetch: fetch)
+    }
+    #endif
+
+    private static func resolve(host: String,
+        fetch: @escaping (URLRequest) async throws -> (Data, URLResponse) = { request in
+            try await URLSession.shared.data(for: request)
+        }) async throws -> [String] {
         if IPv4Address(host) != nil || IPv6Address(host) != nil {
             return [host]
         }
@@ -123,7 +133,7 @@ enum AndroidNetworkTransport {
                     request.timeoutInterval = 4
                     request.setValue("application/dns-json", forHTTPHeaderField: "Accept")
 
-                    guard let (data, response) = try? await URLSession.shared.data(for: request),
+                    guard let (data, response) = try? await fetch(request),
                           let http = response as? HTTPURLResponse,
                           (200..<300).contains(http.statusCode),
                           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -141,9 +151,13 @@ enum AndroidNetworkTransport {
             }
 
             for await values in group where !values.isEmpty {
-                for value in values where !resolved.contains(value) {
-                    resolved.append(value)
-                }
+                // The successful resolver already returned all of its usable
+                // addresses. Do not delay TLS by waiting four seconds for an
+                // unreachable alternative; preserve SNI/certificate checks.
+                var seen = Set<String>()
+                resolved = values.filter { seen.insert($0).inserted }
+                group.cancelAll()
+                break
             }
         }
 

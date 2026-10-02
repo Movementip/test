@@ -346,6 +346,20 @@ private struct LaneUITestRoot: View {
             guard Date().timeIntervalSince(cancelledAt) < 2 else {
                 throw LaneAPIError.decoding("Cancelled TLS held the playback task until its timeout")
             }
+            let dnsStarted = Date()
+            let dnsHost = "lane-dns-\(UUID().uuidString).test"
+            let addresses = try await AndroidNetworkTransport.debugResolvedAddresses(host: dnsHost) { request in
+                // The other providers are unreachable; the first supplies a
+                // duplicate, a second IPv4, and a non-address DNS record.
+                try await Task.sleep(nanoseconds: request.url?.host == "1.1.1.1" ? 100_000_000 : 4_000_000_000)
+                let data = Data(#"{"Answer":[{"type":1,"data":"192.0.2.1"},{"type":1,"data":"192.0.2.1"},{"type":1,"data":"192.0.2.2"},{"type":5,"data":"alias.test"}]}"#.utf8)
+                return (data, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
+            guard addresses == ["192.0.2.1", "192.0.2.2"], Date().timeIntervalSince(dnsStarted) < 1 else {
+                throw LaneAPIError.decoding("Fast DNS waited for unreachable alternatives")
+            }
+            let cached = try await AndroidNetworkTransport.debugResolvedAddresses(host: dnsHost) { _ in throw URLError(.cannotFindHost) }
+            guard cached == addresses else { throw LaneAPIError.decoding("Fast DNS did not cache usable addresses") }
             session.stop()
             result = "Recovery checks passed"
         } catch { result = "Recovery checks failed: \(error.localizedDescription)" }
