@@ -60,6 +60,7 @@ actor LaneAPI {
     static let shared = LaneAPI()
 
     private let urlSession: URLSession
+    private let requestSignerOverride: (any LaneRequestSigner)?
     private var base = URL(string: "https://laneapi.com")!
     private var serviceLDI = ""
     private var signingConfiguration = LaneSigningConfiguration.official
@@ -67,8 +68,9 @@ actor LaneAPI {
     private let lastWorkingRegionalBaseKey = "lane.lastWorkingRegionalBase"
     private let diagnosticTraceKey = "lane.diag.trace"
 
-    init(urlSession: URLSession = .shared) {
+    init(urlSession: URLSession = .shared, requestSigner: (any LaneRequestSigner)? = nil) {
         self.urlSession = urlSession
+        self.requestSignerOverride = requestSigner
     }
 
     private func diagnosticSetting(_ key: String, default fallback: String) -> String {
@@ -398,11 +400,12 @@ actor LaneAPI {
     }
 
     /// URLSession is kept as the normal path. When the carrier's resolver or
-    /// route stalls, retry the same signed request through the APK-style fast
-    /// DNS transport without changing the host used for TLS verification.
+    /// route stalls, re-sign the original plaintext request for fast DNS.
+    /// Never reuse a one-time nonce or encrypt an already encrypted body.
     private func performOfficialRequest(
         _ request: URLRequest,
-        directTimeout: TimeInterval
+        directTimeout: TimeInterval,
+        resignForFallback: (() throws -> URLRequest)? = nil
     ) async throws -> (Data, HTTPURLResponse) {
         let mode = diagnosticSetting("lane.diag.transport", default: "system")
 
@@ -421,10 +424,10 @@ actor LaneAPI {
             }
             return (data, http)
         } catch {
-            guard mode == "auto" else { throw error }
+            guard mode == "auto", let resignForFallback else { throw error }
 
             let direct = try await AndroidNetworkTransport.data(
-                for: request,
+                for: try resignForFallback(),
                 timeout: directTimeout
             )
             return (direct.data, direct.response)
@@ -716,14 +719,19 @@ actor LaneAPI {
                     json: json,
                     baseURL: targetBase
                 )
-                let signer = signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
+                let signer = requestSignerOverride ?? signingConfiguration.signer(timeOffsetMilliseconds: timeOffsetMilliseconds)
                 let signed = try signer.sign(unsigned, body: unsigned.httpBody)
                 var request = signed
                 request.timeoutInterval = timeout
 
                 let (rawData, http) = try await performOfficialRequest(
                     request,
-                    directTimeout: min(max(timeout, 4), 10)
+                    directTimeout: min(max(timeout, 4), 10),
+                    resignForFallback: canFailOver ? {
+                        var fresh = try signer.sign(unsigned, body: unsigned.httpBody)
+                        fresh.timeoutInterval = timeout
+                        return fresh
+                    } : nil
                 )
                 let data = try decodeOfficialTransport(rawData, response: http)
                 let result = APIResult(
@@ -1461,6 +1469,61 @@ actor LaneAPI {
                 .init(name: "trackId", value: trackId)
             ]
         )
+    }
+
+    /// Resolve and commit one page at a time. A failed page never clears pages
+    /// already accepted by the server. Repeating the import is idempotent and
+    /// skips tracks visible in the destination, including after an app restart.
+    func importTrackBatches(
+        token: String,
+        playlistId: String,
+        sourceIDs: [String],
+        resolveSourceIDs: Bool = true,
+        progress: @MainActor (_ processed: Int, _ total: Int, _ savedIDs: [String], _ tracks: [TrackData]) -> Void = { _, _, _, _ in }
+    ) async throws -> Int {
+        let ids = LaneTrackBatching.unique(sourceIDs)
+        guard !ids.isEmpty else { throw LaneAPIError.emptyResponse }
+        guard !playlistId.isEmpty else { throw LaneAPIError.invalidURL }
+        let existing = try? await playlist(token: token, playlistId: playlistId)
+        var present = Set((existing?.playlistTracksIds ?? []) + (existing?.playlistTracks?.compactMap(\.songId) ?? []))
+        var accepted = Set<String>()
+        var processed = 0
+
+        for batch in LaneTrackBatching.batches(ids) {
+            try Task.checkCancellation()
+            let tracks = resolveSourceIDs
+                ? try await tracksByIds(token: token, ids: batch, prefetch: false)
+                : []
+            let canonical = resolveSourceIDs
+                ? LaneTrackBatching.unique(tracks.compactMap(\.songId))
+                : batch
+            guard !canonical.isEmpty else {
+                throw LaneAPIError.decoding("Lane returned no importable tracks for a 15-track batch. Retry to continue; earlier batches are preserved.")
+            }
+            let missing = canonical.filter { !present.contains($0) }
+            for writeBatch in LaneTrackBatching.batches(missing) {
+                try Task.checkCancellation()
+                let result = try await addTracks(token: token, playlistId: playlistId, trackIds: writeBatch)
+                try result.requireSuccess()
+                present.formUnion(writeBatch)
+            }
+            accepted.formUnion(canonical)
+            processed += batch.count
+            await progress(processed, ids.count, canonical, tracks)
+        }
+
+        // A 2xx acknowledgement alone is not proof of durable membership.
+        // Read back the destination before showing completion to the user.
+        for attempt in 0..<4 {
+            try Task.checkCancellation()
+            if let destination = try? await playlist(token: token, playlistId: playlistId) {
+                let confirmed = Set((destination.playlistTracksIds ?? []) +
+                                    (destination.playlistTracks?.compactMap(\.songId) ?? []))
+                if accepted.isSubset(of: confirmed) { return accepted.count }
+            }
+            if attempt < 3 { try await Task.sleep(nanoseconds: 400_000_000) }
+        }
+        throw LaneAPIError.decoding("Lane accepted the batches but has not confirmed all tracks in the playlist yet. Retry to check and continue; accepted batches are not discarded.")
     }
 
     // MARK: Social

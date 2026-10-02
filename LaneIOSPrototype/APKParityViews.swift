@@ -1088,6 +1088,7 @@ struct APKAlbumDetailScreen: View {
     private var isSavedToLibrary: Bool { session.isAlbumSaved(value) }
 
     var body: some View {
+        GeometryReader { geometry in
         ScrollView {
             VStack(spacing: 0) {
                 ZStack(alignment: .bottom) {
@@ -1114,6 +1115,8 @@ struct APKAlbumDetailScreen: View {
                         .shadow(color: .black.opacity(0.45), radius: 22, y: 14)
                         .padding(.bottom, 18)
                 }
+                .frame(width: geometry.size.width, height: 345)
+                .clipped()
                 .frame(height: 345)
 
                 VStack(alignment: .leading, spacing: 10) {
@@ -1250,12 +1253,16 @@ struct APKAlbumDetailScreen: View {
                 .padding(.horizontal, 16)
                 .padding(.bottom, 28)
             }
+            .frame(width: geometry.size.width)
+        }
+        .clipped()
         }
         .background(apkBackground.ignoresSafeArea())
         .tint(.white)
         .navigationBarBackButtonHidden(true)
         .laneIOSBackSwipe()
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 Button {
@@ -1266,6 +1273,8 @@ struct APKAlbumDetailScreen: View {
                         .frame(width: 36, height: 36)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier("album.back")
             }
             ToolbarItem(placement: .principal) {
                 Text("Album")
@@ -1437,7 +1446,9 @@ private struct APKAlbumTrackRow: View {
 
 struct APKArtistDetailScreen: View {
     @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
     let seed: LaneArtist
+    var onClose: (() -> Void)? = nil
 
     @State private var artist: LaneArtist?
     @State private var topTracks: [TrackCandidate] = []
@@ -1450,12 +1461,12 @@ struct APKArtistDetailScreen: View {
     private var isSavedToLibrary: Bool { session.isArtistSaved(value) }
 
     var body: some View {
+        GeometryReader { geometry in
         ScrollView {
             VStack(spacing: 0) {
                 ZStack(alignment: .bottomLeading) {
                     APKRemoteImage(url: value.headerUrl ?? value.avatarUrl, cornerRadius: 0)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 260)
+                        .frame(width: geometry.size.width, height: 260)
                         .clipped()
                         .overlay {
                             LinearGradient(
@@ -1494,6 +1505,8 @@ struct APKArtistDetailScreen: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 12)
                 }
+                .frame(width: geometry.size.width, height: 260)
+                .clipped()
 
                 VStack(alignment: .leading, spacing: 22) {
                     if loading {
@@ -1662,9 +1675,32 @@ struct APKArtistDetailScreen: View {
                 }
                 .padding(16)
             }
+            .frame(width: geometry.size.width)
+        }
+        .clipped()
         }
         .background(apkBackground.ignoresSafeArea())
+        .navigationBarBackButtonHidden(true)
+        .laneIOSBackSwipe()
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button {
+                    if let onClose { onClose() } else { dismiss() }
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier("artist.back")
+            }
+            ToolbarItem(placement: .principal) {
+                Text("Artist").font(.system(size: 16, weight: .semibold))
+            }
+        }
         .task {
             if let cached = session.cachedArtistDetail(for: seed) {
                 artist = cached
@@ -2224,6 +2260,7 @@ struct APKFullPlayerView: View {
                                     .buttonStyle(.plain)
                                     .disabled(resolvingArtist)
                                     .accessibilityHint("Opens the artist page")
+                                    .accessibilityIdentifier("player.artist")
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -2309,7 +2346,7 @@ struct APKFullPlayerView: View {
         }
         .fullScreenCover(item: $artistDestination) { destination in
             NavigationStack {
-                APKArtistDetailScreen(seed: destination.artist)
+                APKArtistDetailScreen(seed: destination.artist, onClose: { artistDestination = nil })
                     .environmentObject(session)
             }
         }
@@ -2651,6 +2688,14 @@ struct APKFullPlayerView: View {
                 ) {
                     session.toggleFavorite(track)
                     session.loadTrackStats(track)
+                }
+                .overlay(alignment: .topTrailing) {
+                    if session.isFavoriteSyncPending(track) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(apkPink)
+                            .accessibilityLabel("Like awaiting Lane server confirmation")
+                    }
                 }
 
                 actionCount(

@@ -156,7 +156,7 @@ final class LaneSession: ObservableObject {
     @Published var favorites: Set<String> = []
     @Published var likedTracks: [TrackCandidate] = []
     private var favoriteMutationsInFlight: Set<String> = []
-    private var pendingFavoriteStates: [String: Bool] = [:]
+    @Published private var pendingFavoriteStates: [String: Bool] = [:]
     private let pendingFavoriteStatesKey = "lane.pendingFavoriteStates"
     private var pendingSavedPlaylists: [String: LanePlaylist] = [:]
     private var pendingRemovedPlaylistIDs: Set<String> = []
@@ -452,19 +452,11 @@ final class LaneSession: ObservableObject {
             }
             let candidates = tracks.map { TrackCandidate($0) }
             rememberResolvedTracks(candidates)
-            var byID: [String: TrackCandidate] = [:]
-            for track in cached {
-                if let id = track.trackID { byID[id] = track }
-            }
-            for track in candidates {
-                if let id = track.trackID { byID[id] = track }
-            }
-            let ordered = clean.compactMap { byID[$0] }
-            let withoutID = candidates.filter { $0.trackID == nil }
-            if ordered.isEmpty && withoutID.isEmpty && trackResolveMessage.isEmpty {
+            let ordered = LaneTrackBatching.ordered(candidates + cached, sourceIDs: clean)
+            if ordered.isEmpty && trackResolveMessage.isEmpty {
                 trackResolveMessage = "Lane returned no track details for \(clean.count) listed IDs. Try again."
             }
-            return applyingRefID(refID, to: ordered + withoutID)
+            return applyingRefID(refID, to: ordered)
         } catch {
             output = "Track resolve error: \(error.localizedDescription)"
             if case let LaneAPIError.http(status, _) = error {
@@ -1985,16 +1977,12 @@ final class LaneSession: ObservableObject {
                 }
             }
 
-            let byID = Dictionary(
-                loaded.compactMap { track in track.songId.map { ($0, track) } },
-                uniquingKeysWith: { first, _ in first }
-            )
-            let ordered = ids.compactMap { byID[$0] }
+            let ordered = LaneTrackBatching.ordered(loaded.map { TrackCandidate($0) }, sourceIDs: ids)
             if ordered.isEmpty {
                 playlistLoadMessages[id] = "Lane could not resolve the tracks in this playlist. Try again."
                 if cached == nil { completion([]) }
             } else {
-                let tracks = ordered.map { TrackCandidate($0, refID: id) }
+                let tracks = applyingRefID(id, to: ordered)
                 rememberPlaylistTracks(tracks, playlistID: id)
                 completion(tracks)
             }
@@ -2467,11 +2455,8 @@ final class LaneSession: ObservableObject {
         soundCloudProfileURL: String? = nil
     ) async throws -> LanePlaylist {
         await configureAPI()
-        // Match ImportViewModel.submitPlatformInput in Lane Android 1.4.7:
-        // pass the user's value to /user/import/preview exactly once. The old
-        // iOS implementation retried normalized variants and then resolved the
-        // entire Yandex list in 15-track pages, turning one APK request into
-        // dozens of sequential round-trips.
+        // Match the APK's preview endpoint and avoid repeated source-link
+        // variants. Track resolution is a separate, bounded 15-item pipeline.
         return try await LaneAPI.shared.importPreview(
             token: token,
             platform: platform,
@@ -2495,14 +2480,9 @@ final class LaneSession: ObservableObject {
     }
 
     func tracksForImportPreview(_ playlist: LanePlaylist) async throws -> [TrackCandidate] {
-        // LanePlaylistItem.getTracksIdsOnly() in the APK concatenates embedded
-        // song IDs and playlistTracksIds. ImportViewModel.loadPreviewTracks then
-        // resolves that complete list in ONE /user/tracks request and imports
-        // only the returned canonical TrackData.songId values.
-        let embeddedIDs = playlist.playlistTracks?.compactMap(\.songId) ?? []
-        let sourceIDs = embeddedIDs + (playlist.playlistTracksIds ?? [])
-        var seen = Set<String>()
-        let unique = sourceIDs.filter { !$0.isEmpty && seen.insert($0).inserted }
+        // Show the first page quickly. Resolve the remaining pages during
+        // import, not before enabling the button for a 1,151-track playlist.
+        let unique = Array(playlist.importSourceIDs.prefix(LaneTrackBatching.batchSize))
         guard !unique.isEmpty else { return [] }
 
         await configureAPI()
@@ -2510,7 +2490,7 @@ final class LaneSession: ObservableObject {
             token: token,
             ids: unique,
             prefetch: false,
-            useCurrentHostOnly: true
+            useCurrentHostOnly: false
         )
         let resolved = tracks.map { TrackCandidate($0, refID: playlist.playlistId) }
         rememberResolvedTracks(resolved)
@@ -2518,7 +2498,7 @@ final class LaneSession: ObservableObject {
     }
 
     func tracksForLocalImport(_ playlist: LanePlaylist) async -> [TrackCandidate] {
-        let ids = playlist.playlistTracksIds ?? []
+        let ids = playlist.importSourceIDs
         guard !ids.isEmpty else {
             return (playlist.playlistTracks ?? []).map {
                 TrackCandidate($0, refID: playlist.playlistId)
@@ -2559,16 +2539,9 @@ final class LaneSession: ObservableObject {
 
         let embedded = playlist.playlistTracks ?? []
         let candidates = loaded + embedded
-        let byID = Dictionary(
-            candidates.compactMap { track in track.songId.map { ($0, track) } },
-            uniquingKeysWith: { first, _ in first }
-        )
-        var seen = Set<String>()
-        let ordered = ids.compactMap { byID[$0] }.filter {
-            guard let id = $0.songId else { return false }
-            return seen.insert(id).inserted
-        }
-        return ordered.map { TrackCandidate($0, refID: playlist.playlistId) }
+        let ordered = LaneTrackBatching.ordered(candidates.map { TrackCandidate($0) }, sourceIDs: ids)
+        rememberResolvedTracks(ordered)
+        return applyingRefID(playlist.playlistId, to: ordered)
     }
 
     func yandexPlaylistTracks(from source: String) async throws -> [YandexImportTrack] {
@@ -2674,6 +2647,7 @@ final class LaneSession: ObservableObject {
     func importTracks(
         _ trackIDs: [String],
         into playlistID: String,
+        resolvingSourceIDs: Bool = false,
         progress: @escaping (_ completed: Int, _ total: Int, _ stage: String) -> Void = { _, _, _ in },
         importedBatch: @escaping ([String]) -> Void = { _ in }
     ) async throws -> Int {
@@ -2690,29 +2664,26 @@ final class LaneSession: ObservableObject {
         try Task.checkCancellation()
         progress(0, clean.count, "Adding \(clean.count) tracks to Lane…")
 
-        // Exact ImportViewModel.importTracksToPlaylist behavior from the APK:
-        // the preview has already been resolved to canonical songId values, so
-        // submit the complete list to PlaylistRepository in one mutation.
-        let result = try await LaneAPI.shared.addTracks(
+        let imported = try await LaneAPI.shared.importTrackBatches(
             token: token,
             playlistId: playlistID,
-            trackIds: clean
-        )
-        status = result.status
-        try result.requireSuccess()
-
-        applyConfirmedTrackIDs(clean, to: playlistID)
-        importedBatch(clean)
+            sourceIDs: clean,
+            resolveSourceIDs: resolvingSourceIDs
+        ) { processed, total, savedIDs, resolved in
+            self.rememberResolvedTracks(resolved.map { TrackCandidate($0, refID: playlistID) })
+            self.applyConfirmedTrackIDs(savedIDs, to: playlistID)
+            importedBatch(savedIDs)
+            progress(processed, total, "Processed \(processed)/\(total) · batches of 15")
+        }
         progress(clean.count, clean.count, "")
-        output = "Imported all \(clean.count) tracks to Lane."
+        output = "Lane confirmed \(imported) imported tracks in the playlist."
 
-        // The APK reports success from the mutation response and refreshes its
-        // state asynchronously; do not add four replica reads and a second POST
-        // to the user's wait time.
+        // Membership has been read back by the batch coordinator. Refresh the
+        // rest of Library without delaying the confirmed result.
         Task { @MainActor in
             await loadLibrary()
         }
-        return clean.count
+        return imported
     }
 
     // MARK: Social
@@ -4316,6 +4287,10 @@ final class LaneSession: ObservableObject {
         favorites.contains(favoriteKey(track))
     }
 
+    func isFavoriteSyncPending(_ track: TrackCandidate) -> Bool {
+        track.trackID.map { pendingFavoriteStates[$0] != nil } ?? false
+    }
+
     private func persistFavoriteState() {
         UserDefaults.standard.set(Array(favorites), forKey: "lane.favorites")
         if pendingFavoriteStates.isEmpty {
@@ -4424,8 +4399,8 @@ final class LaneSession: ObservableObject {
             // endpoint. Keep the optimistic state until any Lane read model
             // confirms it instead of allowing a stale empty replica to win.
             output = shouldBeLiked
-                ? "Like saved. Lane is updating your Library."
-                : "Like removed. Lane is updating your Library."
+                ? "Lane accepted the like; server confirmation is pending."
+                : "Lane accepted the removal; server confirmation is pending."
         } else {
             // Network and regional validation failures are not proof that the
             // user changed their mind. Keep the operation durable and retry it

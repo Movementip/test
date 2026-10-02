@@ -8,10 +8,35 @@ on:
       - "LaneIOSPrototype.xcodeproj/**"
       - "LaneAssets/**"
       - "Tools/LaneContractTests.swift"
+      - "LaneIOSPrototypeUITests/**"
       - ".github/workflows/build-ipa.yml"
 
 jobs:
+  simulator:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: iPhone 13 navigation and persistence regression tests
+        run: |
+          set -euo pipefail
+          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; print(next(x["identifier"] for x in reversed(json.load(sys.stdin)["runtimes"]) if x.get("isAvailable") and "iOS" in x["name"]))')
+          UDID=$(xcrun simctl create "Lane iPhone 13" com.apple.CoreSimulator.SimDeviceType.iPhone-13 "$RUNTIME")
+          mkdir -p Output
+          xcodebuild -project LaneIOSPrototype.xcodeproj -scheme LaneIOSPrototype \
+            -configuration Debug -destination "platform=iOS Simulator,id=$UDID" \
+            -derivedDataPath /tmp/lane-simulator-build \
+            -resultBundlePath Output/Lane-Simulator.xcresult \
+            -parallel-testing-enabled NO \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Lane-iPhone13-Test-Results
+          path: Output/Lane-Simulator.xcresult
+
   build:
+    needs: simulator
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4

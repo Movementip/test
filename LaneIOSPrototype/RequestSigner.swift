@@ -71,7 +71,11 @@ struct BNITLaneRequestSigner: LaneRequestSigner {
         let bootID = "UNKNOWN_BOOT"
         let apkInode = "NO_APK_INODE"
 
-        let requestBody = body ?? Data()
+        // libbnit.so cdrl encrypts non-empty bodies BEFORE calculating HMAC.
+        // Signing plaintext with the encrypted-body flag set makes the edge
+        // decrypt JSON as ciphertext and reject all POST bodies with HTTP 400.
+        let plaintext = body ?? request.httpBody ?? Data()
+        let requestBody = Self.encryptRequestBody(plaintext, nonce: nonce, timestamp: timestamp)
 
         var canonical = Data()
         Self.append(method, to: &canonical)
@@ -94,7 +98,7 @@ struct BNITLaneRequestSigner: LaneRequestSigner {
         let authenticationCode = HMAC<SHA256>.authenticationCode(for: canonical, using: key)
         let hmacHex = authenticationCode.map { String(format: "%02x", $0) }.joined()
 
-        let metadata = "\(hmacHex)|\(timestamp)|\(nonce)|\(bootID)|\(apkInode)|1"
+        let metadata = "\(hmacHex)|\(timestamp)|\(nonce)|\(bootID)|\(apkInode)|\(requestBody.isEmpty ? "0" : "1")"
         let encryptedMetadata = try Self.encryptCoreToken(Data(metadata.utf8))
         let coreToken = Self.customBase64(encryptedMetadata)
 
@@ -109,13 +113,27 @@ struct BNITLaneRequestSigner: LaneRequestSigner {
         signed.setValue(coreToken, forHTTPHeaderField: "X-Core-Token")
         signed.setValue(clientMeta, forHTTPHeaderField: "X-Client-Meta")
         signed.setValue(traceID, forHTTPHeaderField: "X-Request-Trace-Id")
+        if !requestBody.isEmpty {
+            signed.httpBody = requestBody
+            signed.setValue(nil, forHTTPHeaderField: "Content-Length")
+        }
 
         return signed
     }
 
+    /// Native cdrl/c760: same stream primitive as verifyMagic, with timestamp
+    /// appended to the key. The signature authenticates these exact wire bytes.
+    static func encryptRequestBody(_ plaintext: Data, nonce: String, timestamp: String) -> Data {
+        crypt(plaintext, suffix: nonce + timestamp)
+    }
+
     /// Mirrors BNITManager.verifyMagic used by the Android interceptor.
     static func decryptResponse(_ cipher: Data, responseNonce: String) -> Data {
-        let key = [UInt8](signingKey + Data(responseNonce.utf8))
+        crypt(cipher, suffix: responseNonce)
+    }
+
+    private static func crypt(_ cipher: Data, suffix: String) -> Data {
+        let key = [UInt8](signingKey + Data(suffix.utf8))
         guard !key.isEmpty else { return cipher }
 
         var state = Array(0...255).map(UInt8.init)

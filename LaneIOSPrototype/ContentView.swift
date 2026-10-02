@@ -4383,12 +4383,9 @@ private struct ImportTracksScreen: View {
     }
 
     private var importTrackIDs: [String] {
-        // ImportViewModel.importTracksToPlaylist in Android uses only the
-        // TrackData.songId values returned by loadPreviewTracks. Source IDs
-        // from /user/import/preview are not valid playlist mutation IDs.
-        let combined = previewTracks.compactMap(\.trackID)
-        var seen = Set<String>()
-        return combined.filter { !$0.isEmpty && seen.insert($0).inserted }
+        // These are resolver input IDs. Each 15-track batch is converted to
+        // canonical songIds immediately before the playlist write.
+        preview?.importSourceIDs ?? []
     }
 
     private var importButtonTitle: String {
@@ -4443,11 +4440,10 @@ private struct ImportTracksScreen: View {
         if targetPlaylistID.isEmpty {
             targetPlaylistID = session.serverPlaylists.first?.playlistId ?? ""
         }
-        // The APK opens the preview immediately, then resolves the complete ID
-        // list once through /user/tracks while displaying its loading state.
+        previewTracks = (value.playlistTracks ?? []).prefix(15).map { TrackCandidate($0) }
         step = .preview
         importTotal = value.effectiveTrackCount
-        importStage = importTotal > 0 ? "Loading \(importTotal) tracks…" : "Loading tracks…"
+        importStage = "Loading first 15 tracks…"
         defer {
             importStage = ""
             importTotal = 0
@@ -4539,11 +4535,7 @@ private struct ImportTracksScreen: View {
 
         Task {
             defer { localSaving = false }
-            // The APK preview has already resolved the complete list. Reuse it
-            // instead of issuing another 77 sequential requests for 1,151 IDs.
-            let tracks = previewTracks.isEmpty
-                ? await session.tracksForLocalImport(preview)
-                : previewTracks
+            let tracks = await session.tracksForLocalImport(preview)
             let saved = session.saveLocalImport(
                 name: preview.playlistName ?? "Imported playlist",
                 tracks: tracks
@@ -4583,6 +4575,7 @@ private struct ImportTracksScreen: View {
                 let imported = try await session.importTracks(
                     ids,
                     into: targetPlaylistID,
+                    resolvingSourceIDs: true,
                     progress: updateProgress
                 ) { batch in
                     importedTrackIDs.append(contentsOf: batch)

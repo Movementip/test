@@ -339,6 +339,42 @@ struct LanePlaylist: Decodable, Hashable {
             playlistTracks?.count ?? 0
         ].max() ?? 0
     }
+
+    var importSourceIDs: [String] {
+        LaneTrackBatching.unique((playlistTracks?.compactMap(\.songId) ?? []) + (playlistTracksIds ?? []))
+    }
+}
+
+enum LaneTrackBatching {
+    static let batchSize = 15
+
+    static func unique(_ ids: [String]) -> [String] {
+        var seen = Set<String>()
+        return ids.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    static func batches(_ ids: [String]) -> [[String]] {
+        let clean = unique(ids)
+        return stride(from: 0, to: clean.count, by: batchSize).map {
+            Array(clean[$0..<min($0 + batchSize, clean.count)])
+        }
+    }
+
+    /// A resolver may return canonical Lane IDs rather than the requested
+    /// provider IDs. Keep those results; filtering only by input ID erased
+    /// otherwise successfully loaded albums and import previews.
+    static func ordered(_ tracks: [TrackCandidate], sourceIDs: [String]) -> [TrackCandidate] {
+        let byID = Dictionary(tracks.compactMap { track in track.trackID.map { ($0, track) } },
+                              uniquingKeysWith: { first, _ in first })
+        let matched = unique(sourceIDs).compactMap { byID[$0] }
+        let matchedIDs = Set(matched.compactMap(\.trackID))
+        var seen = matchedIDs
+        return matched + tracks.filter { track in
+            guard let id = track.trackID else { return true }
+            return seen.insert(id).inserted
+        }
+    }
 }
 
 

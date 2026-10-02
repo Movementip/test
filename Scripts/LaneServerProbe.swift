@@ -243,6 +243,7 @@ enum LaneProbe {
         }
 
         guard !token.isEmpty, !ldi.isEmpty else {
+            print("NOT VERIFIED: authenticated playlist mutations, likes persistence, and account import. Public HTTP 401 checks cannot validate these scenarios.")
             print("Authenticated checks skipped: configure LANE_TEST_TOKEN and LANE_TEST_LDI repository secrets.")
             return
         }

@@ -1,4 +1,67 @@
 import Foundation
+import CryptoKit
+
+// Independent inverse of the APK's metadata encoder. Verify the HMAC against
+// the actual ciphertext on the wire, not against the unencrypted test payload.
+enum BNITWireFixture {
+    static let key = Data("SqperSzvbntKmv_CbnngeThis_12303!".utf8)
+
+    static func metadata(_ request: URLRequest) throws -> [String] {
+        let alphabet = Array("zxcvbnmasdfghjklqwertyuiop1234567890-_QWERTYUIOPASDFGHJKLZXCVBNM")
+        let standard = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+        let encoded = request.value(forHTTPHeaderField: "X-Core-Token") ?? ""
+        let normalized = String(encoded.map { character in
+            if character == "." { return "=" }
+            return alphabet.firstIndex(of: character).map { standard[$0] } ?? "?"
+        })
+        guard let bytes = Data(base64Encoded: normalized), bytes.count >= 4 else {
+            throw URLError(.cannotDecodeContentData)
+        }
+        let salt = Array(bytes.prefix(4))
+        let secret = Array(key)
+        var state = Array(0...255).map(UInt8.init)
+        var j = 0
+        for i in 0..<256 {
+            j = (j + Int(state[i]) + Int(secret[i & 31]) + Int(salt[i & 3])) & 255
+            state.swapAt(i, j)
+        }
+        var i = 0
+        j = 0
+        var previous: UInt8 = 0x5a
+        var plain = Data()
+        for cipher in bytes.dropFirst(4) {
+            i = (i + 1) & 255
+            let oldSi = state[i]
+            j = (j + Int(oldSi)) & 255
+            let oldSj = state[j]
+            state.swapAt(i, j)
+            let rotated = cipher &- previous
+            plain.append(((rotated >> 3) | (rotated << 5)) ^ state[((Int(oldSi) + Int(oldSj)) & 255) ^ Int(previous)])
+            previous = cipher
+        }
+        let fields = String(data: plain, encoding: .utf8)?.components(separatedBy: "|") ?? []
+        guard fields.count == 6 else { throw URLError(.cannotDecodeContentData) }
+        return fields
+    }
+
+    static func plaintext(_ request: URLRequest, wireBody: Data) throws -> Data {
+        let fields = try metadata(request)
+        let parts = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+        var query: [String: String] = [:]
+        for item in parts.queryItems ?? [] where query[item.name] == nil {
+            query[item.name] = item.value ?? ""
+        }
+        let canonicalQuery = query.keys.sorted().map { "\($0)=\(query[$0]!)" }.joined(separator: "&")
+        var canonical = Data("\(request.httpMethod!):\(parts.percentEncodedPath):\(canonicalQuery):\(fields[1]):\(fields[2]):".utf8)
+        canonical.append(wireBody)
+        canonical.append(Data(":\(fields[3]):\(fields[4])".utf8))
+        let hmac = HMAC<SHA256>.authenticationCode(for: canonical, using: SymmetricKey(data: key))
+            .map { String(format: "%02x", $0) }.joined()
+        precondition(hmac == fields[0], "Signature must authenticate the transmitted ciphertext")
+        precondition(fields[5] == (wireBody.isEmpty ? "0" : "1"))
+        return BNITLaneRequestSigner.encryptRequestBody(wireBody, nonce: fields[2], timestamp: fields[1])
+    }
+}
 
 // LaneAPI normally uses this transport for the official no-VPN fallback. The
 // contract suite stays in custom-backend mode and supplies a macOS test stub.
@@ -9,7 +72,14 @@ enum AndroidNetworkTransport {
     }
 
     static func data(for request: URLRequest, timeout: TimeInterval = 12) async throws -> Response {
-        throw URLError(.unsupportedURL)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [LaneMockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        var direct = request
+        direct.setValue("1", forHTTPHeaderField: "X-Test-Direct")
+        let (data, response) = try await session.data(for: direct)
+        return Response(data: data, response: response as! HTTPURLResponse)
     }
 }
 
@@ -18,6 +88,29 @@ final class LaneMockURLProtocol: URLProtocol {
     private static var paths = Set<String>()
     private static var didUseObjectAddFallback = false
     private static var didUsePlaylistTracksFallback = false
+    private static var playlists: [String: [String]] = [:]
+    private static var importWriteSizes: [Int] = []
+    private static var didFailMiddleBatch = false
+    private static var failedNonce: String?
+    private static var didVerifyDirectRetry = false
+
+    static func savedIDs(_ id: String) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return playlists[id] ?? []
+    }
+
+    static func batchSizes() -> [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return importWriteSizes
+    }
+
+    static func verifiedDirectRetry() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didVerifyDirectRetry
+    }
 
     static func received(_ path: String) -> Bool {
         lock.lock()
@@ -54,6 +147,14 @@ final class LaneMockURLProtocol: URLProtocol {
         Self.lock.unlock()
 
         do {
+            if url.query?.contains("transportProbe=true") == true, request.value(forHTTPHeaderField: "X-Test-Direct") == nil {
+                let nonce = try BNITWireFixture.metadata(request)[2]
+                Self.lock.lock()
+                Self.failedNonce = nonce
+                Self.lock.unlock()
+                client?.urlProtocol(self, didFailWithError: URLError(.cannotFindHost))
+                return
+            }
             let result = try response(for: request)
             let response = HTTPURLResponse(
                 url: url,
@@ -74,7 +175,20 @@ final class LaneMockURLProtocol: URLProtocol {
     private func response(for request: URLRequest) throws -> (status: Int, data: Data) {
         let path = request.url?.path ?? ""
         let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let body = try requestBody(request)
+        let wire = try requestBody(request)
+        let body = try BNITWireFixture.plaintext(request, wireBody: wire)
+
+        if query.contains(where: { $0.name == "transportProbe" }) {
+            let nonce = try BNITWireFixture.metadata(request)[2]
+            Self.lock.lock()
+            let oldNonce = Self.failedNonce
+            Self.didVerifyDirectRetry = nonce != oldNonce
+            Self.lock.unlock()
+            try require(nonce != oldNonce, "DNS retry must use a fresh nonce")
+            let json = try object(body)
+            try require(json["trackIds"] as? [String] == ["track-1"], "DNS retry must not double-encrypt JSON")
+            return (200, Data(#"{"ok":true}"#.utf8))
+        }
 
         switch path {
         case "/create-playlist":
@@ -88,6 +202,23 @@ final class LaneMockURLProtocol: URLProtocol {
         case "/user/playlist/add-tracks":
             try require(request.httpMethod == "POST", "add-tracks must be POST")
             let playlistID = query.first(where: { $0.name == "playlistId" })?.value
+            if let playlistID, playlistID.hasPrefix("import-") || playlistID == "lane_likes" {
+                guard let ids = try JSONSerialization.jsonObject(with: body) as? [String] else {
+                    return (400, Data(#"{"code":"INVALID_PLAYLIST_TRACKS_BODY"}"#.utf8))
+                }
+                try require(!ids.isEmpty && ids.count <= 15, "Every import write must contain at most 15 canonical IDs")
+                Self.lock.lock()
+                defer { Self.lock.unlock() }
+                Self.importWriteSizes.append(ids.count)
+                if playlistID == "import-resume", !Self.didFailMiddleBatch, !(Self.playlists[playlistID] ?? []).isEmpty {
+                    Self.didFailMiddleBatch = true
+                    return (503, Data(#"{"code":"TEMPORARY_FAILURE"}"#.utf8))
+                }
+                var saved = Self.playlists[playlistID] ?? []
+                for id in ids where !saved.contains(id) { saved.append(id) }
+                Self.playlists[playlistID] = saved
+                return (200, Data(#"{"ok":true}"#.utf8))
+            }
             if playlistID == "playlist-fallback" {
                 if let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
                    json["trackIds"] as? [String] == ["track-3"] {
@@ -123,6 +254,12 @@ final class LaneMockURLProtocol: URLProtocol {
         case "/user/tracks":
             try require(request.httpMethod == "POST", "user/tracks must be POST")
             if let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+               let ids = json["trackIds"] as? [String], ids.first?.hasPrefix("source-") == true {
+                try require(ids.count <= 15, "Every resolver request must contain at most 15 source IDs")
+                let tracks = ids.map { ["songId": $0.replacingOccurrences(of: "source-", with: "lane-"), "title": $0] }
+                return (200, try JSONSerialization.data(withJSONObject: tracks))
+            }
+            if let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
                json["trackIds"] as? [String] == ["track-1", "track-2"] {
                 return (200, Data(#"[{"songId":"track-1","platform":"spotify","title":"One","artistsDisplayedName":"Lane","spData":{"artists":["artist-1"],"album":"album-1"}},{"songId":"track-2","title":"Two","artistsDisplayedName":"Lane"}]"#.utf8))
             }
@@ -145,6 +282,10 @@ final class LaneMockURLProtocol: URLProtocol {
             return (200, Data(#"{"playlistId":"preview","playlistName":"Yandex","playlistTracksIds":["track-1","track-2"],"tracksCount":2}"#.utf8))
 
         default:
+            if path.hasPrefix("/playlist/import-") || path == "/playlist/lane_likes" {
+                let id = String(path.dropFirst("/playlist/".count))
+                return (200, try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": Self.savedIDs(id)]))
+            }
             throw NSError(domain: "LaneContractTests", code: 404, userInfo: [
                 NSLocalizedDescriptionKey: "Unexpected request: \(path)"
             ])
@@ -189,6 +330,14 @@ final class LaneMockURLProtocol: URLProtocol {
 @main
 struct LaneContractTestRunner {
     static func main() async throws {
+        let vector = BNITLaneRequestSigner.encryptRequestBody(
+            Data(#"["track-1","track-2"]"#.utf8),
+            nonce: "00112233445566778899aabbccddeeff",
+            timestamp: "1700000000123"
+        ).map { String(format: "%02x", $0) }.joined()
+        // Generated by executing c760 from lane1.4.7.apk libbnit.so, not by
+        // regenerating the expected value with the Swift implementation.
+        precondition(vector == "e0293b6251d538f958b18069875fb3b8f679184afe")
         let stalePlaylistSummary = try JSONDecoder().decode(
             LanePlaylist.self,
             from: Data(#"{"playlistId":"library-playlist","playlistTracksIds":["track-1","track-2"],"tracksCount":0}"#.utf8)
@@ -221,7 +370,7 @@ struct LaneContractTestRunner {
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
 
-        let api = LaneAPI(urlSession: session)
+        let api = LaneAPI(urlSession: session, requestSigner: BNITLaneRequestSigner())
         await api.setBase("https://lane.test")
         await api.setSigningConfiguration(
             LaneSigningConfiguration(mode: .custom, apiKeyHeader: "", apiKey: "")
@@ -300,6 +449,41 @@ struct LaneContractTestRunner {
         )
         precondition(preview.playlistTracksIds == ["track-1", "track-2"])
 
+        UserDefaults.standard.set("raw", forKey: "lane.diag.addBody")
+        let sourceIDs = (0..<1151).map { "source-\($0)" }
+        let imported = try await api.importTrackBatches(token: "test-token", playlistId: "import-large", sourceIDs: sourceIDs)
+        precondition(imported == 1151)
+        precondition(LaneMockURLProtocol.savedIDs("import-large").count == 1151)
+        precondition(Array(LaneMockURLProtocol.batchSizes().suffix(77)) == Array(repeating: 15, count: 76) + [11])
+
+        // Stop at the failed middle batch; a new client can continue without
+        // losing the first 15 or sending duplicate playlist writes.
+        do {
+            _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-resume", sourceIDs: Array(sourceIDs.prefix(31)))
+            preconditionFailure("A rejected batch must not report success")
+        } catch {
+            precondition(LaneMockURLProtocol.savedIDs("import-resume").count == 15)
+        }
+        let fresh = LaneAPI(urlSession: session, requestSigner: BNITLaneRequestSigner())
+        await fresh.setBase("https://lane.test")
+        await fresh.setSigningConfiguration(LaneSigningConfiguration(mode: .custom, apiKeyHeader: "", apiKey: ""))
+        let resumed = try await fresh.importTrackBatches(token: "test-token", playlistId: "import-resume", sourceIDs: Array(sourceIDs.prefix(31)))
+        precondition(resumed == 31)
+        precondition(LaneMockURLProtocol.savedIDs("import-resume").count == 31)
+
+        let like = try await api.addTracks(token: "test-token", playlistId: "lane_likes", trackIds: ["track-1"])
+        try like.requireSuccess()
+        let serverLikesAfterNewClient = try await fresh.playlist(token: "test-token", playlistId: "lane_likes")
+        precondition(serverLikesAfterNewClient.playlistTracksIds == ["track-1"])
+        let canonical = try await api.tracksByIds(token: "test-token", ids: ["source-1", "source-2"])
+        precondition(LaneTrackBatching.ordered(canonical.map { TrackCandidate($0) }, sourceIDs: ["source-1", "source-2"]).count == 2)
+
+        UserDefaults.standard.set("auto", forKey: "lane.diag.transport")
+        defer { UserDefaults.standard.removeObject(forKey: "lane.diag.transport") }
+        let retried = try await api.request(path: "/user/tracks", method: "POST", query: [.init(name: "transportProbe", value: "true")], json: ["trackIds": ["track-1"]], candidateBases: [URL(string: "https://lane.test")!])
+        precondition(retried.status == 200)
+        precondition(LaneMockURLProtocol.verifiedDirectRetry())
+
         let expectedPaths = [
             "/create-playlist",
             "/user/playlist/add-tracks",
@@ -309,6 +493,6 @@ struct LaneContractTestRunner {
             "/user/import/preview"
         ]
         precondition(expectedPaths.allSatisfy(LaneMockURLProtocol.received))
-        print("Lane contract tests passed (\(expectedPaths.count + 3) mocked API scenarios).")
+        print("Lane contract tests passed: APK-native cipher vector, encrypted/signed bodies, 1151-track 15-item batches, interrupted import resume, canonical album IDs, and fresh-client server likes.")
     }
 }
