@@ -108,6 +108,7 @@ final class LaneNavigationTests: XCTestCase {
         submit.tap()
         XCTAssertTrue(app.staticTexts["memorial.confirmed"].waitForExistence(timeout: 10))
         XCTAssertEqual(app.staticTexts["memorial.count"].label, "3 candles")
+        XCTAssertTrue(app.images["memorial.candle.candle-own"].exists, "Original candle must render, not a blank spacer")
         screenshot("iPhone13-memorial-confirmed-candle")
         let author = app.buttons["memorial.author.candle-own"]
         scrollTo(author); author.tap()

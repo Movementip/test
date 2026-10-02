@@ -106,7 +106,7 @@ struct APKLaneHeaderTitle: View {
 }
 
 
-private struct APKBundleImage: View {
+struct APKBundleImage: View {
     let name: String
     var contentMode: ContentMode = .fit
 
@@ -1599,7 +1599,7 @@ struct APKArtistDetailScreen: View {
                     if value.custom?.ripInfo != nil {
                         NavigationLink { LaneMemorialScreen(artist: value) } label: {
                             HStack(spacing: 12) {
-                                Image("candle").resizable().scaledToFit().frame(width: 28, height: 36)
+                                APKBundleImage(name: "candle").frame(width: 28, height: 36)
                                 Text("Leave a candle").font(.headline)
                                 Spacer(); Image(systemName: "chevron.right")
                             }.padding(12).background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))

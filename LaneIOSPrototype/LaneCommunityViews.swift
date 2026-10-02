@@ -235,7 +235,7 @@ struct LaneMemorialScreen: View {
                             .accessibilityIdentifier("memorial.confirmed")
                         candle(ownCandle)
                     } else if composing {
-                        Image("candle").resizable().scaledToFit().frame(height: 120)
+                        APKBundleImage(name: "candle").frame(height: 120)
                         TextField("Leave a message", text: $message, axis: .vertical)
                             .lineLimit(3...6).padding(16)
                             .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
@@ -321,7 +321,8 @@ struct LaneMemorialScreen: View {
 
     private func candle(_ value: LaneArtistCandle) -> some View {
         VStack(spacing: 14) {
-            Image("candle").resizable().scaledToFit().frame(height: 100)
+            APKBundleImage(name: "candle").frame(height: 100)
+                .accessibilityLabel("Candle").accessibilityIdentifier("memorial.candle.\(value.id)")
             Text(value.text).multilineTextAlignment(.center).font(.title3)
             if let user = value.author, let id = user.laneId, !id.isEmpty {
                 NavigationLink { LaneUserProfileScreen(laneID: id) } label: {
