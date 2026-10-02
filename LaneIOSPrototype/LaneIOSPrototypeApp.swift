@@ -795,11 +795,14 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 data = Data((statusCode == 200 ? #"{"ok":true}"# : #"{"message":"Retry profile"}"#).utf8)
             } else if path == "/user-info" {
                 let id = query.first { $0.name == "laneId" }?.value ?? "friend"
+                let equipped: Any
+                if id == "fixture-user" { equipped = Self.equippedBadgeID as Any? ?? NSNull() }
+                else { equipped = "legend" }
                 data = try JSONSerialization.data(withJSONObject: ["laneId": id, "displayedName": id == "friend" ? "Friend profile" : "Second friend", "userName": id,
                     "headerUrl": "https://lane-ui.test/panorama", "followersCount": Self.followingFriend ? 6 : 5, "followingCount": 2,
                     "isFollowing": id == "friend" && Self.followingFriend,
                     "privacySettings": ["showPlaylists": id != "second", "showFollowers": id != "second", "showFollowing": id != "second"],
-                    "equippedBadgeId": (id == "fixture-user" ? Self.equippedBadgeID : "legend").map { $0 as Any } ?? NSNull(),
+                    "equippedBadgeId": equipped,
                     "badges": ProcessInfo.processInfo.arguments.contains("--lane-community-fixture") ? [["definition": Self.badgeDefinition, "earnedAt": Int64(1700000000000)]] : [],
                     "publicPlaylists": [["playlistId": "fixture-playlist", "playlistName": "Fixture playlist", "playlistTracksIds": ["lane-1", "lane-2"]]]])
             } else if path == "/user/badge/equip" {
