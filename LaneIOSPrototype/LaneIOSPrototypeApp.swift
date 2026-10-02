@@ -70,6 +70,7 @@ private struct LaneUITestRoot: View {
                 NavigationLink("Recommended album") { APKAlbumDetailScreen(seed: LaneUITestFixtures.album) }
                 NavigationLink("Privacy settings") { PrivacySettingsScreen() }
                 NavigationLink("Notification center") { NotificationsScreen() }
+                NavigationLink("Public profile") { LaneUserProfileScreen(laneID: "friend") }
                 Button("Open player") { showPlayer = true }
                 Button("Run session checks") { Task { await checkSession() } }
                 Button("Run playback checks") { Task { await checkPlayback() } }
@@ -320,6 +321,8 @@ private final class LaneUITestURLProtocol: URLProtocol {
     private static var profileName = "Lane fixture"
     private static var profileFailedOnce = false
     private static var effectFailedOnce = false
+    private static var followingFriend = false
+    private static var followFailedOnce = false
 
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "lane-ui.test" }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -403,6 +406,23 @@ private final class LaneUITestURLProtocol: URLProtocol {
                     Self.profileName = value?["name"] as? String ?? ""
                 }
                 data = Data((statusCode == 200 ? #"{"ok":true}"# : #"{"message":"Retry profile"}"#).utf8)
+            } else if path == "/user-info" {
+                let id = query.first { $0.name == "laneId" }?.value ?? "friend"
+                data = try JSONSerialization.data(withJSONObject: ["laneId": id, "displayedName": id == "friend" ? "Friend profile" : "Second friend", "userName": id,
+                    "headerUrl": "https://lane-ui.test/panorama", "followersCount": Self.followingFriend ? 6 : 5, "followingCount": 2,
+                    "isFollowing": id == "friend" && Self.followingFriend,
+                    "privacySettings": ["showPlaylists": id != "second", "showFollowers": id != "second", "showFollowing": id != "second"],
+                    "publicPlaylists": [["playlistId": "fixture-playlist", "playlistName": "Fixture playlist", "playlistTracksIds": ["lane-1", "lane-2"]]]])
+            } else if path == "/user/follow/friend" {
+                if !Self.followFailedOnce { Self.followFailedOnce = true; statusCode = 503 }
+                else { Self.followingFriend = true }
+                data = Data((statusCode == 200 ? #"{"ok":true}"# : #"{"message":"Retry follow"}"#).utf8)
+            } else if path == "/user/unfollow/friend" {
+                Self.followingFriend = false; data = Data(#"{"ok":true}"#.utf8)
+            } else if path == "/user/followers" || path == "/user/following" {
+                let page = Int(query.first { $0.name == "page" }?.value ?? "0") ?? 0
+                let users: [[String: Any]] = [["laneId": page == 0 ? "friend" : "second", "displayedName": page == 0 ? "Friend profile" : "Second friend", "userName": page == 0 ? "friend" : "second"]]
+                data = try JSONSerialization.data(withJSONObject: ["items": users, "page": page, "pageSize": 30, "totalPages": 2])
             } else if path == "/user/settings/privacy" {
                 Self.privacy = try JSONDecoder().decode(LanePrivacySettings.self, from: readBody())
                 data = Data(#"{"ok":true}"#.utf8)

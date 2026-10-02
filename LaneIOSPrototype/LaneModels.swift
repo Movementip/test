@@ -531,6 +531,7 @@ struct UserInfoDTO: Decodable, Hashable {
     let isFollowing: Bool?
     let equippedBadgeId: String?
     let statusText: String?
+    let privacySettings: LanePrivacySettings?
 }
 
 struct PaginatedResult<T: Decodable>: Decodable {

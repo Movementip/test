@@ -90,7 +90,11 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
         XCTAssertTrue(waitEnabled(toggle))
         XCTAssertEqual(toggle.value as? String, "1")
-        toggle.tap()
+        // SwiftUI Form exposes the entire 358-point row as a Switch. A tap at
+        // its center hits the label, not UISwitch's control at the trailing edge.
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.5)).tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "0"), object: toggle)], timeout: 5), .completed,
+                       "The actual control must turn off before submitting the request")
         app.buttons["privacy.save"].tap()
         XCTAssertTrue(app.staticTexts["Privacy settings saved to Lane"].waitForExistence(timeout: 10))
         app.navigationBars.buttons.firstMatch.tap()
@@ -145,6 +149,35 @@ final class LaneNavigationTests: XCTestCase {
         screenshot("iPhone13-effects-original-speedup-slowed")
         app.buttons["Done"].tap()
         XCTAssertTrue(app.buttons["player.artist"].waitForExistence(timeout: 5))
+    }
+
+    func testUserProfileFollowRetryAndPaginatedFollowersCanNavigateBack() {
+        app.buttons["Public profile"].tap()
+        XCTAssertTrue(app.staticTexts["Friend profile"].waitForExistence(timeout: 10))
+        let follow = app.buttons["user.follow"]
+        XCTAssertTrue(follow.waitForExistence(timeout: 10))
+        XCTAssertEqual(follow.label, "Follow")
+        follow.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "503")).firstMatch.waitForExistence(timeout: 10))
+        XCTAssertEqual(follow.label, "Follow", "A rejected follow must not look saved")
+        follow.tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Following"), object: follow)], timeout: 10), .completed)
+        app.buttons["user.followers"].tap()
+        XCTAssertTrue(app.buttons["people.friend"].waitForExistence(timeout: 10))
+        app.buttons["Load more"].tap()
+        XCTAssertTrue(app.buttons["people.second"].waitForExistence(timeout: 10))
+        app.buttons["people.second"].tap()
+        XCTAssertTrue(app.staticTexts["Second friend"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["user.followers"].exists, "A private follower list must not be exposed")
+        XCTAssertFalse(app.buttons["user.following"].exists, "A private following list must not be exposed")
+        XCTAssertFalse(app.staticTexts["Public playlists"].exists, "Hidden playlists must not be rendered")
+        screenshot("iPhone13-user-profile-paginated-followers")
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(app.buttons["people.second"].waitForExistence(timeout: 5))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(app.buttons["user.follow"].waitForExistence(timeout: 5))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(app.buttons["Public profile"].waitForExistence(timeout: 5))
     }
 
     func testRealLibraryCountsTabReselectionAndBottomSafeArea() {

@@ -2909,19 +2909,19 @@ private struct ProfileScreen: View {
                 } else {
                     VStack(spacing: 18) {
                         HStack(spacing: 8) {
-                            profileStat(
-                                value: session.publicProfile?.followersCount ?? 0,
-                                title: "Followers"
-                            )
+                            NavigationLink {
+                                LanePeopleListScreen(laneID: session.account?.laneId ?? session.publicProfile?.laneId ?? "", following: false)
+                            } label: { profileStat(value: session.publicProfile?.followersCount ?? 0, title: "Followers") }
+                            .buttonStyle(.plain)
 
                             Rectangle()
                                 .fill(Color.white.opacity(0.12))
                                 .frame(width: 1, height: 28)
 
-                            profileStat(
-                                value: session.publicProfile?.followingCount ?? 0,
-                                title: "Following"
-                            )
+                            NavigationLink {
+                                LanePeopleListScreen(laneID: session.account?.laneId ?? session.publicProfile?.laneId ?? "", following: true)
+                            } label: { profileStat(value: session.publicProfile?.followingCount ?? 0, title: "Following") }
+                            .buttonStyle(.plain)
                         }
                         .padding(.top, 8)
 
@@ -3588,6 +3588,8 @@ private struct FriendsScreen: View {
             }
         }
         .navigationTitle("Friends")
+        .toolbar(.visible, for: .navigationBar)
+        .laneIOSBackSwipe()
         .onAppear {
             session.refreshFriends()
         }
@@ -3597,29 +3599,199 @@ private struct FriendsScreen: View {
 private struct UserRow: View {
     @EnvironmentObject private var session: LaneSession
     let user: UserInfoDTO
+    @State private var saving = false
+    @State private var error: String?
+    @State private var confirmedUser: UserInfoDTO?
+
+    private var displayedUser: UserInfoDTO { confirmedUser ?? user }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                if let id = user.laneId, !id.isEmpty {
+                    NavigationLink { LaneUserProfileScreen(laneID: id) } label: { identity }
+                        .buttonStyle(.plain)
+                } else { identity }
+                if let laneId = user.laneId, laneId != session.account?.laneId {
+                    Button(saving ? "Saving…" : (displayedUser.isFollowing == true ? "Following" : "Follow")) {
+                        saving = true; error = nil
+                        Task {
+                            defer { saving = false }
+                            do { confirmedUser = try await session.setFollowingConfirmed(displayedUser, follow: displayedUser.isFollowing != true) }
+                            catch { self.error = error.localizedDescription }
+                        }
+                    }
+                    .buttonStyle(.bordered).controlSize(.small).disabled(saving || session.isGuest).id(laneId)
+                }
+            }
+            if let error { Text(error).font(.caption).foregroundStyle(lanePink) }
+        }
+    }
+
+    private var identity: some View {
         HStack(spacing: 12) {
             AvatarView(url: user.avatarUrl, size: 46)
             VStack(alignment: .leading) {
-                Text(user.displayedName ?? user.userName ?? "Lane user")
-                    .font(.subheadline.weight(.semibold))
+                Text(user.displayedName ?? user.userName ?? "Lane user").font(.subheadline.weight(.semibold))
                 if let username = user.userName, !username.isEmpty {
-                    Text("@\(username)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text("@\(username)").font(.caption).foregroundStyle(.secondary)
                 }
             }
             Spacer()
-            if let laneId = user.laneId {
-                Button(user.isFollowing == true ? "Following" : "Follow") {
-                    session.setFollowing(user, follow: user.isFollowing != true)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .id(laneId)
-            }
         }
+    }
+}
+
+struct LaneUserProfileScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    let laneID: String
+    @State private var user: UserInfoDTO?
+    @State private var loading = false
+    @State private var saving = false
+    @State private var error: String?
+    @State private var showPlayer = false
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                if let user {
+                    GeometryReader { geometry in
+                        ArtworkView(url: user.headerUrl, size: geometry.size.width, radius: 0)
+                            .frame(width: geometry.size.width, height: 170).clipped()
+                    }.frame(height: 170)
+                    AvatarView(url: user.avatarUrl, size: 90).padding(.top, -58)
+                    VStack(spacing: 6) {
+                        Text(user.displayedName ?? user.userName ?? "Lane user").font(.title2.bold())
+                            .accessibilityIdentifier("user.name")
+                        if let name = user.userName, !name.isEmpty { Text("@\(name)").foregroundStyle(.secondary) }
+                        if let status = user.statusText, !status.isEmpty { Text(status).font(.callout).multilineTextAlignment(.center) }
+                    }.padding(.horizontal, 20)
+                    HStack(spacing: 40) {
+                        if (laneID == session.account?.laneId || user.privacySettings?.showFollowers != false), let count = user.followersCount {
+                            NavigationLink { LanePeopleListScreen(laneID: laneID, following: false) } label: {
+                                VStack { Text("\(count)").font(.headline); Text("Followers").font(.caption).foregroundStyle(.secondary) }
+                            }.accessibilityIdentifier("user.followers")
+                        }
+                        if (laneID == session.account?.laneId || user.privacySettings?.showFollowing != false), let count = user.followingCount {
+                            NavigationLink { LanePeopleListScreen(laneID: laneID, following: true) } label: {
+                                VStack { Text("\(count)").font(.headline); Text("Following").font(.caption).foregroundStyle(.secondary) }
+                            }.accessibilityIdentifier("user.following")
+                        }
+                    }.buttonStyle(.plain)
+                    if !session.isGuest, laneID != session.account?.laneId {
+                        Button {
+                            saving = true; error = nil
+                            Task {
+                                defer { saving = false }
+                                do { self.user = try await session.setFollowingConfirmed(user, follow: user.isFollowing != true) }
+                                catch { self.error = error.localizedDescription }
+                            }
+                        } label: {
+                            Text(saving ? "Saving…" : (user.isFollowing == true ? "Following" : "Follow"))
+                                .font(.headline).foregroundStyle(.black).frame(maxWidth: .infinity).padding(15)
+                                .background(lanePink, in: Capsule())
+                        }.buttonStyle(.plain).disabled(saving).padding(.horizontal, 24)
+                            .accessibilityIdentifier("user.follow")
+                    }
+                    if let status = user.statusTrack {
+                        Button {
+                            let track = TrackCandidate(status)
+                            session.queue = [track]; session.currentIndex = 0
+                            session.requestStream(for: track); showPlayer = true
+                        } label: {
+                            HStack(spacing: 12) {
+                                ArtworkView(url: status.coverUrl, size: 50, radius: 8)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(status.title ?? "Status track").font(.headline)
+                                    Text(status.artistsDisplayedName ?? "").font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer(); Image(systemName: "play.fill")
+                            }.padding(12).background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
+                        }.buttonStyle(.plain).padding(.horizontal, 16)
+                    }
+                    if (laneID == session.account?.laneId || user.privacySettings?.showPlaylists != false), let playlists = user.publicPlaylists, !playlists.isEmpty {
+                        Text("Public playlists").font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16)
+                        ForEach(Array(playlists.enumerated()), id: \.offset) { _, playlist in
+                            NavigationLink { PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer) } label: { PlaylistRow(playlist: playlist) }
+                                .buttonStyle(.plain)
+                        }
+                    }
+                }
+                if loading { ProgressView("Loading profile…") }
+                if let error {
+                    Text(error).font(.callout).foregroundStyle(lanePink).padding(.horizontal, 20)
+                    Button("Try again") { Task { await load() } }.disabled(loading || saving)
+                }
+            }.padding(.bottom, 24)
+        }
+        .background(laneBackground)
+        .navigationTitle("Profile").navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .tint(.white)
+        .laneIOSBackSwipe()
+        .task(id: laneID) { await load() }
+        .refreshable { await load() }
+        .fullScreenCover(isPresented: $showPlayer) { APKFullPlayerView().environmentObject(session) }
+    }
+
+    private func load() async {
+        guard !loading else { return }
+        loading = true; error = nil
+        defer { loading = false }
+        do { user = try await session.fetchUserProfile(laneID) }
+        catch { self.error = error.localizedDescription }
+    }
+}
+
+struct LanePeopleListScreen: View {
+    @EnvironmentObject private var session: LaneSession
+    let laneID: String
+    let following: Bool
+    @State private var users: [UserInfoDTO] = []
+    @State private var page = 0
+    @State private var hasMore = false
+    @State private var loading = false
+    @State private var error: String?
+
+    var body: some View {
+        List {
+            ForEach(Array(users.enumerated()), id: \.offset) { _, user in
+                if let id = user.laneId {
+                    NavigationLink { LaneUserProfileScreen(laneID: id) } label: {
+                        HStack(spacing: 12) {
+                            AvatarView(url: user.avatarUrl, size: 46)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(user.displayedName ?? user.userName ?? "Lane user").font(.headline)
+                                if let name = user.userName { Text("@\(name)").font(.caption).foregroundStyle(.secondary) }
+                            }
+                        }
+                    }.accessibilityIdentifier("people.\(id)")
+                }
+            }
+            if loading { ProgressView() }
+            if !loading && users.isEmpty && error == nil { Text(following ? "Not following anyone yet" : "No followers yet").foregroundStyle(.secondary) }
+            if hasMore { Button("Load more") { Task { await load(reset: false) } }.disabled(loading) }
+            if let error { Text(error).foregroundStyle(lanePink); Button("Try again") { Task { await load(reset: users.isEmpty) } }.disabled(loading) }
+        }
+        .listStyle(.plain).scrollContentBackground(.hidden).background(laneBackground)
+        .navigationTitle(following ? "Following" : "Followers").navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar).tint(.white).laneIOSBackSwipe()
+        .task { await load(reset: true) }.refreshable { await load(reset: true) }
+    }
+
+    private func load(reset: Bool) async {
+        guard !loading, !laneID.isEmpty else { return }
+        loading = true; error = nil
+        defer { loading = false }
+        do {
+            let next = reset ? 0 : page
+            let result = try await session.fetchPeople(laneID, following: following, page: next)
+            let all = (reset ? [] : users) + result.items
+            var seen = Set<String>()
+            users = all.filter { $0.laneId.map { seen.insert($0).inserted } ?? false }
+            page = next + 1
+            hasMore = result.totalPages.map { page < $0 } ?? (result.items.count == 30)
+        } catch { self.error = error.localizedDescription }
     }
 }
 
@@ -3683,6 +3855,7 @@ struct NotificationsScreen: View {
     @State private var commentTrack: TrackCandidate?
     @State private var selectedArtist: LaneArtist?
     @State private var selectedPlaylist: LanePlaylist?
+    @State private var selectedUserID: String?
     @State private var showPlayer = false
 
     private var filtered: [LaneNotification] {
@@ -3771,6 +3944,9 @@ struct NotificationsScreen: View {
         .navigationDestination(isPresented: Binding(get: { selectedPlaylist != nil }, set: { if !$0 { selectedPlaylist = nil } })) {
             if let playlist = selectedPlaylist { PlaylistDetailScreen(playlist: playlist, showPlayer: $showPlayer) }
         }
+        .navigationDestination(isPresented: Binding(get: { selectedUserID != nil }, set: { if !$0 { selectedUserID = nil } })) {
+            if let id = selectedUserID { LaneUserProfileScreen(laneID: id) }
+        }
         .fullScreenCover(isPresented: $showPlayer) { APKFullPlayerView().environmentObject(session) }
     }
 
@@ -3802,6 +3978,8 @@ struct NotificationsScreen: View {
                 selectedPlaylist = LanePlaylist(playlistId: id, playlistImageUrl: item.playlistCoverUrl, playlistName: item.playlistName)
             } else if let artist = item.artistInfo, let id = artist.id {
                 selectedArtist = LaneArtist(name: artist.name, id: id, avatarUrl: artist.avatarUrl)
+            } else if let id = item.actorInfo?.laneId {
+                selectedUserID = id
             }
         }
     }

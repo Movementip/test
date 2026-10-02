@@ -93,6 +93,7 @@ final class LaneMockURLProtocol: URLProtocol {
     private static var didFailMiddleBatch = false
     private static var failedNonce: String?
     private static var didVerifyDirectRetry = false
+    private static var followingFriend = false
 
     static func savedIDs(_ id: String) -> [String] {
         lock.lock()
@@ -287,6 +288,21 @@ final class LaneMockURLProtocol: URLProtocol {
         case "/playlist/playlist-created/tracks":
             try require(query.first(where: { $0.name == "page" })?.value == "1", "playlist page must be 1-based")
             return (200, Data(#"{"items":[{"songId":"track-1","title":"One","artistsDisplayedName":"Lane"}],"totalItems":1,"page":1,"pageSize":50,"totalPages":1}"#.utf8))
+
+        case "/user/follow/friend", "/user/unfollow/friend":
+            try require(request.httpMethod == (path.contains("/unfollow/") ? "DELETE" : "POST") && body.isEmpty, "APK follow/unfollow must not change method or body")
+            Self.lock.lock(); Self.followingFriend = path.contains("/follow/"); Self.lock.unlock()
+            return (200, Data(#"{"ok":true}"#.utf8))
+
+        case "/user-info":
+            try require(query.first { $0.name == "laneId" }?.value == "friend", "Profile must use laneId")
+            Self.lock.lock(); let followed = Self.followingFriend; Self.lock.unlock()
+            return (200, try JSONSerialization.data(withJSONObject: ["laneId": "friend", "displayedName": "Friend", "isFollowing": followed]))
+
+        case "/user/followers", "/user/following":
+            try require(query.first { $0.name == "laneId" }?.value == "friend", "People list must use laneId")
+            try require(query.first { $0.name == "page" }?.value == "0" && query.first { $0.name == "pageSize" }?.value == "30", "People pagination is zero-based")
+            return (200, Data(#"{"items":[{"laneId":"friend","displayedName":"Friend"}],"page":0,"pageSize":30,"totalPages":1}"#.utf8))
 
         case "/track/effect":
             try require(request.httpMethod == "GET" && body.isEmpty, "Effects use GET, not a speed-adjusted local player")
@@ -509,6 +525,15 @@ struct LaneContractTestRunner {
             let audio = try await api.trackEffect(token: "test-token", trackId: "track-1", effect: effect)
             precondition(audio.trackId == "track-1" && audio.url == "https://lane.test/effect.m4a")
         }
+        try await api.follow(token: "test-token", userId: "friend").requireSuccess()
+        let followed = try await api.userInfo(token: "test-token", laneId: "friend")
+        precondition(followed.isFollowing == true)
+        try await api.unfollow(token: "test-token", userId: "friend").requireSuccess()
+        let unfollowed = try await api.userInfo(token: "test-token", laneId: "friend")
+        precondition(unfollowed.isFollowing == false)
+        let followers = try await api.followers(token: "test-token", laneId: "friend", page: 0, pageSize: 30)
+        let following = try await api.following(token: "test-token", laneId: "friend", page: 0, pageSize: 30)
+        precondition(followers.items.first?.laneId == "friend" && following.items.first?.laneId == "friend")
 
         let privacyDefaults = try JSONDecoder().decode(LanePrivacySettings.self, from: Data("{}".utf8))
         precondition(privacyDefaults == LanePrivacySettings())

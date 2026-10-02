@@ -2760,21 +2760,51 @@ final class LaneSession: ObservableObject {
     }
 
     func setFollowing(_ user: UserInfoDTO, follow: Bool) {
-        guard let id = user.laneId else { return }
-
         Task {
             do {
-                await configureAPI()
-                if follow {
-                    _ = try await LaneAPI.shared.follow(token: token, userId: id)
-                } else {
-                    _ = try await LaneAPI.shared.unfollow(token: token, userId: id)
-                }
+                _ = try await setFollowingConfirmed(user, follow: follow)
                 await loadFriends()
             } catch {
                 output = error.localizedDescription
             }
         }
+    }
+
+    func fetchUserProfile(_ id: String) async throws -> UserInfoDTO {
+        await configureAPI()
+        let requestToken = token
+        let value = try await LaneAPI.shared.userInfo(token: requestToken, laneId: id)
+        guard token == requestToken else { throw CancellationError() }
+        return value
+    }
+
+    func setFollowingConfirmed(_ user: UserInfoDTO, follow: Bool) async throws -> UserInfoDTO {
+        guard !isGuest, let id = user.laneId, !id.isEmpty else { throw LaneAPIError.decoding("Sign in to follow this user.") }
+        await configureAPI()
+        let requestToken = token
+        let result = follow ? try await LaneAPI.shared.follow(token: requestToken, userId: id)
+                            : try await LaneAPI.shared.unfollow(token: requestToken, userId: id)
+        try result.requireSuccess()
+        for attempt in 0..<4 {
+            let confirmed = try await LaneAPI.shared.userInfo(token: requestToken, laneId: id)
+            guard token == requestToken else { throw CancellationError() }
+            if confirmed.isFollowing == follow {
+                friends = friends.map { $0.laneId == id ? confirmed : $0 }
+                userSearchResults = userSearchResults.map { $0.laneId == id ? confirmed : $0 }
+                return confirmed
+            }
+            if attempt < 3 { try await Task.sleep(nanoseconds: 350_000_000) }
+        }
+        throw LaneAPIError.decoding("Lane has not confirmed the subscription yet. Please refresh.")
+    }
+
+    func fetchPeople(_ id: String, following: Bool, page: Int) async throws -> PaginatedResult<UserInfoDTO> {
+        await configureAPI()
+        let requestToken = token
+        let result = following ? try await LaneAPI.shared.following(token: requestToken, laneId: id, page: page, pageSize: 30)
+                               : try await LaneAPI.shared.followers(token: requestToken, laneId: id, page: page, pageSize: 30)
+        guard token == requestToken else { throw CancellationError() }
+        return result
     }
 
     func refreshNotifications() {
