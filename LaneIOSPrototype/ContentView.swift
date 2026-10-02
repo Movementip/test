@@ -4235,7 +4235,7 @@ private struct ImportTracksScreen: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(playlist.playlistName ?? "Import preview")
                         .font(.headline)
-                    Text("\(importSourceCount) tracks in Lane preview")
+                    Text("\(previewDisplayCount) tracks in Lane preview")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -4383,13 +4383,10 @@ private struct ImportTracksScreen: View {
     }
 
     private var importTrackIDs: [String] {
-        // LanePlaylistItem.getTracksIdsOnly() in Android concatenates resolved
-        // TrackData.songId values with playlistTracksIds. Keep the same order;
-        // preferring playlistTracksIds used to discard the canonical IDs that
-        // the import endpoint can actually accept.
-        let embedded = preview?.playlistTracks?.compactMap(\.songId) ?? []
-        let unresolved = preview?.playlistTracksIds ?? []
-        let combined = embedded + unresolved
+        // ImportViewModel.importTracksToPlaylist in Android uses only the
+        // TrackData.songId values returned by loadPreviewTracks. Source IDs
+        // from /user/import/preview are not valid playlist mutation IDs.
+        let combined = previewTracks.compactMap(\.trackID)
         var seen = Set<String>()
         return combined.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
@@ -4400,6 +4397,10 @@ private struct ImportTracksScreen: View {
 
     private var importSourceCount: Int {
         importTrackIDs.count
+    }
+
+    private var previewDisplayCount: Int {
+        max(importSourceCount, preview?.effectiveTrackCount ?? 0)
     }
 
     private var sortedYandexTracks: [YandexImportTrack] {
@@ -4439,13 +4440,26 @@ private struct ImportTracksScreen: View {
 
     private func acceptPreview(_ value: LanePlaylist) async {
         preview = value
-        previewTracks = platform == .yandex
-            ? (value.playlistTracks ?? []).map { TrackCandidate($0, refID: value.playlistId) }
-            : await session.tracksForImportPreview(value)
         if targetPlaylistID.isEmpty {
             targetPlaylistID = session.serverPlaylists.first?.playlistId ?? ""
         }
+        // The APK opens the preview immediately, then resolves the complete ID
+        // list once through /user/tracks while displaying its loading state.
         step = .preview
+        importTotal = value.effectiveTrackCount
+        importStage = importTotal > 0 ? "Loading \(importTotal) tracks…" : "Loading tracks…"
+        defer {
+            importStage = ""
+            importTotal = 0
+        }
+        do {
+            previewTracks = try await session.tracksForImportPreview(value)
+            if previewTracks.isEmpty {
+                message = "Lane did not resolve any importable tracks from this playlist."
+            }
+        } catch {
+            message = friendlyImportError(error)
+        }
     }
 
     private func requestPreview() {
@@ -4470,7 +4484,6 @@ private struct ImportTracksScreen: View {
                     soundCloudProfileURL: platform == .soundCloud && importKind == .liked ? input : nil
                 )
                 guard previewRequestID == requestID else { return }
-                await acceptPreview(result)
                 if platform == .yandex {
                     // Public Yandex metadata decorates the screen but does not
                     // delay or determine the Lane import ID list.
@@ -4481,6 +4494,7 @@ private struct ImportTracksScreen: View {
                         }
                     }
                 }
+                await acceptPreview(result)
             } catch {
                 message = friendlyImportError(error)
             }
@@ -4525,7 +4539,11 @@ private struct ImportTracksScreen: View {
 
         Task {
             defer { localSaving = false }
-            let tracks = await session.tracksForLocalImport(preview)
+            // The APK preview has already resolved the complete list. Reuse it
+            // instead of issuing another 77 sequential requests for 1,151 IDs.
+            let tracks = previewTracks.isEmpty
+                ? await session.tracksForLocalImport(preview)
+                : previewTracks
             let saved = session.saveLocalImport(
                 name: preview.playlistName ?? "Imported playlist",
                 tracks: tracks

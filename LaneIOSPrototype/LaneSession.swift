@@ -2467,95 +2467,21 @@ final class LaneSession: ObservableObject {
         soundCloudProfileURL: String? = nil
     ) async throws -> LanePlaylist {
         await configureAPI()
-        let normalizedYandexID = yandexPlaylistID.map(YandexPlaylistSource.normalize)
-
-        guard platform.lowercased() == "yandex",
-              let source = yandexPlaylistID?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !source.isEmpty else {
-            return try await LaneAPI.shared.importPreview(
-                token: token,
-                platform: platform,
-                spotifyBearerToken: spotifyBearerToken,
-                spotifyClientToken: spotifyClientToken,
-                spotifyPlaylistId: spotifyPlaylistID,
-                soundcloudPlaylistId: soundCloudPlaylistID,
-                yandexPlaylistId: normalizedYandexID,
-                soundcloudProfileUrl: soundCloudProfileURL
-            )
-        }
-
-        // Try the stable URL first so tracking parameters copied from a share
-        // sheet cannot send Lane through a slow redirect chain. The exact APK
-        // input remains a fallback for a server that expects the original form.
-        var candidates: [String] = []
-        for candidate in [normalizedYandexID, source].compactMap({ $0 })
-            where !candidates.contains(candidate) {
-            candidates.append(candidate)
-        }
-
-        let metadataTask = Task { [weak self] in
-            try await self?.yandexPlaylistTracks(from: source) ?? []
-        }
-        var lastError: Error = LaneAPIError.emptyResponse
-
-        for candidate in candidates {
-            do {
-                let preview = try await LaneAPI.shared.importPreview(
-                    token: token,
-                    platform: platform,
-                    yandexPlaylistId: candidate
-                )
-                metadataTask.cancel()
-                return preview
-            } catch {
-                lastError = error
-                let description = error.localizedDescription
-                let malformedLink = description.localizedCaseInsensitiveContains("HTTP 400") ||
-                    description.localizedCaseInsensitiveContains("HTTP 404")
-                // A timeout/5xx has already exercised LaneAPI's regional
-                // failover; repeating the same playlist in a different textual
-                // form only doubles the wait. Move straight to direct metadata.
-                if !malformedLink { break }
-            }
-        }
-
-        // If Lane's expensive preview endpoint stalls, use public Yandex
-        // metadata and ask the normal /user/tracks resolver for canonical Lane
-        // IDs. Only expose this fallback when every source track resolves, so
-        // the user never gets a misleading "complete" partial playlist.
-        do {
-            let sourceTracks = try await metadataTask.value
-            let sourceIDs = sourceTracks
-                .sorted { $0.originalIndex < $1.originalIndex }
-                .map(\.yandexID)
-            guard !sourceIDs.isEmpty else { throw lastError }
-
-            var resolved: [TrackData] = []
-            for start in stride(from: 0, to: sourceIDs.count, by: 15) {
-                let end = min(start + 15, sourceIDs.count)
-                resolved += try await resolveTrackDataResilient(
-                    Array(sourceIDs[start..<end]),
-                    prefetch: false
-                )
-            }
-
-            let resolvedIDs = Set(resolved.compactMap(\.songId))
-            guard resolved.count == sourceIDs.count,
-                  resolvedIDs.count == sourceIDs.count else { throw lastError }
-
-            return LanePlaylist(
-                playlistId: "yandex-import-preview",
-                playlistImageUrl: sourceTracks.first?.coverURL,
-                playlistName: "Yandex Music",
-                playlistDescription: "Imported from Yandex Music",
-                playlistTracksIds: nil,
-                playlistTracks: resolved,
-                platform: "yandex",
-                tracksCount: resolved.count
-            )
-        } catch {
-            throw lastError
-        }
+        // Match ImportViewModel.submitPlatformInput in Lane Android 1.4.7:
+        // pass the user's value to /user/import/preview exactly once. The old
+        // iOS implementation retried normalized variants and then resolved the
+        // entire Yandex list in 15-track pages, turning one APK request into
+        // dozens of sequential round-trips.
+        return try await LaneAPI.shared.importPreview(
+            token: token,
+            platform: platform,
+            spotifyBearerToken: spotifyBearerToken,
+            spotifyClientToken: spotifyClientToken,
+            spotifyPlaylistId: spotifyPlaylistID,
+            soundcloudPlaylistId: soundCloudPlaylistID,
+            yandexPlaylistId: yandexPlaylistID?.trimmingCharacters(in: .whitespacesAndNewlines),
+            soundcloudProfileUrl: soundCloudProfileURL
+        )
     }
 
     func beginTelegramMusicImport() async throws -> String {
@@ -2568,22 +2494,27 @@ final class LaneSession: ObservableObject {
         return try await LaneAPI.shared.telegramImportFinish(token: token)
     }
 
-    func tracksForImportPreview(_ playlist: LanePlaylist) async -> [TrackCandidate] {
-        let ids = playlist.playlistTracksIds ?? []
-        if let tracks = playlist.playlistTracks,
-           !tracks.isEmpty,
-           ids.isEmpty || tracks.count == ids.count {
-            return tracks.map { TrackCandidate($0, refID: playlist.playlistId) }
-        }
+    func tracksForImportPreview(_ playlist: LanePlaylist) async throws -> [TrackCandidate] {
+        // LanePlaylistItem.getTracksIdsOnly() in the APK concatenates embedded
+        // song IDs and playlistTracksIds. ImportViewModel.loadPreviewTracks then
+        // resolves that complete list in ONE /user/tracks request and imports
+        // only the returned canonical TrackData.songId values.
+        let embeddedIDs = playlist.playlistTracks?.compactMap(\.songId) ?? []
+        let sourceIDs = embeddedIDs + (playlist.playlistTracksIds ?? [])
+        var seen = Set<String>()
+        let unique = sourceIDs.filter { !$0.isEmpty && seen.insert($0).inserted }
+        guard !unique.isEmpty else { return [] }
 
-        // The preview only renders the first rows. Resolve one page here so a
-        // 1,000+ track Yandex list opens quickly; the full local import resolves
-        // every remaining page after the user confirms it.
-        return await resolveTracksByIDs(
-            Array(ids.prefix(50)),
+        await configureAPI()
+        let tracks = try await LaneAPI.shared.tracksByIds(
+            token: token,
+            ids: unique,
             prefetch: false,
-            refID: playlist.playlistId
+            useCurrentHostOnly: true
         )
+        let resolved = tracks.map { TrackCandidate($0, refID: playlist.playlistId) }
+        rememberResolvedTracks(resolved)
+        return resolved
     }
 
     func tracksForLocalImport(_ playlist: LanePlaylist) async -> [TrackCandidate] {
@@ -2739,160 +2670,6 @@ final class LaneSession: ObservableObject {
         }
     }
 
-    private func serverTrackIDs(
-        in playlistID: String,
-        forceRemoteRead: Bool = false
-    ) async throws -> Set<String> {
-        let cached = serverPlaylists.first { $0.playlistId == playlistID }
-
-        // Newly created playlists with explicit IDs already carry enough
-        // information in Library. A bare tracksCount=0 is not authoritative:
-        // some Lane summaries currently return that value for non-empty lists.
-        if !forceRemoteRead,
-           let ids = cached?.playlistTracksIds,
-           !ids.isEmpty {
-            return Set(ids.filter { !$0.isEmpty })
-        }
-        if !forceRemoteRead,
-           let tracks = cached?.playlistTracks,
-           !tracks.isEmpty {
-            return Set(tracks.compactMap(\.songId).filter { !$0.isEmpty })
-        }
-
-        let playlist = try await LaneAPI.shared.playlist(
-            token: token,
-            playlistId: playlistID,
-            platform: cached?.platform
-        )
-
-        if let ids = playlist.playlistTracksIds, !ids.isEmpty {
-            return Set(ids.filter { !$0.isEmpty })
-        }
-        if let tracks = playlist.playlistTracks, !tracks.isEmpty {
-            return Set(tracks.compactMap(\.songId).filter { !$0.isEmpty })
-        }
-
-        // Some Lane edges expose only tracksCount. Reuse the same resilient
-        // 0/1-based paging loader as the playlist screen so import resume does
-        // not miss an existing first page and accidentally create duplicates.
-        if let loaded = await loadPlaylistTrackCollection(
-            token: token,
-            playlistId: playlistID,
-            pageSize: 100
-        ) {
-            return Set(loaded.compactMap(\.songId).filter { !$0.isEmpty })
-        }
-
-        // Only accept an empty state after both explicit collection fields
-        // and the paging endpoint have been considered.
-        if playlist.playlistTracksIds?.isEmpty == true ||
-            playlist.playlistTracks?.isEmpty == true ||
-            playlist.tracksCount == 0 {
-            return []
-        }
-
-        throw LaneAPIError.decoding(
-            "Lane could not read the target playlist before importing."
-        )
-    }
-
-    private func waitForServerTrackIDs(
-        in playlistID: String,
-        expecting expected: Set<String>,
-        attempts: Int = 4
-    ) async throws -> Set<String> {
-        var lastIDs = Set<String>()
-        var lastError: Error?
-        var didReadServerState = false
-
-        for attempt in 0..<max(attempts, 1) {
-            try Task.checkCancellation()
-            do {
-                let ids = try await serverTrackIDs(in: playlistID, forceRemoteRead: true)
-                lastIDs = ids
-                lastError = nil
-                didReadServerState = true
-                if expected.isSubset(of: ids) { return ids }
-            } catch {
-                lastError = error
-            }
-
-            if attempt + 1 < attempts {
-                // Read replicas can lag successful playlist mutations. Poll
-                // read-only state before repeating any POST.
-                let delay = UInt64(250 * (attempt + 1)) * 1_000_000
-                try await Task.sleep(nanoseconds: delay)
-            }
-        }
-
-        if didReadServerState { return lastIDs }
-        throw lastError ?? LaneAPIError.emptyResponse
-    }
-
-    private func canonicalImportBatch(_ sourceIDs: [String]) async throws -> [String] {
-        // ImportViewModel.loadPreviewTracks in Lane Android resolves the IDs
-        // returned by /user/import/preview through /user/tracks before adding
-        // them to a user playlist. SoundCloud/Yandex preview IDs are not
-        // guaranteed to already be canonical Lane songIds.
-        let tracks = try await resolveTrackDataResilient(
-            sourceIDs,
-            prefetch: false
-        )
-
-        var seen = Set<String>()
-        return tracks
-            .compactMap(\.songId)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && seen.insert($0).inserted }
-    }
-
-    private func addImportIDsBySplitting(
-        _ ids: [String],
-        into playlistID: String,
-        onChecked: (Int) -> Void
-    ) async throws -> [String] {
-        guard !ids.isEmpty else { return [] }
-        try Task.checkCancellation()
-
-        let result = try await LaneAPI.shared.addTracks(
-            token: token,
-            playlistId: playlistID,
-            trackIds: ids
-        )
-        status = result.status
-        if (200..<300).contains(result.status) {
-            onChecked(ids.count)
-            return ids
-        }
-
-        guard result.status == 400 else {
-            throw LaneAPIError.http(result.status, result.pretty)
-        }
-
-        // *_BODY means the JSON shape itself is wrong. Splitting the same
-        // malformed request down to one track can never fix it and was the
-        // reason imports appeared to "check every track" while saving none.
-        if result.pretty.localizedCaseInsensitiveContains("INVALID_PLAYLIST_TRACKS_BODY") {
-            throw LaneAPIError.http(result.status, result.pretty)
-        }
-
-        guard ids.count > 1 else {
-            onChecked(1)
-            return []
-        }
-
-        // A non-body 400 can be track-specific. Bisect only in that case so
-        // one bad source/canonical ID does not block the rest of the batch.
-        let middle = ids.count / 2
-        let left = try await addImportIDsBySplitting(
-            Array(ids[..<middle]), into: playlistID, onChecked: onChecked
-        )
-        let right = try await addImportIDsBySplitting(
-            Array(ids[middle...]), into: playlistID, onChecked: onChecked
-        )
-        return left + right
-    }
-
     @discardableResult
     func importTracks(
         _ trackIDs: [String],
@@ -2910,146 +2687,32 @@ final class LaneSession: ObservableObject {
         }
 
         await configureAPI()
-        progress(0, clean.count, "Checking Lane playlist…")
-        var existing = try await serverTrackIDs(in: playlistID, forceRemoteRead: true)
-        var processedSources = 0
-        var importedCanonical = Set<String>()
-        var confirmedSet = Set<String>()
-        var confirmedOrder: [String] = []
+        try Task.checkCancellation()
+        progress(0, clean.count, "Adding \(clean.count) tracks to Lane…")
 
-        for start in stride(from: 0, to: clean.count, by: 15) {
-            try Task.checkCancellation()
-            let end = min(start + 15, clean.count)
-            let sourceBatch = Array(clean[start..<end])
-            let alreadyPresent = sourceBatch.filter { existing.contains($0) }
-            let pendingSource = sourceBatch.filter { !existing.contains($0) }
-            var accepted = alreadyPresent
-
-            progress(
-                processedSources,
-                clean.count,
-                "Adding \(start + 1)–\(end) of \(clean.count)…"
-            )
-
-            // The import preview is already produced by Lane. Most builds
-            // return IDs that /user/playlist/add-tracks accepts directly, so
-            // do not add an unnecessary /user/tracks round-trip for every
-            // batch. This restores the much faster Android-style import path.
-            if !pendingSource.isEmpty {
-                var checked = 0
-                let directAdded = try await addImportIDsBySplitting(
-                    pendingSource,
-                    into: playlistID
-                ) { count in
-                    checked += count
-                    progress(
-                        processedSources,
-                        clean.count,
-                        "Adding \(checked)/\(pendingSource.count) tracks…"
-                    )
-                }
-                accepted.append(contentsOf: directAdded)
-
-                let directAddedSet = Set(directAdded)
-                let rejectedSource = pendingSource.filter { !directAddedSet.contains($0) }
-
-                // Some platform previews contain source IDs rather than
-                // canonical Lane songIds. Resolve only the rejected subset.
-                if !rejectedSource.isEmpty {
-                    progress(
-                        processedSources,
-                        clean.count,
-                        "Resolving \(rejectedSource.count) unmatched tracks…"
-                    )
-
-                    let canonical = try await canonicalImportBatch(rejectedSource)
-                        .filter { importedCanonical.insert($0).inserted }
-                    let canonicalPresent = canonical.filter { existing.contains($0) }
-                    let canonicalPending = canonical.filter { !existing.contains($0) }
-                    accepted.append(contentsOf: canonicalPresent)
-
-                    if !canonicalPending.isEmpty {
-                        var canonicalChecked = 0
-                        let canonicalAdded = try await addImportIDsBySplitting(
-                            canonicalPending,
-                            into: playlistID
-                        ) { count in
-                            canonicalChecked += count
-                            progress(
-                                processedSources,
-                                clean.count,
-                                "Adding resolved tracks \(canonicalChecked)/\(canonicalPending.count)…"
-                            )
-                        }
-                        accepted.append(contentsOf: canonicalAdded)
-                    }
-                }
-            }
-
-            for id in accepted where confirmedSet.insert(id).inserted {
-                confirmedOrder.append(id)
-            }
-            existing.formUnion(accepted)
-            applyConfirmedTrackIDs(accepted, to: playlistID)
-            processedSources += sourceBatch.count
-            progress(processedSources, clean.count, "")
-
-            if end < clean.count {
-                // Keep mutations ordered and below Lane's burst-rate limits.
-                try await Task.sleep(nanoseconds: 120_000_000)
-            }
-        }
-
-        guard !confirmedSet.isEmpty else {
-            throw LaneAPIError.decoding(
-                "Lane did not accept any tracks from the import preview."
-            )
-        }
-
-        // A 2xx mutation response is not enough. Wait for the canonical
-        // playlist state, retry only missing accepted IDs once, then report
-        // exactly what the server actually persisted.
-        progress(processedSources, clean.count, "Verifying Lane playlist…")
-        var verified = try await waitForServerTrackIDs(
-            in: playlistID,
-            expecting: confirmedSet
+        // Exact ImportViewModel.importTracksToPlaylist behavior from the APK:
+        // the preview has already been resolved to canonical songId values, so
+        // submit the complete list to PlaylistRepository in one mutation.
+        let result = try await LaneAPI.shared.addTracks(
+            token: token,
+            playlistId: playlistID,
+            trackIds: clean
         )
-        var missing = confirmedOrder.filter { !verified.contains($0) }
+        status = result.status
+        try result.requireSuccess()
 
-        if !missing.isEmpty {
-            progress(processedSources, clean.count, "Retrying \(missing.count) missing tracks…")
-            _ = try await addImportIDsBySplitting(
-                missing,
-                into: playlistID,
-                onChecked: { _ in }
-            )
-            verified = try await waitForServerTrackIDs(
-                in: playlistID,
-                expecting: confirmedSet
-            )
-            missing = confirmedOrder.filter { !verified.contains($0) }
-        }
-
-        let verifiedInOrder = confirmedOrder.filter { verified.contains($0) }
-        guard !verifiedInOrder.isEmpty else {
-            throw LaneAPIError.decoding(
-                "Lane acknowledged the import but no tracks appeared in the playlist."
-            )
-        }
-
-        applyConfirmedTrackIDs(verifiedInOrder, to: playlistID)
-        importedBatch(verifiedInOrder)
+        applyConfirmedTrackIDs(clean, to: playlistID)
+        importedBatch(clean)
         progress(clean.count, clean.count, "")
-        output = missing.isEmpty
-            ? "Verified all \(verifiedInOrder.count) imported tracks in Lane."
-            : "Verified \(verifiedInOrder.count) tracks; \(missing.count) were not persisted."
+        output = "Imported all \(clean.count) tracks to Lane."
 
-        // Keep the rest of Library fresh without hiding verified optimistic
-        // state when a read replica is briefly behind.
+        // The APK reports success from the mutation response and refreshes its
+        // state asynchronously; do not add four replica reads and a second POST
+        // to the user's wait time.
         Task { @MainActor in
             await loadLibrary()
         }
-        return verifiedInOrder.count
+        return clean.count
     }
 
     // MARK: Social

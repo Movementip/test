@@ -691,7 +691,10 @@ actor LaneAPI {
         let timeout: TimeInterval
         switch normalizedPath {
         case "/track/stream": timeout = 6
-        case "/user/tracks": timeout = 8
+        // Android resolves the complete import preview with one /user/tracks
+        // request. Large (1,000+) playlists need more than the small-request
+        // timeout, but still avoid the old many-page request chain.
+        case "/user/tracks": timeout = 15
         // Large Yandex favourites playlists are assembled server-side and can
         // legitimately exceed the generic request timeout used elsewhere.
         case "/user/import/preview": timeout = 60
@@ -774,9 +777,18 @@ actor LaneAPI {
         token: String? = nil,
         query: [URLQueryItem] = [],
         headers: [String: String] = [:],
-        json: Any? = nil
+        json: Any? = nil,
+        candidateBases: [URL]? = nil
     ) async throws -> T {
-        let result = try await request(path: path, method: method, token: token, query: query, headers: headers, json: json)
+        let result = try await request(
+            path: path,
+            method: method,
+            token: token,
+            query: query,
+            headers: headers,
+            json: json,
+            candidateBases: candidateBases
+        )
 
         guard (200..<300).contains(result.status) else {
             if result.status == 401,
@@ -1169,7 +1181,12 @@ actor LaneAPI {
         )
     }
 
-    func tracksByIds(token: String, ids: [String], prefetch: Bool = false) async throws -> [TrackData] {
+    func tracksByIds(
+        token: String,
+        ids: [String],
+        prefetch: Bool = false,
+        useCurrentHostOnly: Bool = false
+    ) async throws -> [TrackData] {
         var seen = Set<String>()
         let clean = ids
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1193,7 +1210,8 @@ actor LaneAPI {
                 method: "POST",
                 token: token,
                 query: [.init(name: "prefetch", value: prefetch ? "true" : "false")],
-                json: payload.body
+                json: payload.body,
+                candidateBases: useCurrentHostOnly ? [base] : nil
             )
             last = result
 
@@ -1644,7 +1662,11 @@ actor LaneAPI {
                 .init(name: "soundcloudPlaylistId", value: soundcloudPlaylistId),
                 .init(name: "yandexPlaylistId", value: yandexPlaylistId),
                 .init(name: "soundcloudProfileUrl", value: soundcloudProfileUrl)
-            ]
+            ],
+            // The APK sends one request through its already selected API host.
+            // Repeating a 60-second server-side import across every region made
+            // iOS appear to hang for several minutes on large Yandex lists.
+            candidateBases: [base]
         )
     }
 
