@@ -378,7 +378,7 @@ private struct LaneUITestRoot: View {
             let started = Date()
             for _ in 0..<240 {
                 if session.isPlaying, session.playbackPosition > 0.1,
-                   UIApplication.shared.applicationState != .active {
+                   UIApplication.shared.applicationState == .background {
                     if session.currentTrack?.trackID == first.trackID { heardFirstInBackground = true }
                     if session.currentTrack?.trackID == next.trackID { heardNextInBackground = true }
                 }
