@@ -1648,6 +1648,9 @@ actor LaneAPI {
             throw LaneAPIError.decoding("Lane did not return the playlist's track IDs. Nothing was removed; retry.")
         }
         let ids = LaneTrackBatching.unique((detail.playlistTracksIds ?? []) + (detail.playlistTracks?.compactMap(\.songId) ?? []))
+        guard detail.effectiveTrackCount <= ids.count else {
+            throw LaneAPIError.decoding("Lane returned only part of the playlist's track IDs. Nothing was removed; refresh the playlist and retry.")
+        }
         var completed = 0
         await progress(0, ids.count)
         for id in ids {
@@ -1769,6 +1772,7 @@ actor LaneAPI {
         // order using the APK endpoint; retain unrelated destination tracks.
         // Re-read just before reordering so a concurrent addition is not lost.
         var destinationIDs: [String] = []
+        var destinationIsComplete = false
         await stage("Confirming saved tracks on Lane…")
         for attempt in 0..<7 {
             try Task.checkCancellation()
@@ -1776,12 +1780,19 @@ actor LaneAPI {
             let destination = try await playlist(token: token, playlistId: playlistId)
             destinationIDs = LaneTrackBatching.unique((destination.playlistTracksIds ?? []) +
                                                       (destination.playlistTracks?.compactMap(\.songId) ?? []))
+            destinationIsComplete = destination.effectiveTrackCount <= destinationIDs.count
             await progress(processed, ids.count, destinationIDs.filter { accepted.contains($0) }, [])
-            if accepted.isSubset(of: Set(destinationIDs)) { break }
+            if accepted.isSubset(of: Set(destinationIDs)), destinationIsComplete { break }
             if attempt < 6 { try await retryTiming.sleep(confirmationDelay(attempt)) }
         }
         guard accepted.isSubset(of: Set(destinationIDs)) else {
             throw LaneImportConfirmationError.membership(saved: accepted.intersection(destinationIDs).count, expected: accepted.count)
+        }
+        guard destinationIsComplete else {
+            // Never submit a partial permutation: a backend that replaces its
+            // ID array could otherwise drop unrelated destination tracks.
+            throw LaneImportConfirmationError.order(saved: accepted.count,
+                detail: "Lane returned incomplete playlist membership. Ordering is paused to keep the other tracks safe.")
         }
         let ordered = resolveSourceIDs
             ? LaneImportOrdering.ordered(resolvedTracks, sort: sort, reference: orderReference).compactMap(\.songId)
@@ -1805,7 +1816,7 @@ actor LaneAPI {
                     UserDefaults.standard.removeObject(forKey: checkpointKey)
                     return accepted.count
                 }
-                if attempt == 3, accepted.isSubset(of: Set(confirmed)) {
+                if attempt == 3, accepted.isSubset(of: Set(confirmed)), destination.effectiveTrackCount <= confirmed.count {
                     // A late batch commit can overtake the first reorder. Read
                     // the latest membership before one bounded ordering retry.
                     let retryOrder = LaneTrackBatching.unique(ordered) + confirmed.filter { !accepted.contains($0) }

@@ -316,7 +316,8 @@ final class LaneMockURLProtocol: URLProtocol {
                 Self.staleOrder[id] = Self.playlists[id] ?? []
                 Self.staleOrderReads[id] = 5
             }
-            if id == "import-order-ignored" { return (200, Data(#"{"ok":true}"#.utf8)) }
+                if id == "import-order-ignored" { return (200, Data(#"{"ok":true}"#.utf8)) }
+            try require(id != "import-incomplete", "Partial membership must never be submitted as a reorder permutation")
             Self.playlists[id] = ids
             return (200, Data(#"{"ok":true}"#.utf8))
 
@@ -425,6 +426,9 @@ final class LaneMockURLProtocol: URLProtocol {
                 if let stale = Self.staleOrder[id], (Self.staleOrderReads[id] ?? 0) > 0 {
                     Self.staleOrderReads[id, default: 0] -= 1
                     ids = stale
+                }
+                if id == "import-incomplete" {
+                    return (200, try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": ids, "tracksCount": ids.count + 5]))
                 }
                 return (200, try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": ids]))
             }
@@ -724,6 +728,16 @@ struct LaneContractTestRunner {
             _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-order-ignored", sourceIDs: small)
             preconditionFailure("An ignored reorder must not claim the requested order is durable")
         } catch let LaneImportConfirmationError.order(saved, _) { precondition(saved == 31) }
+        do {
+            _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-incomplete", sourceIDs: small)
+            preconditionFailure("Incomplete membership must not reorder away unrelated songs")
+        } catch let LaneImportConfirmationError.order(saved, detail) {
+            precondition(saved == 31 && detail.contains("incomplete"))
+        }
+        do {
+            _ = try await api.clearPlaylistTracks(token: "test-token", playlistId: "import-incomplete")
+            preconditionFailure("Partial playlist metadata must not claim a complete clear")
+        } catch { precondition(LaneMockURLProtocol.savedIDs("import-incomplete").count == 31) }
         // The server rejected the first delete for 3 seconds, but the user's
         // deletion policy requires at least one minute. No regional retry rush.
         _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-clear-rate", sourceIDs: small)
