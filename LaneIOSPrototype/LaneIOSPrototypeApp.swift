@@ -274,6 +274,19 @@ private struct LaneUITestRoot: View {
             guard session.isPlaying, session.currentTrack?.trackID == "lane-2", session.playerError.isEmpty else {
                 throw LaneAPIError.decoding("Cancelled old request interrupted the new song")
             }
+            // A plain TCP fixture intentionally never completes TLS. Exercise
+            // the real no-VPN NWConnection cancellation, not a mocked result.
+            guard let httpURL = LaneUITestAudioServer.shared.url,
+                  let stalledURL = URL(string: httpURL.replacingOccurrences(of: "http://", with: "https://")) else { throw URLError(.badURL) }
+            let stalled = Task { try await AndroidNetworkTransport.data(for: URLRequest(url: stalledURL), timeout: 12) }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            let cancelledAt = Date()
+            stalled.cancel()
+            do { _ = try await stalled.value; throw LaneAPIError.decoding("Cancelled TLS unexpectedly succeeded") }
+            catch is CancellationError { }
+            guard Date().timeIntervalSince(cancelledAt) < 2 else {
+                throw LaneAPIError.decoding("Cancelled TLS held the playback task until its timeout")
+            }
             session.stop()
             result = "Recovery checks passed"
         } catch { result = "Recovery checks failed: \(error.localizedDescription)" }

@@ -34,6 +34,7 @@ enum AndroidNetworkTransport {
     }
 
     static func data(for request: URLRequest, timeout: TimeInterval = 12) async throws -> Response {
+        try Task.checkCancellation()
         guard let url = request.url,
               url.scheme?.lowercased() == "https",
               let host = url.host else {
@@ -41,6 +42,7 @@ enum AndroidNetworkTransport {
         }
 
         let addresses = try await resolve(host: host)
+        try Task.checkCancellation()
         var lastError: Error = URLError(.cannotFindHost)
         let isBNITSigned = request.value(forHTTPHeaderField: "X-Core-Token") != nil
         let attemptAddresses = isBNITSigned ? Array(addresses.prefix(1)) : addresses
@@ -50,6 +52,7 @@ enum AndroidNetworkTransport {
         // triggers REPLAY_ATTACK_DETECTED. Safe API retries are re-signed by
         // LaneAPI instead; mutations remain single-shot.
         for address in attemptAddresses {
+            try Task.checkCancellation()
             do {
                 return try await DirectHTTPSOperation.run(
                     request: request,
@@ -58,6 +61,7 @@ enum AndroidNetworkTransport {
                     timeout: timeout
                 )
             } catch {
+                try Task.checkCancellation()
                 lastError = error
             }
         }
@@ -84,6 +88,7 @@ enum AndroidNetworkTransport {
             }
             return data
         } catch {
+            try Task.checkCancellation()
             let direct = try await data(for: request, timeout: 5)
             guard (200..<300).contains(direct.response.statusCode),
                   !direct.data.isEmpty else {
@@ -142,6 +147,7 @@ enum AndroidNetworkTransport {
             }
         }
 
+        try Task.checkCancellation()
         // The RU edge is a dedicated Yandex Cloud address in the APK's current
         // server configuration. Keep it only as a last resort when every DoH
         // provider is blocked; normal DNS-over-HTTPS results always win.
@@ -194,20 +200,29 @@ private final class DirectHTTPSOperation {
             address: address,
             timeout: timeout
         )
-        return try await operation.start()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await operation.start()
+        } onCancel: {
+            operation.queue.async { operation.finish(.failure(CancellationError())) }
+        }
     }
 
     private func start() async throws -> AndroidNetworkTransport.Response {
         try await withCheckedThrowingContinuation { continuation in
+            // Start and cancellation share a queue. Cancellation before this
+            // continuation is installed must still resume it exactly once.
+            queue.async {
+            guard !self.finished else { continuation.resume(throwing: CancellationError()); return }
             self.continuation = continuation
 
             let tls = NWProtocolTLS.Options()
-            sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, originalHost)
+            sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, self.originalHost)
             sec_protocol_options_add_tls_application_protocol(tls.securityProtocolOptions, "http/1.1")
 
             let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
-            let port = NWEndpoint.Port(rawValue: UInt16(request.url?.port ?? 443)) ?? .https
-            let connection = NWConnection(host: NWEndpoint.Host(address), port: port, using: parameters)
+            let port = NWEndpoint.Port(rawValue: UInt16(self.request.url?.port ?? 443)) ?? .https
+            let connection = NWConnection(host: NWEndpoint.Host(self.address), port: port, using: parameters)
             self.connection = connection
 
             connection.stateUpdateHandler = { [weak self] state in
@@ -224,10 +239,11 @@ private final class DirectHTTPSOperation {
                 }
             }
 
-            queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            self.queue.asyncAfter(deadline: .now() + self.timeout) { [weak self] in
                 self?.finish(.failure(URLError(.timedOut)))
             }
-            connection.start(queue: queue)
+            connection.start(queue: self.queue)
+            }
         }
     }
 
