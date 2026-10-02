@@ -178,8 +178,8 @@ private struct LaneUITestRoot: View {
     private func checkSession() async {
         do {
             let originals = Bundle.main.urls(forResourcesWithExtension: "png", subdirectory: nil) ?? []
-            guard originals.count >= 36,
-                  ["lane", "verified", "ic_yandex_music", "candle"].allSatisfy({ name in
+            guard originals.count >= 38,
+                  ["lane", "verified", "ic_yandex_music", "candle", "cover_liked_tracks_dark", "lane_1_4_favourite_tracks_dark_theme__2"].allSatisfy({ name in
                     Bundle.main.url(forResource: name, withExtension: "png")
                         .flatMap { UIImage(contentsOfFile: $0.path) } != nil
                   }),
