@@ -125,6 +125,29 @@ final class LaneNavigationTests: XCTestCase {
         XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: element)], timeout: 10) == .completed
     }
 
+    func testRangeBridgeStartsBeforeWholeFileAndOfflinePlayback() {
+        app.buttons["Run range transport checks"].tap()
+        XCTAssertTrue(app.staticTexts["Range transport checks passed"].waitForExistence(timeout: 45), app.staticTexts["session.result"].label)
+        screenshot("iPhone13-range-bridge-and-offline-download")
+    }
+
+    func testRealLibraryCountsTabReselectionAndBottomSafeArea() {
+        app.buttons["Open full app"].tap()
+        let library = app.buttons["Library"].firstMatch
+        XCTAssertTrue(library.waitForExistence(timeout: 10))
+        library.tap()
+        let playlist = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture playlist")).firstMatch
+        XCTAssertTrue(playlist.waitForExistence(timeout: 15))
+        XCTAssertTrue(playlist.label.contains("2 tracks"), playlist.label)
+        let window = app.windows.firstMatch.frame
+        XCTAssertLessThanOrEqual(window.maxY - library.frame.maxY, 35, "Only the home-indicator safe area belongs below the tab buttons")
+        playlist.tap()
+        XCTAssertTrue(app.buttons["Play"].waitForExistence(timeout: 10))
+        library.tap()
+        XCTAssertTrue(playlist.waitForExistence(timeout: 10), "Reselecting Library must pop to its root")
+        screenshot("iPhone13-library-counts-tab-reset-safe-area")
+    }
+
     func testProfileFailureKeepsEditorAndSuccessfulWriteReloads() {
         app.buttons["Edit profile"].tap()
         let name = app.textFields["profile.name"]

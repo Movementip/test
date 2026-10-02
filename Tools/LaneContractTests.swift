@@ -370,6 +370,12 @@ final class LaneMockURLProtocol: URLProtocol {
 @main
 struct LaneContractTestRunner {
     static func main() async throws {
+        let range = LaneAudioHTTPRange.parse("bytes 65536-131071/768044")
+        precondition(range?.start == 65536 && range?.end == 131071 && range?.total == 768044)
+        for invalid in ["bytes */100", "bytes 20-10/100", "bytes 0-100/100", "bytes 0-10/*", "garbage", "bytes -1-2/100"] {
+            precondition(LaneAudioHTTPRange.parse(invalid) == nil)
+        }
+        precondition(LaneAudioHTTPRange.chunkSize == 65536)
         let vector = BNITLaneRequestSigner.encryptRequestBody(
             Data(#"["track-1","track-2"]"#.utf8),
             nonce: "00112233445566778899aabbccddeeff",

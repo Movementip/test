@@ -539,6 +539,11 @@ final class LaneSession: ObservableObject {
     private var playbackEndObserver: NSObjectProtocol?
     private var playerRetriedWithCompatibilityHeaders = false
     private var playerRetriedWithLocalDownload = false
+    private var playerRetriedWithProgressiveTransport = false
+    private var progressiveAudioLoader: LaneProgressiveAudioLoader?
+    #if DEBUG
+    var debugUseProgressiveTransport = false
+    #endif
     private var playbackRequestID = UUID()
     private var streamResolveTask: Task<Void, Never>?
     private var playbackWatchdogTask: Task<Void, Never>?
@@ -3187,6 +3192,7 @@ final class LaneSession: ObservableObject {
         activeStreamQuality = nil
         playerRetriedWithCompatibilityHeaders = false
         playerRetriedWithLocalDownload = false
+        playerRetriedWithProgressiveTransport = false
 
         if let localURL = downloadedFileURL(for: track) {
             do {
@@ -3391,6 +3397,8 @@ final class LaneSession: ObservableObject {
     }
 
     private func teardownPlayerObservers() {
+        progressiveAudioLoader?.cancelAll()
+        progressiveAudioLoader = nil
         if let playbackEndObserver {
             NotificationCenter.default.removeObserver(playbackEndObserver)
         }
@@ -3482,7 +3490,8 @@ final class LaneSession: ObservableObject {
         urlString: String,
         useCompatibilityHeaders: Bool,
         requestID: UUID,
-        track: TrackCandidate
+        track: TrackCandidate,
+        useProgressiveTransport: Bool = false
     ) throws {
         guard playbackRequestID == requestID,
               currentTrack?.id == track.id else { return }
@@ -3508,7 +3517,26 @@ final class LaneSession: ObservableObject {
         // DefaultHttpDataSource.Factory. Start with an ordinary URL request.
         // A compatibility header pass is used only if AVFoundation rejects it.
         let asset: AVURLAsset
-        if useCompatibilityHeaders {
+        var progressive = useProgressiveTransport
+        #if DEBUG
+        progressive = progressive || debugUseProgressiveTransport
+        #endif
+        if progressive && url.pathExtension.lowercased() != "m3u8" {
+            let loader: LaneProgressiveAudioLoader
+            #if DEBUG
+            if debugUseProgressiveTransport, ProcessInfo.processInfo.arguments.contains("--lane-ui-test"), url.host == "127.0.0.1" {
+                loader = LaneProgressiveAudioLoader(url: url, fetch: { request in
+                    let (data, response) = try await URLSession.shared.data(for: request)
+                    guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+                    return (data, http)
+                })
+            } else { loader = LaneProgressiveAudioLoader(url: url) }
+            #else
+            loader = LaneProgressiveAudioLoader(url: url)
+            #endif
+            progressiveAudioLoader = loader
+            asset = loader.makeAsset()
+        } else if useCompatibilityHeaders {
             let headers = [
                 "User-Agent": "LaneMusic/1.0 (Android; Mobile)",
                 "Accept": "*/*",
@@ -3561,6 +3589,16 @@ final class LaneSession: ObservableObject {
 
                 case .failed:
                     let detail = item.error?.localizedDescription ?? "Unable to play this stream"
+
+                    if self.connectivityError(item.error), !self.playerRetriedWithProgressiveTransport,
+                       !self.streamURL.isEmpty, url.pathExtension.lowercased() != "m3u8" {
+                        self.playerRetriedWithProgressiveTransport = true
+                        do {
+                            try self.play(urlString: self.streamURL, useCompatibilityHeaders: true,
+                                          requestID: requestID, track: track, useProgressiveTransport: true)
+                            return
+                        } catch { self.output = "Range transport failed: \(error.localizedDescription)" }
+                    }
 
                     if self.connectivityError(item.error),
                        !self.playerRetriedWithLocalDownload,
@@ -3687,6 +3725,13 @@ final class LaneSession: ObservableObject {
                     requestID: requestID,
                     track: track
                 )
+            } else if useCompatibilityHeaders && !self.playerRetriedWithProgressiveTransport,
+                      url.pathExtension.lowercased() != "m3u8" {
+                self.playerRetriedWithProgressiveTransport = true
+                do {
+                    try self.play(urlString: self.streamURL, useCompatibilityHeaders: true,
+                                  requestID: requestID, track: track, useProgressiveTransport: true)
+                } catch { self.playerError = self.userFacingPlaybackError(error) }
             } else if useCompatibilityHeaders && !self.playerRetriedWithLocalDownload {
                 // Keep using the URL returned by /track/stream. Downloading
                 // that same response to a local file helps AVFoundation with

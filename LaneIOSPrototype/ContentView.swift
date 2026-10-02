@@ -3634,9 +3634,11 @@ struct PrivacySettingsScreen: View {
     var body: some View {
         Form {
             Section("Visible on your profile") {
-                Toggle("Show playlists", isOn: $settings.showPlaylists).accessibilityIdentifier("privacy.playlists")
-                Toggle("Show followers", isOn: $settings.showFollowers)
-                Toggle("Show following", isOn: $settings.showFollowing)
+                if loaded {
+                    Toggle("Show playlists", isOn: $settings.showPlaylists).accessibilityIdentifier("privacy.playlists")
+                    Toggle("Show followers", isOn: $settings.showFollowers)
+                    Toggle("Show following", isOn: $settings.showFollowing)
+                } else { ProgressView("Loading privacy settings…") }
             }
             .disabled(!loaded || saving)
             Section {

@@ -472,6 +472,20 @@ struct LaneDownloadedTrack: Codable {
 
 struct LaneImageUploadResponse: Decodable { let url: String }
 
+enum LaneAudioHTTPRange {
+    static let chunkSize: Int64 = 65_536
+    static func parse(_ value: String) -> (start: Int64, end: Int64, total: Int64)? {
+        let parts = value.lowercased().split(separator: " ")
+        guard parts.count == 2, parts[0] == "bytes" else { return nil }
+        let resource = parts[1].split(separator: "/")
+        guard resource.count == 2, let total = Int64(resource[1]), total > 0 else { return nil }
+        let bounds = resource[0].split(separator: "-", omittingEmptySubsequences: false)
+        guard bounds.count == 2, let start = Int64(bounds[0]), let end = Int64(bounds[1]),
+              start >= 0, end >= start, end < total else { return nil }
+        return (start, end, total)
+    }
+}
+
 struct UserInfoDTO: Decodable, Hashable {
     let displayedName: String?
     let premiumExpiresIn: Int64?

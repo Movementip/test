@@ -59,6 +59,7 @@ private struct LaneUITestRoot: View {
     @EnvironmentObject private var session: LaneSession
     @State private var showPlayer = false
     @State private var showEdit = false
+    @State private var showFullApp = false
     @State private var result = ""
     @State private var gestureReport = "Waiting for edge swipe"
 
@@ -72,13 +73,16 @@ private struct LaneUITestRoot: View {
                 Button("Open player") { showPlayer = true }
                 Button("Run session checks") { Task { await checkSession() } }
                 Button("Run playback checks") { Task { await checkPlayback() } }
+                Button("Run range transport checks") { Task { await checkPlayback(direct: true) } }
                 Button("Edit profile") { showEdit = true }
+                Button("Open full app") { showFullApp = true }
                 Text(result).accessibilityIdentifier("session.result")
             }
             .toolbar(.hidden, for: .navigationBar)
         }
         .fullScreenCover(isPresented: $showPlayer) { APKFullPlayerView().environmentObject(session) }
         .sheet(isPresented: $showEdit) { EditProfileSheet().environmentObject(session) }
+        .fullScreenCover(isPresented: $showFullApp) { ContentView().environmentObject(session) }
         .preferredColorScheme(.dark)
         .overlay(alignment: .bottom) {
             Text(gestureReport).font(.system(size: 9)).accessibilityIdentifier("gesture.report")
@@ -122,8 +126,9 @@ private struct LaneUITestRoot: View {
         }
     }
 
-    private func checkPlayback() async {
+    private func checkPlayback(direct: Bool = false) async {
         do {
+            session.debugUseProgressiveTransport = direct
             try session.removeDownload(LaneUITestFixtures.track)
             session.requestStream(for: LaneUITestFixtures.track)
             for _ in 0..<150 {
@@ -163,7 +168,7 @@ private struct LaneUITestRoot: View {
                 throw LaneAPIError.decoding("Offline playback attempted to resolve a network stream: \(offline.output)")
             }
             offline.stop()
-            result = "Playback checks passed"
+            result = direct ? "Range transport checks passed" : "Playback checks passed"
         } catch { result = "Playback checks failed: \(error.localizedDescription)" }
     }
 }
@@ -178,6 +183,7 @@ private final class LaneUITestAudioServer {
     private var connections: [NWConnection] = []
     private var port: UInt16?
     private var complete = false
+    private var deliveredRanges: [Range<Int>] = []
     private let audio: Data
     var url: String? { lock.lock(); defer { lock.unlock() }; return port.map { "http://127.0.0.1:\($0)/audio.wav" } }
     var finishedFullResponse: Bool { lock.lock(); defer { lock.unlock() }; return complete }
@@ -243,8 +249,17 @@ private final class LaneUITestAudioServer {
         let next = min(offset + 16384, end + 1)
         connection.send(content: audio.subdata(in: offset..<next), completion: .contentProcessed { [weak self] error in
             guard let self, error == nil else { connection.cancel(); return }
+            self.lock.lock()
+            var merged: [Range<Int>] = []
+            for interval in (self.deliveredRanges + [offset..<next]).sorted(by: { $0.lowerBound < $1.lowerBound }) {
+                if let last = merged.last, last.upperBound >= interval.lowerBound {
+                    merged[merged.count - 1] = last.lowerBound..<max(last.upperBound, interval.upperBound)
+                } else { merged.append(interval) }
+            }
+            self.deliveredRanges = merged
+            self.complete = merged.reduce(0) { $0 + $1.count } >= self.audio.count
+            self.lock.unlock()
             if next > end {
-                if whole { self.lock.lock(); self.complete = true; self.lock.unlock() }
                 connection.cancel()
             } else {
                 self.queue.asyncAfter(deadline: .now() + 0.25) { self.send(connection, offset: next, end: end, whole: whole) }
@@ -255,7 +270,7 @@ private final class LaneUITestAudioServer {
 
 private final class LaneUITestURLProtocol: URLProtocol {
     private static let lock = NSLock()
-    private static var saved: [String: [String]] = [:]
+    private static var saved: [String: [String]] = ["fixture-playlist": ["lane-1", "lane-2"]]
     private static var privacy = LanePrivacySettings()
     private static var notificationRead = false
     private static var invitationAccepted = false
@@ -322,8 +337,11 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 Self.saved[id] = LaneTrackBatching.unique((Self.saved[id] ?? []) + ids)
                 data = Data(#"{"ok":true}"#.utf8)
             } else if path == "/user/playlists" {
-                data = try JSONSerialization.data(withJSONObject: [["playlistId": "lane_likes", "playlistTracksIds": Self.saved["lane_likes"] ?? []]])
-            } else if path.hasPrefix("/playlist/") {
+                data = try JSONSerialization.data(withJSONObject: [
+                    ["playlistId": "lane_likes", "playlistTracksIds": Self.saved["lane_likes"] ?? []],
+                    ["playlistId": "fixture-playlist", "playlistName": "Fixture playlist", "playlistTracksIds": ["lane-1", "lane-2"], "tracksCount": 0]
+                ])
+            } else if path.hasPrefix("/playlist/"), path != "/playlist/invite/respond" {
                 let parts = path.split(separator: "/")
                 let id = String(parts[1])
                 if parts.last == "tracks" {
