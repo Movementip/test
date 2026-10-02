@@ -1680,22 +1680,25 @@ struct APKArtistDetailScreen: View {
         .clipped()
         }
         .background(apkBackground.ignoresSafeArea())
-        .navigationBarBackButtonHidden(true)
-        .laneIOSBackSwipe()
+        // Pushed artist pages use UIKit's own back button/interactive pop.
+        // Only the player modal needs an explicit close action at its root.
+        .navigationBarBackButtonHidden(onClose != nil)
+        .toolbarRole(.editor)
+        .tint(.white)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                Button {
-                    if let onClose { onClose() } else { dismiss() }
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 18, weight: .semibold))
-                        .frame(width: 36, height: 36)
+            if let onClose {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(action: onClose) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 18, weight: .semibold))
+                            .frame(width: 36, height: 36)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Back")
+                    .accessibilityIdentifier("artist.back")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Back")
-                .accessibilityIdentifier("artist.back")
             }
             ToolbarItem(placement: .principal) {
                 Text("Artist").font(.system(size: 16, weight: .semibold))

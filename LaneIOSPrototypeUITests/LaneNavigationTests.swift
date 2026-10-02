@@ -19,7 +19,7 @@ final class LaneNavigationTests: XCTestCase {
 
     func testRecommendedArtistHasBackAndStaysWithinIPhone13Width() {
         app.buttons["Recommended artist"].tap()
-        let back = app.buttons["artist.back"]
+        let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 10))
         XCTAssertTrue(back.isHittable)
         let window = app.windows.firstMatch.frame
@@ -33,7 +33,7 @@ final class LaneNavigationTests: XCTestCase {
         back.tap()
         XCTAssertTrue(app.buttons["Recommended artist"].waitForExistence(timeout: 5))
         app.buttons["Recommended artist"].tap()
-        XCTAssertTrue(app.buttons["artist.back"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars.buttons.firstMatch.waitForExistence(timeout: 5))
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
         start.press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)))
         XCTAssertTrue(app.buttons["Recommended artist"].waitForExistence(timeout: 5))
