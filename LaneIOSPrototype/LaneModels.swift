@@ -26,6 +26,35 @@ struct TrackStreamingResult: Decodable {
     let ttl: Int64?
 }
 
+// Server-rendered audio variants, not a local playback-rate approximation.
+// The factors are recovered from Android TrackEffect and are also used by
+// its player to map playback position and synchronized lyric timestamps.
+enum LaneTrackEffect: String, CaseIterable, Identifiable {
+    case original
+    case speedUp = "speedup"
+    case slowed = "slowed_reverb"
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .original: return "Original"
+        case .speedUp: return "Speed Up"
+        case .slowed: return "Slowed"
+        }
+    }
+    var durationFactor: Double {
+        switch self {
+        case .original: return 0.99
+        case .speedUp: return 0.91
+        case .slowed: return 1.22
+        }
+    }
+    func position(from seconds: Double, effect: LaneTrackEffect) -> Double {
+        guard seconds.isFinite else { return 0 }
+        return max(0, seconds) / effect.durationFactor * durationFactor
+    }
+}
+
 struct TrackStatsDTO: Codable, Equatable {
     let likesCount: Int64
     let commentsCount: Int64

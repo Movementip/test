@@ -96,6 +96,8 @@ final class LaneNavigationTests: XCTestCase {
         app.navigationBars.buttons.firstMatch.tap()
         app.buttons["Privacy settings"].tap()
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "0"), object: toggle)], timeout: 10), .completed,
+                       "Reopened settings must finish reloading the server value, not retain a default or an old accessibility snapshot")
         XCTAssertEqual(toggle.value as? String, "0")
         screenshot("iPhone13-server-privacy-settings")
     }
@@ -129,6 +131,20 @@ final class LaneNavigationTests: XCTestCase {
         app.buttons["Run range transport checks"].tap()
         XCTAssertTrue(app.staticTexts["Range transport checks passed"].waitForExistence(timeout: 45), app.staticTexts["session.result"].label)
         screenshot("iPhone13-range-bridge-and-offline-download")
+    }
+
+    func testServerEffectsRetryPreservesPositionAndPausedState() {
+        app.buttons["Run effects checks"].tap()
+        XCTAssertTrue(app.staticTexts["Effects checks passed"].waitForExistence(timeout: 65), app.staticTexts["session.result"].label)
+        app.buttons["Open player"].tap()
+        XCTAssertTrue(app.buttons["player.effects"].waitForExistence(timeout: 10))
+        app.buttons["player.effects"].tap()
+        XCTAssertTrue(app.buttons["effect.original"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["effect.speedup"].exists)
+        XCTAssertTrue(app.buttons["effect.slowed_reverb"].exists)
+        screenshot("iPhone13-effects-original-speedup-slowed")
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.buttons["player.artist"].waitForExistence(timeout: 5))
     }
 
     func testRealLibraryCountsTabReselectionAndBottomSafeArea() {

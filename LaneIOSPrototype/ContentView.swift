@@ -3666,7 +3666,8 @@ struct PrivacySettingsScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .laneIOSBackSwipe()
-        .task { await load() }
+        .task { loaded = false; await load() }
+        .onDisappear { loaded = false }
     }
 
     private func load() async {

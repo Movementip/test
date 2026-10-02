@@ -288,6 +288,13 @@ final class LaneMockURLProtocol: URLProtocol {
             try require(query.first(where: { $0.name == "page" })?.value == "1", "playlist page must be 1-based")
             return (200, Data(#"{"items":[{"songId":"track-1","title":"One","artistsDisplayedName":"Lane"}],"totalItems":1,"page":1,"pageSize":50,"totalPages":1}"#.utf8))
 
+        case "/track/effect":
+            try require(request.httpMethod == "GET" && body.isEmpty, "Effects use GET, not a speed-adjusted local player")
+            try require(query.first { $0.name == "trackId" }?.value == "track-1", "Effect must reference the canonical Lane track")
+            try require(["speedup", "slowed_reverb"].contains(query.first { $0.name == "effect" }?.value ?? ""), "APK effect identifiers changed")
+            try require(!query.contains(where: { $0.name == "streamQuality" }), "Effect endpoint does not accept streamQuality")
+            return (200, Data(#"{"url":"https://lane.test/effect.m4a","trackId":"track-1"}"#.utf8))
+
         case "/track/stats":
             try require(query.first(where: { $0.name == "trackId" })?.value == "track-1", "stats trackId mismatch")
             return (200, Data(#"{"likesCount":27,"commentsCount":4}"#.utf8))
@@ -376,6 +383,9 @@ struct LaneContractTestRunner {
             precondition(LaneAudioHTTPRange.parse(invalid) == nil)
         }
         precondition(LaneAudioHTTPRange.chunkSize == 65536)
+        precondition(LaneTrackEffect.allCases.map(\.rawValue) == ["original", "speedup", "slowed_reverb"])
+        precondition(abs(LaneTrackEffect.speedUp.position(from: 30, effect: .slowed) - 30 / 1.22 * 0.91) < 0.00001)
+        precondition(LaneTrackEffect.original.position(from: .nan, effect: .speedUp) == 0)
         let vector = BNITLaneRequestSigner.encryptRequestBody(
             Data(#"["track-1","track-2"]"#.utf8),
             nonce: "00112233445566778899aabbccddeeff",
@@ -495,6 +505,10 @@ struct LaneContractTestRunner {
 
         let stats = try await api.trackStats(token: "test-token", trackId: "track-1")
         precondition(stats == TrackStatsDTO(likesCount: 27, commentsCount: 4))
+        for effect in [LaneTrackEffect.speedUp, .slowed] {
+            let audio = try await api.trackEffect(token: "test-token", trackId: "track-1", effect: effect)
+            precondition(audio.trackId == "track-1" && audio.url == "https://lane.test/effect.m4a")
+        }
 
         let privacyDefaults = try JSONDecoder().decode(LanePrivacySettings.self, from: Data("{}".utf8))
         precondition(privacyDefaults == LanePrivacySettings())
@@ -564,6 +578,6 @@ struct LaneContractTestRunner {
             "/user/import/preview"
         ]
         precondition(expectedPaths.allSatisfy(LaneMockURLProtocol.received))
-        print("Lane contract tests passed: APK-native cipher vector, encrypted/signed bodies, 1151-track 15-item batches, interrupted import resume, canonical album IDs, fresh-client server likes, privacy and notification/invitation contracts.")
+        print("Lane contract tests passed: APK-native cipher vector, encrypted/signed bodies, 1151-track 15-item batches, interrupted import resume, canonical album IDs, fresh-client server likes, privacy, notifications/invitations, multipart profile uploads, audio ranges and server-rendered effects.")
     }
 }

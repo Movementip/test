@@ -524,6 +524,14 @@ final class LaneSession: ObservableObject {
     @Published var playbackPosition: Double = 0
     @Published var playbackDuration: Double = 0
     @Published var playbackBufferedDuration: Double = 0
+    @Published private(set) var currentTrackEffect: LaneTrackEffect = .original
+    @Published private(set) var trackEffectIsLoading = false
+    @Published var trackEffectError = ""
+    private var trackEffects: [String: LaneTrackEffect] = [:]
+    private var effectRequestID = UUID()
+    private var playbackShouldPlay = true
+    private var pendingStartPosition: Double?
+    private var seekingInitialPosition = false
     @Published var playerError = ""
     @Published var trackStats: TrackStatsDTO?
     @Published var currentLyrics: LaneTrackLyrics?
@@ -3152,6 +3160,13 @@ final class LaneSession: ObservableObject {
         playbackWatchdogTask?.cancel()
         let requestID = UUID()
         playbackRequestID = requestID
+        effectRequestID = UUID()
+        trackEffectIsLoading = false
+        trackEffectError = ""
+        currentTrackEffect = track.trackID.flatMap { trackEffects[$0] } ?? .original
+        playbackShouldPlay = true
+        pendingStartPosition = nil
+        seekingInitialPosition = false
 
         player?.pause()
         teardownPlayerObservers()
@@ -3194,7 +3209,7 @@ final class LaneSession: ObservableObject {
         playerRetriedWithLocalDownload = false
         playerRetriedWithProgressiveTransport = false
 
-        if let localURL = downloadedFileURL(for: track) {
+        if currentTrackEffect == .original, let localURL = downloadedFileURL(for: track) {
             do {
                 streamURL = localURL.absoluteString
                 try playLocalCompatibilityFile(localURL, sourceDescription: "downloaded on this iPhone", requestID: requestID, track: track)
@@ -3251,11 +3266,13 @@ final class LaneSession: ObservableObject {
                 guard self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
 
-                var result = try await self.resolvedStream(
-                    trackID: trackID,
-                    refID: track.refID,
-                    quality: requestedQuality
-                )
+                var result: TrackStreamingResult
+                if self.currentTrackEffect == .original {
+                    result = try await self.resolvedStream(trackID: trackID, refID: track.refID, quality: requestedQuality)
+                } else {
+                    guard self.hasPremiumAccess else { throw LaneAPIError.decoding("Lane Premium is required for track effects") }
+                    result = try await LaneAPI.shared.trackEffect(token: self.token, trackId: trackID, effect: self.currentTrackEffect)
+                }
 
                 try Task.checkCancellation()
                 guard self.playbackRequestID == requestID,
@@ -3267,6 +3284,9 @@ final class LaneSession: ObservableObject {
                 if let resolvedTrackID = result.trackId,
                    !resolvedTrackID.isEmpty,
                    resolvedTrackID != trackID {
+                    guard self.currentTrackEffect == .original else {
+                        throw LaneAPIError.decoding("Lane returned an effect for a different track")
+                    }
                     let corrected = try await LaneAPI.shared.stream(
                         token: self.token,
                         trackId: trackID,
@@ -3320,6 +3340,87 @@ final class LaneSession: ObservableObject {
                 self.output = "Playback error: \(error.localizedDescription)"
             }
         }
+    }
+
+    func selectTrackEffect(_ effect: LaneTrackEffect) async {
+        guard let track = currentTrack, let id = track.trackID, !id.isEmpty else { return }
+        guard effect != currentTrackEffect || trackEffectIsLoading else { return }
+        guard effect == .original || hasPremiumAccess else {
+            trackEffectError = "Lane Premium is required for track effects"
+            return
+        }
+        let operation = UUID()
+        effectRequestID = operation
+        let generation = playbackRequestID
+        let accountToken = token
+        trackEffectIsLoading = true
+        trackEffectError = ""
+        defer { if effectRequestID == operation { trackEffectIsLoading = false } }
+        do {
+            await configureAPI()
+            let url: String
+            if effect == .original, let local = downloadedFileURL(for: track) {
+                url = local.absoluteString
+            } else {
+                let result = effect == .original
+                    ? try await resolvedStream(trackID: id, refID: track.refID, quality: activeStreamQuality ?? selectedPlaybackQuality())
+                    : try await LaneAPI.shared.trackEffect(token: accountToken, trackId: id, effect: effect)
+                guard result.trackId == nil || result.trackId == id else {
+                    throw LaneAPIError.decoding("Lane returned an effect for a different track")
+                }
+                guard normalizedStreamURL(result.url) != nil else { throw URLError(.badURL) }
+                url = result.url
+            }
+            try Task.checkCancellation()
+            guard effectRequestID == operation, playbackRequestID == generation,
+                  currentTrack?.trackID == id, token == accountToken else { return }
+            // Keep the current audio playing while the new URL is resolving.
+            // Snapshot the position at replacement time, not at request time.
+            let position = effect.position(from: playbackPosition, effect: currentTrackEffect)
+            streamResolveTask?.cancel()
+            playbackWatchdogTask?.cancel()
+            player?.pause()
+            playbackRequestID = UUID()
+            pendingStartPosition = position
+            playbackPosition = position
+            playbackBufferedDuration = 0
+            seekingInitialPosition = false
+            isBuffering = true
+            playerError = ""
+            streamURL = url
+            currentTrackEffect = effect
+            trackEffects[id] = effect
+            playerRetriedWithCompatibilityHeaders = false
+            playerRetriedWithLocalDownload = false
+            playerRetriedWithProgressiveTransport = false
+            if let local = URL(string: url), local.isFileURL {
+                try playLocalCompatibilityFile(local, sourceDescription: "downloaded original", requestID: playbackRequestID, track: track)
+            } else {
+                try play(urlString: url, useCompatibilityHeaders: false, requestID: playbackRequestID, track: track)
+            }
+        } catch is CancellationError { }
+        catch {
+            guard effectRequestID == operation, currentTrack?.trackID == id else { return }
+            trackEffectError = error.localizedDescription
+        }
+    }
+
+    private func startReadyPlayer(_ player: AVPlayer, item: AVPlayerItem, requestID: UUID) {
+        guard playbackRequestID == requestID, self.player === player, player.currentItem === item else { return }
+        if let seconds = pendingStartPosition {
+            pendingStartPosition = nil
+            seekingInitialPosition = true
+            let duration = item.duration.seconds
+            let bounded = duration.isFinite && duration > 0 ? min(seconds, max(0, duration - 0.1)) : seconds
+            player.seek(to: CMTime(seconds: bounded, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak player] _ in
+                Task { @MainActor in
+                    guard let self, let player, self.playbackRequestID == requestID, self.player === player else { return }
+                    self.seekingInitialPosition = false
+                    self.playbackPosition = bounded
+                    if self.playbackShouldPlay { player.play() }
+                }
+            }
+        } else if playbackShouldPlay { player.play() }
     }
 
     private func mediaHeadProbe(_ url: URL) async -> Int? {
@@ -3585,7 +3686,7 @@ final class LaneSession: ObservableObject {
                         self.playbackDuration = seconds
                     }
 
-                    self.player?.play()
+                    if let player = self.player { self.startReadyPlayer(player, item: item, requestID: requestID) }
 
                 case .failed:
                     let detail = item.error?.localizedDescription ?? "Unable to play this stream"
@@ -3688,7 +3789,7 @@ final class LaneSession: ObservableObject {
                       self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
                 let seconds = time.seconds
-                if seconds.isFinite {
+                if seconds.isFinite, self.pendingStartPosition == nil, !self.seekingInitialPosition {
                     self.playbackPosition = max(0, seconds)
                 }
 
@@ -3700,7 +3801,7 @@ final class LaneSession: ObservableObject {
             }
         }
 
-        newPlayer.playImmediately(atRate: 1)
+        if playbackShouldPlay, pendingStartPosition == nil { newPlayer.playImmediately(atRate: 1) }
 
         // AVPlayer can remain in waitingToPlayAtSpecifiedRate indefinitely for
         // some signed CDN URLs without ever transitioning to .failed. Android
@@ -3872,7 +3973,7 @@ final class LaneSession: ObservableObject {
 
                 playerItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
                     Task { @MainActor in
-                        guard let self else { return }
+                        guard let self, self.playbackRequestID == requestID, self.currentTrack?.id == track.id else { return }
                         switch item.status {
                         case .readyToPlay:
                             self.playerError = ""
@@ -3881,7 +3982,7 @@ final class LaneSession: ObservableObject {
                                 self.playbackDuration = item.duration.seconds
                                 self.playbackBufferedDuration = item.duration.seconds
                             }
-                            self.player?.play()
+                            if let player = self.player { self.startReadyPlayer(player, item: item, requestID: requestID) }
                         case .failed:
                             let detail = item.error?.localizedDescription ?? "Unable to decode Lane audio"
 
@@ -3902,7 +4003,7 @@ final class LaneSession: ObservableObject {
 
                 playerTimeControlObserver = localPlayer.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
                     Task { @MainActor in
-                        guard let self else { return }
+                        guard let self, self.playbackRequestID == requestID, self.currentTrack?.id == track.id else { return }
                         self.isPlaying = player.timeControlStatus == .playing
                         self.isBuffering = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
                         self.updatePlaybackState(self.isPlaying)
@@ -3914,14 +4015,14 @@ final class LaneSession: ObservableObject {
                     queue: .main
                 ) { [weak self] time in
                     Task { @MainActor in
-                        guard let self else { return }
-                        if time.seconds.isFinite {
+                        guard let self, self.playbackRequestID == requestID, self.currentTrack?.id == track.id else { return }
+                        if time.seconds.isFinite, self.pendingStartPosition == nil, !self.seekingInitialPosition {
                             self.playbackPosition = max(0, time.seconds)
                         }
                     }
                 }
 
-                localPlayer.play()
+                if playbackShouldPlay, pendingStartPosition == nil { localPlayer.play() }
             } catch {
                 guard self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
@@ -4039,7 +4140,7 @@ final class LaneSession: ObservableObject {
                         self.playbackBufferedDuration = duration
                     }
 
-                    self.player?.play()
+                    if let player = self.player { self.startReadyPlayer(player, item: item, requestID: requestID) }
 
                 case .failed:
                     self.isBuffering = false
@@ -4077,13 +4178,13 @@ final class LaneSession: ObservableObject {
             Task { @MainActor in
                 guard let self, self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
-                if time.seconds.isFinite {
+                if time.seconds.isFinite, self.pendingStartPosition == nil, !self.seekingInitialPosition {
                     self.playbackPosition = max(0, time.seconds)
                 }
             }
         }
 
-        localPlayer.play()
+        if playbackShouldPlay, pendingStartPosition == nil { localPlayer.play() }
     }
 
     private enum LaneMediaSignature {
@@ -4196,12 +4297,15 @@ final class LaneSession: ObservableObject {
     }
 
     func pause() {
+        playbackShouldPlay = false
         player?.pause()
         isPlaying = false
         updatePlaybackState(false)
     }
 
     func resume() {
+        playbackShouldPlay = true
+        guard !seekingInitialPosition else { return }
         if let player {
             player.play()
             isBuffering = player.timeControlStatus != .playing
@@ -4219,6 +4323,12 @@ final class LaneSession: ObservableObject {
     }
 
     func stop() {
+        playbackRequestID = UUID()
+        effectRequestID = UUID()
+        trackEffectIsLoading = false
+        playbackShouldPlay = false
+        pendingStartPosition = nil
+        seekingInitialPosition = false
         streamResolveTask?.cancel()
         playbackWatchdogTask?.cancel()
         player?.pause()

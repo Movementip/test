@@ -2154,6 +2154,53 @@ private struct APKPlayerArtistDestination: Identifiable {
     let artist: LaneArtist
 }
 
+struct APKTrackEffectsSheet: View {
+    @EnvironmentObject private var session: LaneSession
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                Text("Effects").font(.title2.bold())
+                Spacer()
+                Button("Done") { dismiss() }
+            }
+            HStack(spacing: 10) {
+                ForEach(LaneTrackEffect.allCases) { effect in
+                    Button {
+                        Task { await session.selectTrackEffect(effect) }
+                    } label: {
+                        Text(effect.title)
+                            .font(.system(size: 15, weight: .semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .foregroundStyle(session.currentTrackEffect == effect ? Color.black : Color.white)
+                            .background(session.currentTrackEffect == effect ? apkPink : apkSurface, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("effect.\(effect.rawValue)")
+                    .accessibilityAddTraits(session.currentTrackEffect == effect ? .isSelected : [])
+                    .disabled(session.trackEffectIsLoading)
+                }
+            }
+            if session.trackEffectIsLoading { ProgressView("Loading effect…") }
+            if !session.trackEffectError.isEmpty {
+                Text(session.trackEffectError).font(.callout).foregroundStyle(apkPink)
+            }
+            if !session.hasPremiumAccess {
+                Text("Speed Up and Slowed are included in Lane Premium.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(24)
+        .padding(.top, 12)
+        .background(apkBackground.ignoresSafeArea())
+        .tint(apkPink)
+        .preferredColorScheme(.dark)
+    }
+}
+
 struct APKFullPlayerView: View {
     @EnvironmentObject private var session: LaneSession
     @Environment(\.dismiss) private var dismiss
@@ -2162,6 +2209,7 @@ struct APKFullPlayerView: View {
     @State private var showTrackActions = false
     @State private var showComments = false
     @State private var showLyrics = false
+    @State private var showEffects = false
     @State private var draggingProgress = false
     @State private var draggedValue: Double = 0
     @State private var artworkDragOffset: CGFloat = 0
@@ -2279,6 +2327,15 @@ struct APKFullPlayerView: View {
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
 
+                                Button { showEffects = true } label: {
+                                    APKTemplateIcon(name: "ic_track_effect", size: 24,
+                                                    color: session.currentTrackEffect == .original ? .white : apkPink)
+                                        .frame(width: 36, height: 40)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Effects")
+                                .accessibilityIdentifier("player.effects")
+
                                 Button {
                                     withAnimation(.easeInOut(duration: 0.22)) {
                                         showLyrics.toggle()
@@ -2352,6 +2409,11 @@ struct APKFullPlayerView: View {
             APKQueueSheet()
                 .environmentObject(session)
                 .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showEffects) {
+            APKTrackEffectsSheet().environmentObject(session)
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $showTrackActions) {
             if let track = session.currentTrack {
@@ -2466,7 +2528,7 @@ struct APKFullPlayerView: View {
                                 let active = index == activeLyricsIndex(in: lyrics)
 
                                 Button {
-                                    let seconds = Double(line.startMilliseconds) / 1000.0
+                                    let seconds = Double(line.startMilliseconds) / 1000.0 * session.currentTrackEffect.durationFactor
                                     session.seek(to: seconds)
                                 } label: {
                                     Text(line.words.isEmpty ? "♪" : line.words)
@@ -2526,7 +2588,7 @@ struct APKFullPlayerView: View {
     private func activeLyricsIndex(in lyrics: LaneTrackLyrics) -> Int {
         guard !lyrics.lines.isEmpty else { return 0 }
 
-        let currentMs = Int64(max(0, session.playbackPosition * 1000))
+        let currentMs = Int64(max(0, session.playbackPosition / session.currentTrackEffect.durationFactor * 1000))
         var result = 0
 
         for (index, line) in lyrics.lines.enumerated() {

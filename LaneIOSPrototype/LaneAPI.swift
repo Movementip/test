@@ -997,6 +997,11 @@ actor LaneAPI {
         )
     }
 
+    func trackEffect(token: String, trackId: String, effect: LaneTrackEffect) async throws -> TrackStreamingResult {
+        try await decoded(TrackStreamingResult.self, path: "/track/effect", token: token,
+                          query: [.init(name: "effect", value: effect.rawValue), .init(name: "trackId", value: trackId)])
+    }
+
     func downloadURL(token: String, trackId: String, quality: String?) async throws -> TrackStreamingResult {
         try await decoded(
             TrackStreamingResult.self,

@@ -74,6 +74,7 @@ private struct LaneUITestRoot: View {
                 Button("Run session checks") { Task { await checkSession() } }
                 Button("Run playback checks") { Task { await checkPlayback() } }
                 Button("Run range transport checks") { Task { await checkPlayback(direct: true) } }
+                Button("Run effects checks") { Task { await checkEffects() } }
                 Button("Edit profile") { showEdit = true }
                 Button("Open full app") { showFullApp = true }
                 Text(result).accessibilityIdentifier("session.result")
@@ -124,6 +125,47 @@ private struct LaneUITestRoot: View {
         } catch {
             result = "Session checks failed: \(error.localizedDescription)"
         }
+    }
+
+    private func checkEffects() async {
+        do {
+            _ = try await session.loadPrivacySettings()
+            try session.removeDownload(LaneUITestFixtures.track)
+            session.requestStream(for: LaneUITestFixtures.track)
+            for _ in 0..<150 {
+                if session.isPlaying && session.playbackPosition > 0.1 { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard session.isPlaying else { throw LaneAPIError.decoding("Original audio did not start") }
+            session.pause()
+            session.seek(to: 3)
+            try await Task.sleep(nanoseconds: 400_000_000)
+            await session.selectTrackEffect(.speedUp)
+            guard session.currentTrackEffect == .original, !session.trackEffectError.isEmpty else {
+                throw LaneAPIError.decoding("Failed effect replaced the original audio")
+            }
+            for effect in [LaneTrackEffect.speedUp, .slowed, .original] {
+                let target = effect.position(from: session.playbackPosition, effect: session.currentTrackEffect)
+                await session.selectTrackEffect(effect)
+                for _ in 0..<150 {
+                    if !session.isBuffering && abs(session.playbackPosition - target) < 0.35 { break }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+                guard session.currentTrackEffect == effect, session.trackEffectError.isEmpty,
+                      !session.isBuffering, !session.isPlaying,
+                      abs(session.playbackPosition - target) < 0.35 else {
+                    throw LaneAPIError.decoding("Effect lost position or pause state: \(effect.rawValue), position \(session.playbackPosition), target \(target), \(session.trackEffectError)")
+                }
+            }
+            session.resume()
+            for _ in 0..<50 {
+                if session.isPlaying { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard session.isPlaying else { throw LaneAPIError.decoding("Original audio did not resume") }
+            session.stop()
+            result = "Effects checks passed"
+        } catch { result = "Effects checks failed: \(error.localizedDescription)" }
     }
 
     private func checkPlayback(direct: Bool = false) async {
@@ -277,6 +319,7 @@ private final class LaneUITestURLProtocol: URLProtocol {
     private static var invitationFailedOnce = false
     private static var profileName = "Lane fixture"
     private static var profileFailedOnce = false
+    private static var effectFailedOnce = false
 
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "lane-ui.test" }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -351,7 +394,8 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 }
             } else if path == "/account" {
                 let privacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(Self.privacy))
-                data = try JSONSerialization.data(withJSONObject: ["laneId": "fixture-user", "displayedName": Self.profileName, "userPlaylists": ["lane_likes"], "privacySettings": privacy])
+                data = try JSONSerialization.data(withJSONObject: ["laneId": "fixture-user", "displayedName": Self.profileName, "userPlaylists": ["lane_likes"], "privacySettings": privacy,
+                                                                 "premiumExpiresIn": Int64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000)])
             } else if path == "/user/edit" {
                 if !Self.profileFailedOnce { Self.profileFailedOnce = true; statusCode = 503 }
                 else {
@@ -374,6 +418,17 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 if !Self.invitationFailedOnce { Self.invitationFailedOnce = true; statusCode = 503 }
                 else { Self.invitationAccepted = true }
                 data = Data((statusCode == 200 ? #"{"ok":true}"# : #"{"message":"Retry invitation"}"#).utf8)
+            } else if path == "/track/effect" {
+                let effect = query.first { $0.name == "effect" }?.value
+                guard query.first(where: { $0.name == "trackId" })?.value == "lane-1",
+                      effect == "speedup" || effect == "slowed_reverb" else { throw URLError(.badURL) }
+                if !Self.effectFailedOnce {
+                    Self.effectFailedOnce = true; statusCode = 503
+                    data = Data(#"{"message":"Retry effect"}"#.utf8)
+                } else {
+                    guard let url = LaneUITestAudioServer.shared.url else { throw URLError(.cannotConnectToHost) }
+                    data = try JSONSerialization.data(withJSONObject: ["url": url, "trackId": "lane-1"])
+                }
             } else if path == "/track/stream" || path == "/track/download" {
                 guard let url = LaneUITestAudioServer.shared.url else { throw URLError(.cannotConnectToHost) }
                 data = try JSONSerialization.data(withJSONObject: ["url": url])
