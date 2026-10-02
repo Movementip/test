@@ -28,6 +28,7 @@ struct LaneIOSPrototypeApp: App {
 
     var body: some Scene {
         WindowGroup {
+            Group {
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--lane-ui-test") {
                 LaneUITestRoot().environmentObject(session)
@@ -37,6 +38,20 @@ struct LaneIOSPrototypeApp: App {
             #else
             ContentView().environmentObject(session)
             #endif
+            }
+            .modifier(LaneIncomingSharePresenter())
+            .environmentObject(session)
+            .onOpenURL { url in session.receiveShareURL(url) }
+        }
+    }
+}
+
+// Attached to the app root so links are handled both before and after sign-in.
+struct LaneIncomingSharePresenter: ViewModifier {
+    @EnvironmentObject private var session: LaneSession
+    func body(content: Content) -> some View {
+        content.sheet(item: $session.incomingShare) { share in
+            LaneIncomingShareScreen(share: share).environmentObject(session)
         }
     }
 }
@@ -65,7 +80,7 @@ private struct LaneUITestRoot: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 24) {
+            VStack(spacing: 12) {
                 NavigationLink("Recommended artist") { APKArtistDetailScreen(seed: LaneUITestFixtures.artist) }
                 NavigationLink("Recommended album") { APKAlbumDetailScreen(seed: LaneUITestFixtures.album) }
                 NavigationLink("Privacy settings") { PrivacySettingsScreen() }
@@ -76,8 +91,10 @@ private struct LaneUITestRoot: View {
                 Button("Run playback checks") { Task { await checkPlayback() } }
                 Button("Run range transport checks") { Task { await checkPlayback(direct: true) } }
                 Button("Run effects checks") { Task { await checkEffects() } }
+                Button("Run recovery checks") { Task { await checkPlaybackRecovery() } }
                 Button("Edit profile") { showEdit = true }
                 Button("Open full app") { showFullApp = true }
+                Button("Open shared album") { session.receiveShareURL(URL(string: "lane://share/fixture-album-share")!) }
                 Text(result).accessibilityIdentifier("session.result")
             }
             .toolbar(.hidden, for: .navigationBar)
@@ -214,6 +231,52 @@ private struct LaneUITestRoot: View {
             session.stop()
             result = "Effects checks passed"
         } catch { result = "Effects checks failed: \(error.localizedDescription)" }
+    }
+
+    private func checkPlaybackRecovery() async {
+        do {
+            try session.removeDownload(LaneUITestFixtures.track)
+            func waitForAudio(_ id: String) async throws {
+                for _ in 0..<150 {
+                    if session.currentTrack?.trackID == id, session.isPlaying, session.playbackPosition > 0.1 { return }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+                throw LaneAPIError.decoding("Audio did not recover for \(id): \(session.playerError)")
+            }
+            func waitForFailure() async throws {
+                for _ in 0..<80 {
+                    if session.playerError.contains("STREAM-500"), !session.isBuffering, !session.isPlaying { return }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+                throw LaneAPIError.decoding("500 did not terminate loading cleanly")
+            }
+            let failed = TrackCandidate(id: "stream-failure", title: "Transient failure", subtitle: "Lane fixture", trackID: "stream-failure", refID: "lane_likes", platform: "spotify")
+            let next = TrackCandidate(id: "lane-2", title: "Next song", subtitle: "Lane fixture", trackID: "lane-2", platform: "spotify")
+            session.requestStream(for: LaneUITestFixtures.track)
+            try await waitForAudio("lane-1")
+            session.queue = [failed, next]
+            session.requestStream(for: failed)
+            try await waitForFailure()
+            session.next()
+            try await waitForAudio("lane-2")
+            guard session.playerError.isEmpty else { throw LaneAPIError.decoding("Previous failure poisoned next track") }
+            session.requestStream(for: failed)
+            try await waitForFailure()
+            LaneUITestURLProtocol.allowFailedStreamRetry()
+            session.resume()
+            try await waitForAudio("stream-failure")
+            let late = TrackCandidate(id: "late-failure", title: "Delayed failure", subtitle: "Lane fixture", trackID: "late-failure", platform: "spotify")
+            session.requestStream(for: late)
+            try await Task.sleep(nanoseconds: 150_000_000)
+            session.requestStream(for: next)
+            try await waitForAudio("lane-2")
+            try await Task.sleep(nanoseconds: 2_500_000_000)
+            guard session.isPlaying, session.currentTrack?.trackID == "lane-2", session.playerError.isEmpty else {
+                throw LaneAPIError.decoding("Cancelled old request interrupted the new song")
+            }
+            session.stop()
+            result = "Recovery checks passed"
+        } catch { result = "Recovery checks failed: \(error.localizedDescription)" }
     }
 
     private func checkPlayback(direct: Bool = false) async {
@@ -374,7 +437,13 @@ private final class LaneUITestURLProtocol: URLProtocol {
     private static var favoriteReadStarted = false
     private static var accountReadRace = false
     private static var accountReadStarted = false
+    private static var failedStreamCanRetry = false
+    private static var shareFailedOnce = false
     private var delayedDelivery: DispatchWorkItem?
+
+    static func allowFailedStreamRetry() {
+        lock.lock(); defer { lock.unlock() }; failedStreamCanRetry = true
+    }
 
     static func prepareFavoriteReadRace() {
         lock.lock(); defer { lock.unlock() }
@@ -424,6 +493,15 @@ private final class LaneUITestURLProtocol: URLProtocol {
                     UIColor.systemOrange.setFill()
                     context.fill(CGRect(x: 0, y: 0, width: 2400, height: 600))
                 }.pngData()!
+            } else if path == "/v1/share/get" {
+                guard request.value(forHTTPHeaderField: "Authorization") == nil,
+                      query.first(where: { $0.name == "id" })?.value == "fixture-album-share" else { throw URLError(.badURL) }
+                if !Self.shareFailedOnce {
+                    Self.shareFailedOnce = true; statusCode = 503
+                    data = Data(#"{"message":"Retry shared album"}"#.utf8)
+                } else {
+                    data = try JSONSerialization.data(withJSONObject: ["shareContentType": "album", "shareItemId": "fixture-album", "albumName": "bastards", "artistName": "shadowraze", "shareCoverUrl": "https://lane-ui.test/panorama", "userName": "Friend profile", "userId": "friend", "userAvatarUrl": ""])
+                }
             } else if path == "/platforms/artist" {
                 data = try JSONEncoder().encode(LaneUITestFixtures.artist)
             } else if path == "/platforms/album" {
@@ -469,8 +547,20 @@ private final class LaneUITestURLProtocol: URLProtocol {
             } else if path == "/user/playlists" {
                 data = try JSONSerialization.data(withJSONObject: [
                     ["playlistId": "lane_likes", "playlistTracksIds": Self.saved["lane_likes"] ?? []],
-                    ["playlistId": "fixture-playlist", "playlistName": "Fixture playlist", "playlistTracksIds": ["lane-1", "lane-2"], "tracksCount": 0]
+                    ["playlistId": "fixture-playlist", "playlistName": "Fixture playlist", "playlistTracksIds": Self.saved["fixture-playlist"] ?? [], "tracksCount": 0, "creatorLid": "fixture-user"]
                 ])
+            } else if path == "/playlist/reorder" {
+                let value = try JSONSerialization.jsonObject(with: readBody()) as? [String: Any]
+                let id = value?["playlistId"] as? String ?? ""
+                let ids = value?["newOrder"] as? [String] ?? []
+                guard Set(ids) == Set(Self.saved[id] ?? []) else { throw URLError(.badServerResponse) }
+                Self.saved[id] = ids
+                data = Data(#"{"ok":true}"#.utf8)
+            } else if path == "/user/playlist/remove-track" {
+                let id = query.first { $0.name == "playlistId" }?.value ?? ""
+                let track = query.first { $0.name == "trackId" }?.value ?? ""
+                Self.saved[id]?.removeAll { $0 == track }
+                data = Data(#"{"ok":true}"#.utf8)
             } else if path.hasPrefix("/playlist/"), path != "/playlist/invite/respond" {
                 let parts = path.split(separator: "/")
                 let id = String(parts[1])
@@ -478,7 +568,7 @@ private final class LaneUITestURLProtocol: URLProtocol {
                     let ids = isRaceClient && Self.favoriteReadRace && id == "lane_likes" ? [] : (Self.saved[id] ?? [])
                     data = try JSONSerialization.data(withJSONObject: ["items": ids.map { ["songId": $0, "title": "Fixture track"] }, "totalItems": ids.count, "page": 1, "pageSize": 100, "totalPages": 1])
                 } else {
-                    data = try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": Self.saved[id] ?? []])
+                    data = try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": Self.saved[id] ?? [], "tracksCount": (Self.saved[id] ?? []).count])
                 }
             } else if path == "/account" {
                 if isRaceClient, Self.accountReadRace {
@@ -540,8 +630,14 @@ private final class LaneUITestURLProtocol: URLProtocol {
                     data = try JSONSerialization.data(withJSONObject: ["url": url, "trackId": "lane-1"])
                 }
             } else if path == "/track/stream" || path == "/track/download" {
-                guard let url = LaneUITestAudioServer.shared.url else { throw URLError(.cannotConnectToHost) }
-                data = try JSONSerialization.data(withJSONObject: ["url": url])
+                let id = query.first { $0.name == "trackId" }?.value ?? ""
+                if id == "stream-failure" && !Self.failedStreamCanRetry || id == "late-failure" {
+                    statusCode = 500; delayResponse = id == "late-failure"
+                    data = Data(#"{"message":"Transient stream failure"}"#.utf8)
+                } else {
+                    guard let url = LaneUITestAudioServer.shared.url else { throw URLError(.cannotConnectToHost) }
+                    data = try JSONSerialization.data(withJSONObject: ["url": url, "trackId": id])
+                }
             } else if path == "/track/stats" {
                 data = Data(#"{"likesCount":27,"commentsCount":4}"#.utf8)
             } else {

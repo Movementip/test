@@ -103,6 +103,45 @@ struct LaneShareItem: Decodable {
     let id: String
 }
 
+struct LaneIncomingShare: Identifiable, Equatable {
+    let id: String
+
+    init?(url: URL) {
+        guard url.user == nil, url.password == nil, url.port == nil,
+              (url.scheme?.lowercased() == "lane" && url.host?.lowercased() == "share") ||
+                (url.scheme?.lowercased() == "https" && url.host?.lowercased() == "music.sk-lane.com") else { return nil }
+        let components = url.pathComponents.filter { $0 != "/" }
+        guard components.count == 1, let id = components.first, !id.isEmpty, id.count <= 128,
+              id.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" ).contains($0) }) else { return nil }
+        self.id = id
+    }
+}
+
+// Exact OpenApi model from Android, resolved without transmitting an account
+// token. The canonical item ID is supplied by Lane, never taken from a URL.
+struct LaneOpenShareItem: Decodable {
+    let shareContentType: String
+    let shareItemId: String
+    let trackName: String?
+    let albumName: String?
+    let playlistName: String?
+    let artistName: String?
+    let shareCoverUrl: String
+    let userName: String
+    let userId: String
+    let userAvatarUrl: String
+
+    var title: String {
+        switch shareContentType {
+        case "track": return trackName ?? "Track"
+        case "album": return albumName ?? "Album"
+        case "artist": return artistName ?? "Artist"
+        case "playlist": return playlistName ?? "Playlist"
+        default: return "Shared item"
+        }
+    }
+}
+
 
 struct LaneTrackLyricsLine: Decodable, Hashable, Identifiable {
     let startTimeMs: String
@@ -225,6 +264,51 @@ struct YandexImportTrack: Identifiable, Hashable, Sendable {
 
     var id: String { "\(yandexID)|\(originalIndex)" }
     var artistText: String { artists.joined(separator: ", ") }
+}
+
+enum LaneMusicImportSort: String, CaseIterable, Identifiable {
+    case original = "Source order"
+    case oldest = "Oldest first"
+    case title = "Title A–Z"
+    case artist = "Artist A–Z"
+    var id: String { rawValue }
+}
+
+enum LaneImportOrdering {
+    /// Provider IDs and resolved Lane IDs need not be equal. Use the public
+    /// source metadata to restore its order, without discarding unmatched or
+    /// duplicate-title songs. Stable ties retain the resolver's input order.
+    static func ordered(_ tracks: [TrackData], sort: LaneMusicImportSort,
+                        reference: [YandexImportTrack] = []) -> [TrackData] {
+        func normalized(_ value: String) -> String {
+            value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+                .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        }
+        let source = reference.sorted { $0.originalIndex < $1.originalIndex }
+        var remaining = Array(tracks.enumerated())
+        var matched: [(offset: Int, element: TrackData)] = []
+        for item in source {
+            let title = normalized(item.title)
+            let artist = normalized(item.artistText)
+            let titleMatches = remaining.indices.filter { normalized(remaining[$0].element.title ?? "") == title }
+            let index = remaining.firstIndex { $0.element.songId == item.yandexID } ?? remaining.firstIndex {
+                normalized($0.element.title ?? "") == title && normalized($0.element.artistsDisplayedName ?? "") == artist
+            } ?? (titleMatches.count == 1 ? titleMatches.first : nil)
+            if let index { matched.append(remaining.remove(at: index)) }
+        }
+        let baseline = matched + remaining
+        switch sort {
+        case .original: return baseline.map(\.element)
+        case .oldest: return baseline.reversed().map(\.element)
+        case .title, .artist:
+            return baseline.enumerated().sorted { left, right in
+                let lhs = sort == .title ? left.element.element.title : left.element.element.artistsDisplayedName
+                let rhs = sort == .title ? right.element.element.title : right.element.element.artistsDisplayedName
+                let comparison = (lhs ?? "").localizedStandardCompare(rhs ?? "")
+                return comparison == .orderedSame ? left.offset < right.offset : comparison == .orderedAscending
+            }.map { $0.element.element }
+        }
+    }
 }
 
 struct LaneRelatedArtist: Codable, Hashable {
@@ -370,7 +454,10 @@ struct LanePlaylist: Decodable, Hashable {
     }
 
     var importSourceIDs: [String] {
-        LaneTrackBatching.unique((playlistTracks?.compactMap(\.songId) ?? []) + (playlistTracksIds ?? []))
+        // The full ID list is authoritative. Prepending a partial metadata
+        // preview reshuffles it and may duplicate provider/canonical IDs.
+        if let ids = playlistTracksIds, !ids.isEmpty { return LaneTrackBatching.unique(ids) }
+        return LaneTrackBatching.unique(playlistTracks?.compactMap(\.songId) ?? [])
     }
 }
 

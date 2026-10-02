@@ -148,6 +148,19 @@ final class LaneSession: ObservableObject {
     @Published var serverPlaylists: [LanePlaylist] = []
     @Published var playlistLoadMessages: [String: String] = [:]
     private var playlistTrackCache: [String: [TrackCandidate]] = [:]
+    private var playlistContentGenerations: [String: UUID] = [:]
+    @Published var incomingShare: LaneIncomingShare?
+
+    func receiveShareURL(_ url: URL) {
+        guard let share = LaneIncomingShare(url: url) else { return }
+        incomingShare = share
+    }
+
+    func resolveShare(_ share: LaneIncomingShare) async throws -> LaneOpenShareItem {
+        await configureAPI()
+        return try await LaneAPI.shared.openShare(id: share.id)
+    }
+    @Published private(set) var clearingPlaylistIDs: Set<String> = []
     @Published var serverAlbums: [LaneAlbum] = []
     private var cachedAlbumDetails: [String: LaneAlbum] = [:]
     @Published var serverArtists: [LaneArtist] = []
@@ -1971,28 +1984,46 @@ final class LaneSession: ObservableObject {
         }
 
         Task { @MainActor in
+            let requestToken = token
+            let loadGeneration = playlistContentGenerations[id]
             await configureAPI()
 
             async let detailsRequest = try? LaneAPI.shared.playlist(
-                token: token,
+                token: requestToken,
                 playlistId: id,
                 platform: playlist.platform
             )
             async let tracksRequest = loadPlaylistTrackCollection(
-                token: token,
+                token: requestToken,
                 playlistId: id,
                 pageSize: 50
             )
 
             let pageItems = await tracksRequest
+            guard token == requestToken, playlistContentGenerations[id] == loadGeneration,
+                  !clearingPlaylistIDs.contains(id) else { return }
             if let pageItems, !pageItems.isEmpty {
-                let loaded = pageItems.map { TrackCandidate($0, refID: id) }
+                let detail = await detailsRequest
+                guard token == requestToken, playlistContentGenerations[id] == loadGeneration,
+                      !clearingPlaylistIDs.contains(id) else { return }
+                let loaded = LaneTrackBatching.ordered(pageItems.map { TrackCandidate($0, refID: id) },
+                                                       sourceIDs: detail?.playlistTracksIds ?? [])
                 rememberPlaylistTracks(loaded, playlistID: id)
                 completion(loaded)
                 return
             }
 
             let details = await detailsRequest
+            guard token == requestToken, playlistContentGenerations[id] == loadGeneration,
+                  !clearingPlaylistIDs.contains(id) else { return }
+            if details?.playlistTracksIds?.isEmpty == true,
+               (details?.playlistTracks ?? []).isEmpty,
+               details?.tracksCount == 0 || cached?.isEmpty == true {
+                playlistTrackCache[id] = []
+                playlistLoadMessages[id] = nil
+                completion([])
+                return
+            }
             let libraryCopy = serverPlaylists.first { $0.playlistId == id }
             let embedded = [details?.playlistTracks, libraryCopy?.playlistTracks, playlist.playlistTracks]
                 .compactMap { $0 }
@@ -2044,6 +2075,8 @@ final class LaneSession: ObservableObject {
             }
 
             let ordered = LaneTrackBatching.ordered(loaded.map { TrackCandidate($0) }, sourceIDs: ids)
+            guard token == requestToken, playlistContentGenerations[id] == loadGeneration,
+                  !clearingPlaylistIDs.contains(id) else { return }
             if ordered.isEmpty {
                 playlistLoadMessages[id] = "Lane could not resolve the tracks in this playlist. Try again."
                 if cached == nil { completion([]) }
@@ -2347,6 +2380,7 @@ final class LaneSession: ObservableObject {
         }
 
         let previous = playlistTrackCache[playlistID]
+        playlistContentGenerations[playlistID] = UUID()
         rememberPlaylistTracks(tracks, playlistID: playlistID)
 
         do {
@@ -2362,6 +2396,62 @@ final class LaneSession: ObservableObject {
         } catch {
             if let previous {
                 rememberPlaylistTracks(previous, playlistID: playlistID)
+            }
+            throw error
+        }
+    }
+
+    func clearPlaylistTracks(_ playlist: LanePlaylist,
+                             progress: @escaping (Int, Int) -> Void = { _, _ in }) async throws {
+        guard let id = playlist.playlistId, !id.isEmpty, !isGuest,
+              id == "lane_likes" || (playlist.creatorLid != nil && playlist.creatorLid == account?.laneId) else {
+            throw LaneAPIError.decoding("Only your own playlist or liked tracks can be cleared.")
+        }
+        guard clearingPlaylistIDs.insert(id).inserted else { return }
+        defer { clearingPlaylistIDs.remove(id) }
+        libraryLoadGeneration = UUID()
+        playlistContentGenerations[id] = UUID()
+        let requestToken = token
+        await configureAPI()
+        guard token == requestToken else { throw CancellationError() }
+        if id == "lane_likes" {
+            // Let existing single-track writes finish before reading the exact
+            // deletion set. New writes are blocked for the duration of clearing.
+            for _ in 0..<100 where !favoriteMutationsInFlight.isEmpty {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard favoriteMutationsInFlight.isEmpty else {
+                throw LaneAPIError.decoding("Likes are still syncing. Try clearing again shortly.")
+            }
+        }
+        do {
+            let removed = try await LaneAPI.shared.clearPlaylistTracks(token: requestToken, playlistId: id,
+                shouldContinue: { self.token == requestToken }, progress: progress)
+            guard token == requestToken else { throw CancellationError() }
+            libraryLoadGeneration = UUID()
+            playlistContentGenerations[id] = UUID()
+            playlistTrackCache[id] = []
+            if let data = try? JSONEncoder().encode(playlistTrackCache) {
+                UserDefaults.standard.set(data, forKey: "lane.cachedPlaylistTracks")
+            }
+            if let index = serverPlaylists.firstIndex(where: { $0.playlistId == id }) {
+                let value = serverPlaylists[index]
+                serverPlaylists[index] = LanePlaylist(playlistId: id, playlistImageUrl: value.playlistImageUrl,
+                    playlistName: value.playlistName, playlistDescription: value.playlistDescription,
+                    playlistTracksIds: [], playlistTracks: [], creatorLid: value.creatorLid,
+                    platform: value.platform, tracksCount: 0, visibility: value.visibility, collaboratorIds: value.collaboratorIds)
+            }
+            if id == "lane_likes" {
+                favorites = []; likedTracks = []; pendingFavoriteStates = [:]
+                persistFavoriteState()
+            }
+            playlistLoadMessages[id] = nil
+            output = "Removed \(removed) tracks. The playlist itself was kept."
+        } catch {
+            if token == requestToken {
+                libraryLoadGeneration = UUID()
+                playlistTrackCache.removeValue(forKey: id)
+                await loadLibrary()
             }
             throw error
         }
@@ -2714,6 +2804,8 @@ final class LaneSession: ObservableObject {
         _ trackIDs: [String],
         into playlistID: String,
         resolvingSourceIDs: Bool = false,
+        sort: LaneMusicImportSort = .original,
+        orderReference: [YandexImportTrack] = [],
         progress: @escaping (_ completed: Int, _ total: Int, _ stage: String) -> Void = { _, _, _ in },
         importedBatch: @escaping ([String]) -> Void = { _ in }
     ) async throws -> Int {
@@ -2728,13 +2820,16 @@ final class LaneSession: ObservableObject {
 
         await configureAPI()
         try Task.checkCancellation()
+        playlistContentGenerations[playlistID] = UUID()
         progress(0, clean.count, "Adding \(clean.count) tracks to Lane…")
 
         let imported = try await LaneAPI.shared.importTrackBatches(
             token: token,
             playlistId: playlistID,
             sourceIDs: clean,
-            resolveSourceIDs: resolvingSourceIDs
+            resolveSourceIDs: resolvingSourceIDs,
+            sort: sort,
+            orderReference: orderReference
         ) { processed, total, savedIDs, resolved in
             self.rememberResolvedTracks(resolved.map { TrackCandidate($0, refID: playlistID) })
             self.applyConfirmedTrackIDs(savedIDs, to: playlistID)
@@ -2743,6 +2838,8 @@ final class LaneSession: ObservableObject {
         }
         progress(clean.count, clean.count, "")
         output = "Lane confirmed \(imported) imported tracks in the playlist."
+        playlistTrackCache.removeValue(forKey: playlistID)
+        playlistContentGenerations[playlistID] = UUID()
 
         // Membership has been read back by the batch coordinator. Refresh the
         // rest of Library without delaying the confirmed result.
@@ -3158,12 +3255,23 @@ final class LaneSession: ObservableObject {
         // Exactly one selected quality goes to /track/stream. LaneAPI may use
         // the other official regional edge after a transport failure, but it
         // never changes streamQuality.
-        let result = try await LaneAPI.shared.stream(
-            token: token,
-            trackId: trackID,
-            refId: refID,
-            quality: quality
-        )
+        var result: TrackStreamingResult
+        do {
+            result = try await LaneAPI.shared.stream(token: token, trackId: trackID, refId: refID, quality: quality)
+        } catch {
+            try Task.checkCancellation()
+            guard case let LaneAPIError.http(status, _) = error, [408, 500, 502, 503, 504].contains(status) else { throw error }
+            // A stale playlist context or a transient provider failure must not
+            // poison the player. Retry once without refId, same chosen quality.
+            try await Task.sleep(nanoseconds: 400_000_000)
+            result = try await LaneAPI.shared.stream(token: token, trackId: trackID, refId: nil, quality: quality)
+        }
+        try Task.checkCancellation()
+        guard !result.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              result.trackId == nil || result.trackId == trackID else {
+            // The caller's wrong-track recovery must get a fresh response.
+            return result
+        }
         streamResolutionCache[cacheKey] = (
             result: result,
             expiresAt: streamExpiry(from: result.ttl)
@@ -3227,8 +3335,8 @@ final class LaneSession: ObservableObject {
         pendingStartPosition = nil
         seekingInitialPosition = false
 
-        player?.pause()
-        teardownPlayerObservers()
+        retirePlayer()
+        isPlaying = false
 
         currentTrack = track
         playerError = ""
@@ -3307,6 +3415,7 @@ final class LaneSession: ObservableObject {
             self.busy = false
             self.isBuffering = false
             self.isPlaying = false
+            self.retirePlayer()
             self.playerError = "The track could not be loaded without VPN. Try again. [NETWORK-TIMEOUT]"
             self.output = "Playback error: stream resolution exceeded 22 seconds"
         }
@@ -3316,6 +3425,7 @@ final class LaneSession: ObservableObject {
             defer {
                 if self.playbackRequestID == requestID {
                     self.busy = false
+                    self.streamResolveTask = nil
                 }
             }
 
@@ -3395,6 +3505,8 @@ final class LaneSession: ObservableObject {
                 self.playbackWatchdogTask?.cancel()
                 self.isBuffering = false
                 self.isPlaying = false
+                self.retirePlayer()
+                self.invalidateCurrentStreamCache()
                 self.playerError = self.userFacingPlaybackError(error)
                 self.output = "Playback error: \(error.localizedDescription)"
             }
@@ -3579,6 +3691,18 @@ final class LaneSession: ObservableObject {
         periodicTimeObserver = nil
     }
 
+    private func retirePlayer() {
+        player?.pause()
+        teardownPlayerObservers()
+        player?.replaceCurrentItem(with: nil)
+        player = nil
+    }
+
+    private func invalidateCurrentStreamCache() {
+        guard let id = currentTrack?.trackID else { return }
+        streamResolutionCache = streamResolutionCache.filter { !$0.key.hasPrefix("\(id)|") }
+    }
+
     private func observePlaybackEnd(
         of item: AVPlayerItem,
         requestID: UUID,
@@ -3664,7 +3788,7 @@ final class LaneSession: ObservableObject {
             )
         }
 
-        teardownPlayerObservers()
+        retirePlayer()
 
         // .allowBluetoothA2DP is implicit for AVAudioSession.Category.playback on
         // current iOS. Passing category-incompatible options can throw OSStatus -50
@@ -3726,7 +3850,8 @@ final class LaneSession: ObservableObject {
             Task { @MainActor in
                 guard let self,
                       self.playbackRequestID == requestID,
-                      self.currentTrack?.id == track.id else { return }
+                      self.currentTrack?.id == track.id,
+                      self.player?.currentItem === item else { return }
 
                 switch item.status {
                 case .readyToPlay:
@@ -3806,6 +3931,7 @@ final class LaneSession: ObservableObject {
                     self.isPlaying = false
                     self.playerError = "The track is temporarily unavailable."
                     self.output = "Playback error: \(detail)"
+                    self.invalidateCurrentStreamCache()
 
                 case .unknown:
                     self.isBuffering = true
@@ -3820,7 +3946,8 @@ final class LaneSession: ObservableObject {
             Task { @MainActor in
                 guard let self,
                       self.playbackRequestID == requestID,
-                      self.currentTrack?.id == track.id else { return }
+                      self.currentTrack?.id == track.id,
+                      self.player === player else { return }
 
                 switch player.timeControlStatus {
                 case .playing:
@@ -3842,9 +3969,10 @@ final class LaneSession: ObservableObject {
         periodicTimeObserver = newPlayer.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
             queue: .main
-        ) { [weak self] time in
+        ) { [weak self, weak newPlayer] time in
             Task { @MainActor in
                 guard let self,
+                      let newPlayer, self.player === newPlayer,
                       self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
                 let seconds = time.seconds
@@ -4021,7 +4149,7 @@ final class LaneSession: ObservableObject {
                 try? FileManager.default.removeItem(at: destination)
                 try FileManager.default.moveItem(at: temporaryURL, to: destination)
 
-                teardownPlayerObservers()
+                retirePlayer()
 
                 let item = AVPlayerItem(url: destination)
                 let localPlayer = AVPlayer(playerItem: item)
@@ -4168,7 +4296,7 @@ final class LaneSession: ObservableObject {
         guard playbackRequestID == requestID,
               currentTrack?.id == track.id else { return }
 
-        teardownPlayerObservers()
+        retirePlayer()
 
         let audioSession = AVAudioSession.sharedInstance()
         try audioSession.setCategory(.playback, mode: .default, options: [])
@@ -4365,6 +4493,16 @@ final class LaneSession: ObservableObject {
     func resume() {
         playbackShouldPlay = true
         guard !seekingInitialPosition else { return }
+        if !playerError.isEmpty || player?.currentItem?.status == .failed {
+            if let currentTrack {
+                invalidateCurrentStreamCache()
+                requestStream(for: currentTrack)
+            }
+            return
+        }
+        // Resolution already in flight: don't start a retired item or cancel
+        // the fresh request each time the Play button is pressed.
+        if player == nil, streamResolveTask != nil, isBuffering { return }
         if let player {
             player.play()
             isBuffering = player.timeControlStatus != .playing
@@ -4740,6 +4878,10 @@ final class LaneSession: ObservableObject {
     }
 
     func toggleFavorite(_ track: TrackCandidate) {
+        guard !clearingPlaylistIDs.contains("lane_likes") else {
+            output = "Liked tracks are being cleared. Wait for the operation to finish."
+            return
+        }
         guard !isGuest else {
             output = "Sign in to save liked tracks to Lane."
             return

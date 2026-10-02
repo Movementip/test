@@ -94,6 +94,8 @@ final class LaneMockURLProtocol: URLProtocol {
     private static var failedNonce: String?
     private static var didVerifyDirectRetry = false
     private static var followingFriend = false
+    private static var clearFailedOnce = false
+    private static var reorderFailedOnce = false
 
     static func savedIDs(_ id: String) -> [String] {
         lock.lock()
@@ -193,6 +195,13 @@ final class LaneMockURLProtocol: URLProtocol {
         }
 
         switch path {
+        case "/v1/share/get":
+            try require(request.httpMethod == "GET" && request.value(forHTTPHeaderField: "Authorization") == nil,
+                        "Public share resolution must never send the account bearer token")
+            let type = query.first { $0.name == "id" }?.value ?? ""
+            return (200, try JSONSerialization.data(withJSONObject: ["shareContentType": type, "shareItemId": "canonical-\(type)",
+                "trackName": "One", "albumName": "Album", "artistName": "Lane", "playlistName": "Playlist",
+                "shareCoverUrl": "", "userName": "Friend", "userId": "friend", "userAvatarUrl": ""]))
         case "/user/upload/photo":
             try require(request.httpMethod == "POST" && multipart, "Image upload is multipart POST")
             let type = query.first { $0.name == "type" }?.value
@@ -232,7 +241,8 @@ final class LaneMockURLProtocol: URLProtocol {
                     return (503, Data(#"{"code":"TEMPORARY_FAILURE"}"#.utf8))
                 }
                 var saved = Self.playlists[playlistID] ?? []
-                for id in ids where !saved.contains(id) { saved.append(id) }
+                // Real edges may insert new batches at the front, not append.
+                for id in ids where !saved.contains(id) { saved.insert(id, at: 0) }
                 Self.playlists[playlistID] = saved
                 return (200, Data(#"{"ok":true}"#.utf8))
             }
@@ -266,6 +276,31 @@ final class LaneMockURLProtocol: URLProtocol {
             try require(playlistID == "playlist-created", "playlistId query mismatch")
             let array = try JSONSerialization.jsonObject(with: body) as? [String]
             try require(array == ["track-1", "track-2"], "add-tracks must send the APK raw JSON array")
+            return (200, Data(#"{"ok":true}"#.utf8))
+
+        case "/playlist/reorder":
+            try require(request.httpMethod == "POST", "Reordering must use the APK POST")
+            let json = try object(body)
+            guard let id = json["playlistId"] as? String, let ids = json["newOrder"] as? [String] else { throw URLError(.badServerResponse) }
+            Self.lock.lock(); defer { Self.lock.unlock() }
+            try require(Set(ids) == Set(Self.playlists[id] ?? []), "Reordering must retain unrelated tracks and not be used as deletion")
+            if id == "import-order-retry", !Self.reorderFailedOnce {
+                Self.reorderFailedOnce = true
+                return (503, Data(#"{"code":"ORDER_RETRY"}"#.utf8))
+            }
+            Self.playlists[id] = ids
+            return (200, Data(#"{"ok":true}"#.utf8))
+
+        case "/user/playlist/remove-track":
+            try require(request.httpMethod == "GET" && body.isEmpty, "APK remove-track is an empty-body GET")
+            let id = query.first { $0.name == "playlistId" }?.value ?? ""
+            let track = query.first { $0.name == "trackId" }?.value ?? ""
+            Self.lock.lock(); defer { Self.lock.unlock() }
+            if id == "import-clear", track == "lane-1", !Self.clearFailedOnce {
+                Self.clearFailedOnce = true
+                return (503, Data(#"{"code":"REMOVE_RETRY"}"#.utf8))
+            }
+            Self.playlists[id]?.removeAll { $0 == track }
             return (200, Data(#"{"ok":true}"#.utf8))
 
         case "/user/tracks":
@@ -558,12 +593,27 @@ struct LaneContractTestRunner {
             yandexPlaylistId: "https://music.yandex.ru/playlists/lk.42"
         )
         precondition(preview.playlistTracksIds == ["track-1", "track-2"])
+        let partialPreview = try JSONDecoder().decode([TrackData].self, from: Data(#"[{"songId":"lane-1","title":"One"}]"#.utf8))
+        precondition(LanePlaylist(playlistTracksIds: ["source-2", "source-1"], playlistTracks: partialPreview).importSourceIDs == ["source-2", "source-1"], "Partial resolved preview must not reshuffle the source IDs")
+        for type in ["track", "artist", "album", "playlist"] {
+            let shared = try await api.openShare(id: type)
+            precondition(shared.shareContentType == type && shared.shareItemId == "canonical-\(type)")
+        }
+        do { _ = try await api.openShare(id: "unknown"); preconditionFailure("Unsupported share type must be rejected") }
+        catch { }
+        for good in ["lane://share/abc-123", "https://music.sk-lane.com/abc-123"] {
+            precondition(LaneIncomingShare(url: URL(string: good)!)?.id == "abc-123")
+        }
+        for bad in ["https://evil.example/abc", "lane://evil/abc", "lane://share/", "lane://share/a/b", "lane://share/a%2Fb", "https://user@music.sk-lane.com/id", "https://music.sk-lane.com.evil/id"] {
+            precondition(LaneIncomingShare(url: URL(string: bad)!) == nil)
+        }
 
         UserDefaults.standard.set("raw", forKey: "lane.diag.addBody")
         let sourceIDs = (0..<1151).map { "source-\($0)" }
         let imported = try await api.importTrackBatches(token: "test-token", playlistId: "import-large", sourceIDs: sourceIDs)
         precondition(imported == 1151)
         precondition(LaneMockURLProtocol.savedIDs("import-large").count == 1151)
+        precondition(LaneMockURLProtocol.savedIDs("import-large") == sourceIDs.map { $0.replacingOccurrences(of: "source-", with: "lane-") })
         precondition(Array(LaneMockURLProtocol.batchSizes().suffix(77)) == Array(repeating: 15, count: 76) + [11])
 
         // Stop at the failed middle batch; a new client can continue without
@@ -579,6 +629,35 @@ struct LaneContractTestRunner {
         await fresh.setSigningConfiguration(LaneSigningConfiguration(mode: .custom, apiKeyHeader: "", apiKey: ""))
         let resumed = try await fresh.importTrackBatches(token: "test-token", playlistId: "import-resume", sourceIDs: Array(sourceIDs.prefix(31)))
         precondition(resumed == 31)
+        precondition(LaneMockURLProtocol.savedIDs("import-resume").count == 31)
+
+        // Cross-batch sort is durable, not just a reversed eight-row preview.
+        let small = Array(sourceIDs.prefix(31))
+        _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-oldest", sourceIDs: small, sort: .oldest)
+        precondition(LaneMockURLProtocol.savedIDs("import-oldest") == small.reversed().map { $0.replacingOccurrences(of: "source-", with: "lane-") })
+        try await api.addTracks(token: "test-token", playlistId: "import-reference", trackIds: ["unrelated"]).requireSuccess()
+        let reference = (0..<31).reversed().map { YandexImportTrack(yandexID: "yandex-\($0)", originalIndex: 30 - $0, title: "source-\($0)", artists: [], coverURL: nil) }
+        _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-reference", sourceIDs: small, orderReference: reference)
+        precondition(LaneMockURLProtocol.savedIDs("import-reference") == small.reversed().map { $0.replacingOccurrences(of: "source-", with: "lane-") } + ["unrelated"])
+        do {
+            _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-order-retry", sourceIDs: small)
+            preconditionFailure("Failed server ordering must not report ordered import success")
+        } catch { precondition(LaneMockURLProtocol.savedIDs("import-order-retry").count == 31) }
+        _ = try await fresh.importTrackBatches(token: "test-token", playlistId: "import-order-retry", sourceIDs: small)
+        precondition(LaneMockURLProtocol.savedIDs("import-order-retry") == small.map { $0.replacingOccurrences(of: "source-", with: "lane-") })
+
+        _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-clear", sourceIDs: small)
+        do {
+            _ = try await api.clearPlaylistTracks(token: "test-token", playlistId: "import-clear")
+            preconditionFailure("Partial deletion must not report success")
+        } catch { precondition(!LaneMockURLProtocol.savedIDs("import-clear").isEmpty) }
+        _ = try await fresh.clearPlaylistTracks(token: "test-token", playlistId: "import-clear")
+        precondition(LaneMockURLProtocol.savedIDs("import-clear").isEmpty)
+        precondition(LaneMockURLProtocol.savedIDs("import-large").count == 1151, "Clearing must only affect its target")
+        do {
+            _ = try await api.clearPlaylistTracks(token: "test-token", playlistId: "import-resume", shouldContinue: { false })
+            preconditionFailure("A changed account must cancel deletion")
+        } catch is CancellationError { }
         precondition(LaneMockURLProtocol.savedIDs("import-resume").count == 31)
 
         let like = try await api.addTracks(token: "test-token", playlistId: "lane_likes", trackIds: ["track-1"])
@@ -603,6 +682,6 @@ struct LaneContractTestRunner {
             "/user/import/preview"
         ]
         precondition(expectedPaths.allSatisfy(LaneMockURLProtocol.received))
-        print("Lane contract tests passed: APK-native cipher vector, encrypted/signed bodies, 1151-track 15-item batches, interrupted import resume, canonical album IDs, fresh-client server likes, privacy, notifications/invitations, multipart profile uploads, audio ranges and server-rendered effects.")
+        print("Lane contract tests passed: APK-native cipher/signature, 1151 tracks in batches of 15, durable source/reverse order despite prepending, Yandex metadata mapping, unrelated tracks retained, ordering retry, partial clear/retry/account cancellation, canonical albums, server likes, privacy, notifications, multipart uploads, ranges/effects.")
     }
 }

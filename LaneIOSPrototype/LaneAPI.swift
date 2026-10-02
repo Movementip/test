@@ -424,6 +424,7 @@ actor LaneAPI {
             }
             return (data, http)
         } catch {
+            try Task.checkCancellation()
             guard mode == "auto", let resignForFallback else { throw error }
 
             let direct = try await AndroidNetworkTransport.data(
@@ -709,6 +710,7 @@ actor LaneAPI {
         var lastResult: APIResult?
 
         for (index, targetBase) in candidates.enumerated() {
+            try Task.checkCancellation()
             let started = Date()
             do {
                 var unsigned = try build(
@@ -764,6 +766,7 @@ actor LaneAPI {
                 }
                 return result
             } catch {
+                try Task.checkCancellation()
                 let elapsed = Int(Date().timeIntervalSince(started) * 1000)
                 appendDiagnosticTrace(
                     "\(upperMethod) \(normalizedPath) host=\(targetBase.host ?? "?") body=\(diagnosticBodyShape(json)) -> ERROR \(elapsed)ms \(error.localizedDescription)"
@@ -1501,6 +1504,48 @@ actor LaneAPI {
         )
     }
 
+    /// No bulk-delete endpoint exists in APK 1.4.7. Remove only the IDs read
+    /// from this playlist, using its idempotent endpoint, at most 15 in flight.
+    /// Repeating after a partial failure reads the survivors, not an old cache.
+    func clearPlaylistTracks(token: String, playlistId: String,
+                             shouldContinue: @escaping @MainActor () -> Bool = { true },
+                             progress: @MainActor (Int, Int) -> Void = { _, _ in }) async throws -> Int {
+        guard !playlistId.isEmpty, !token.isEmpty else { throw LaneAPIError.invalidURL }
+        let detail = try await playlist(token: token, playlistId: playlistId)
+        guard detail.playlistTracksIds != nil || detail.playlistTracks != nil else {
+            throw LaneAPIError.decoding("Lane did not return the playlist's track IDs. Nothing was removed; retry.")
+        }
+        let ids = LaneTrackBatching.unique((detail.playlistTracksIds ?? []) + (detail.playlistTracks?.compactMap(\.songId) ?? []))
+        var completed = 0
+        await progress(0, ids.count)
+        for batch in LaneTrackBatching.batches(ids) {
+            try Task.checkCancellation()
+            guard await shouldContinue() else { throw CancellationError() }
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for id in batch {
+                    group.addTask {
+                        try Task.checkCancellation()
+                        guard await shouldContinue() else { throw CancellationError() }
+                        try await self.removeTrack(token: token, playlistId: playlistId, trackId: id).requireSuccess()
+                    }
+                }
+                try await group.waitForAll()
+            }
+            completed += batch.count
+            await progress(completed, ids.count)
+        }
+        for attempt in 0..<4 {
+            try Task.checkCancellation()
+            guard await shouldContinue() else { throw CancellationError() }
+            let confirmed = try await playlist(token: token, playlistId: playlistId)
+            if confirmed.playlistTracksIds?.isEmpty == true,
+               (confirmed.playlistTracks ?? []).isEmpty,
+               (confirmed.tracksCount ?? 0) == 0 { return completed }
+            if attempt < 3 { try await Task.sleep(nanoseconds: 400_000_000) }
+        }
+        throw LaneAPIError.decoding("The playlist is not empty on Lane yet. Some tracks may have been removed; retry to remove the remaining tracks.")
+    }
+
     /// Resolve and commit one page at a time. A failed page never clears pages
     /// already accepted by the server. Repeating the import is idempotent and
     /// skips tracks visible in the destination, including after an app restart.
@@ -1509,6 +1554,8 @@ actor LaneAPI {
         playlistId: String,
         sourceIDs: [String],
         resolveSourceIDs: Bool = true,
+        sort: LaneMusicImportSort = .original,
+        orderReference: [YandexImportTrack] = [],
         progress: @MainActor (_ processed: Int, _ total: Int, _ savedIDs: [String], _ tracks: [TrackData]) -> Void = { _, _, _, _ in }
     ) async throws -> Int {
         let ids = LaneTrackBatching.unique(sourceIDs)
@@ -1517,6 +1564,8 @@ actor LaneAPI {
         let existing = try? await playlist(token: token, playlistId: playlistId)
         var present = Set((existing?.playlistTracksIds ?? []) + (existing?.playlistTracks?.compactMap(\.songId) ?? []))
         var accepted = Set<String>()
+        var acceptedOrder: [String] = []
+        var resolvedTracks: [TrackData] = []
         var processed = 0
 
         for batch in LaneTrackBatching.batches(ids) {
@@ -1538,18 +1587,45 @@ actor LaneAPI {
                 present.formUnion(writeBatch)
             }
             accepted.formUnion(canonical)
+            acceptedOrder.append(contentsOf: canonical)
+            resolvedTracks.append(contentsOf: tracks)
             processed += batch.count
             await progress(processed, ids.count, canonical, tracks)
         }
 
-        // A 2xx acknowledgement alone is not proof of durable membership.
+        // Adding tracks can prepend them on the server. Set the final explicit
+        // order using the APK endpoint; retain unrelated destination tracks.
+        // Re-read just before reordering so a concurrent addition is not lost.
+        var destinationIDs: [String] = []
+        for attempt in 0..<4 {
+            try Task.checkCancellation()
+            let destination = try await playlist(token: token, playlistId: playlistId)
+            destinationIDs = LaneTrackBatching.unique((destination.playlistTracksIds ?? []) +
+                                                      (destination.playlistTracks?.compactMap(\.songId) ?? []))
+            if accepted.isSubset(of: Set(destinationIDs)) { break }
+            if attempt < 3 { try await Task.sleep(nanoseconds: 400_000_000) }
+        }
+        guard accepted.isSubset(of: Set(destinationIDs)) else {
+            throw LaneAPIError.decoding("Lane has not confirmed the imported tracks yet. Retry to continue.")
+        }
+        let ordered = resolveSourceIDs
+            ? LaneImportOrdering.ordered(resolvedTracks, sort: sort, reference: orderReference).compactMap(\.songId)
+            : (sort == .oldest ? Array(acceptedOrder.reversed()) : acceptedOrder)
+        let newOrder = LaneTrackBatching.unique(ordered) + destinationIDs.filter { !accepted.contains($0) }
+        if newOrder != destinationIDs {
+            try await reorderPlaylist(token: token, playlistId: playlistId, newOrder: newOrder).requireSuccess()
+        }
+
+        // A 2xx acknowledgement alone is not proof of durable membership/order.
         // Read back the destination before showing completion to the user.
         for attempt in 0..<4 {
             try Task.checkCancellation()
             if let destination = try? await playlist(token: token, playlistId: playlistId) {
-                let confirmed = Set((destination.playlistTracksIds ?? []) +
-                                    (destination.playlistTracks?.compactMap(\.songId) ?? []))
-                if accepted.isSubset(of: confirmed) { return accepted.count }
+                let confirmed = LaneTrackBatching.unique((destination.playlistTracksIds ?? []) +
+                                                        (destination.playlistTracks?.compactMap(\.songId) ?? []))
+                if accepted.isSubset(of: Set(confirmed)), confirmed.filter({ accepted.contains($0) }) == LaneTrackBatching.unique(ordered) {
+                    return accepted.count
+                }
             }
             if attempt < 3 { try await Task.sleep(nanoseconds: 400_000_000) }
         }
@@ -1557,6 +1633,14 @@ actor LaneAPI {
     }
 
     // MARK: Social
+    func openShare(id: String) async throws -> LaneOpenShareItem {
+        let item = try await decoded(LaneOpenShareItem.self, path: "/v1/share/get", query: [.init(name: "id", value: id)])
+        guard ["track", "artist", "album", "playlist"].contains(item.shareContentType), !item.shareItemId.isEmpty else {
+            throw LaneAPIError.decoding("This Lane share type is not supported.")
+        }
+        return item
+    }
+
     func friends(token: String, page: Int = 0, pageSize: Int = 50, query: String = "") async throws -> PaginatedResult<UserInfoDTO> {
         try await decoded(
             PaginatedResult<UserInfoDTO>.self,

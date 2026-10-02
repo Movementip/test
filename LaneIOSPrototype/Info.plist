@@ -20,6 +20,11 @@
   </dict>
 </dict>
 <key>LSRequiresIPhoneOS</key><true/>
+<key>CFBundleURLTypes</key><array><dict>
+  <key>CFBundleURLName</key><string>com.lane.ios.share</string>
+  <key>CFBundleURLSchemes</key><array><string>lane</string></array>
+  <key>CFBundleTypeRole</key><string>Viewer</string>
+</dict></array>
 <key>NSAppTransportSecurity</key>
 <dict>
   <!-- Lane's Android build loads artwork/audio from several third-party CDNs.

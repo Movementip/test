@@ -137,6 +137,57 @@ final class LaneNavigationTests: XCTestCase {
         screenshot("iPhone13-streaming-and-offline-download")
     }
 
+    func testStream500RecoversForNextSongSameSongAndCancelledOldRequest() {
+        app.buttons["Run recovery checks"].tap()
+        XCTAssertTrue(app.staticTexts["Recovery checks passed"].waitForExistence(timeout: 50), app.staticTexts["session.result"].label)
+        screenshot("iPhone13-stream-500-next-retry-and-cancellation")
+    }
+
+    func testClearPlaylistRequiresConfirmationAndPersistsWithoutDeletingPlaylist() {
+        app.buttons["Open full app"].tap()
+        let library = app.buttons["Library"].firstMatch
+        XCTAssertTrue(library.waitForExistence(timeout: 10))
+        library.tap()
+        let playlist = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture playlist")).firstMatch
+        XCTAssertTrue(playlist.waitForExistence(timeout: 15))
+        playlist.tap()
+        let actions = app.buttons["playlist.actions"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 10))
+        actions.tap()
+        let clear = app.buttons["playlist.clear"]
+        XCTAssertTrue(clear.waitForExistence(timeout: 5))
+        clear.tap()
+        XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 5))
+        app.alerts.buttons["Cancel"].tap()
+        XCTAssertTrue(app.staticTexts["Fixture track"].firstMatch.exists, "Cancelling must not remove tracks")
+        actions.tap(); clear.tap()
+        XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 5))
+        app.alerts.buttons["Удалить все треки"].tap()
+        XCTAssertTrue(app.staticTexts["0 tracks"].firstMatch.waitForExistence(timeout: 15))
+        library.tap()
+        XCTAssertTrue(playlist.waitForExistence(timeout: 10))
+        XCTAssertTrue(playlist.label.contains("0 tracks"), "The playlist must remain, now empty")
+        playlist.tap()
+        XCTAssertTrue(app.staticTexts["0 tracks"].firstMatch.waitForExistence(timeout: 10), "Reopening must not resurrect cached tracks")
+        screenshot("iPhone13-confirmed-server-playlist-clear")
+    }
+
+    func testIncomingShareCanRetryOpenAlbumAndCloseBackToApp() {
+        app.buttons["Open shared album"].tap()
+        let retry = app.buttons["share.retry"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["share.close"].isHittable, "A failed link must still be closable")
+        retry.tap()
+        XCTAssertTrue(app.staticTexts["Friend profile shared a album"].waitForExistence(timeout: 10))
+        app.buttons["share.open"].tap()
+        XCTAssertTrue(app.staticTexts["Fixture track 1"].waitForExistence(timeout: 10))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(app.buttons["share.close"].waitForExistence(timeout: 5))
+        screenshot("iPhone13-incoming-share-retry-album-return")
+        app.buttons["share.close"].tap()
+        XCTAssertTrue(app.buttons["Open shared album"].waitForExistence(timeout: 5))
+    }
+
     private func waitEnabled(_ element: XCUIElement) -> Bool {
         XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: element)], timeout: 10) == .completed
     }

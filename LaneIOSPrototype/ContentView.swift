@@ -1779,6 +1779,10 @@ struct PlaylistDetailScreen: View {
     @State private var tracks: [TrackCandidate] = []
     @State private var loading = true
     @State private var confirmDelete = false
+    @State private var confirmClear = false
+    @State private var clearCompleted = 0
+    @State private var clearTotal = 0
+    @State private var didClear = false
     @State private var actionTrack: TrackCandidate?
     @State private var showPlaylistActions = false
     @State private var showEditPlaylist = false
@@ -1801,6 +1805,9 @@ struct PlaylistDetailScreen: View {
     private var isSaved: Bool {
         session.serverPlaylists.contains { $0.playlistId == playlist.playlistId }
     }
+
+    private var canClear: Bool { isOwner || (playlist.playlistId == "lane_likes" && !session.isGuest) }
+    private var isClearing: Bool { session.clearingPlaylistIDs.contains(playlist.playlistId ?? "") }
 
     private var visibleName: String {
         if playlist.playlistId == "lane_likes" { return "Liked Songs" }
@@ -1854,7 +1861,7 @@ struct PlaylistDetailScreen: View {
                                 .foregroundStyle(Color.white.opacity(0.38))
                         }
 
-                        let count = max(tracks.count, playlist.effectiveTrackCount)
+                        let count = didClear ? tracks.count : max(tracks.count, playlist.effectiveTrackCount)
                         Text(count == 1 ? "1 track" : "\(count) tracks")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(Color.white.opacity(0.52))
@@ -1897,6 +1904,8 @@ struct PlaylistDetailScreen: View {
                                 .foregroundStyle(Color.white.opacity(0.82))
                                 .frame(width: 34, height: 40)
                         }
+                        .accessibilityIdentifier("playlist.actions")
+                        .disabled(isClearing)
 
                         Spacer()
 
@@ -1957,6 +1966,11 @@ struct PlaylistDetailScreen: View {
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 20)
                         .padding(.top, 12)
+                }
+
+                if isClearing {
+                    ProgressView("Removing \(clearCompleted)/\(clearTotal) tracks…")
+                        .tint(lanePink).padding()
                 }
 
                 if loading {
@@ -2081,6 +2095,25 @@ struct PlaylistDetailScreen: View {
             .background(laneBackground.opacity(0.96))
         }
         .onAppear { reloadTracks() }
+        .alert("Удалить все треки?", isPresented: $confirmClear) {
+            Button("Удалить все треки", role: .destructive) {
+                Task {
+                    actionError = nil
+                    do {
+                        try await session.clearPlaylistTracks(playlist) { completed, total in
+                            clearCompleted = completed; clearTotal = total
+                        }
+                        tracks = []; didClear = true
+                    } catch {
+                        actionError = error.localizedDescription
+                        reloadTracks()
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Все треки будут удалены из «\(visibleName)» на сервере Lane. Сам плейлист и скачанные файлы останутся. Это действие нельзя отменить.")
+        }
         .alert(isOwner ? "Delete playlist?" : "Remove from Library?", isPresented: $confirmDelete) {
             Button(isOwner ? "Delete" : "Remove", role: .destructive) {
                 Task {
@@ -2109,6 +2142,7 @@ struct PlaylistDetailScreen: View {
                     : (playlist.platform ?? "Lane"),
                 isOwner: isOwner,
                 isSaved: isSaved,
+                canClear: canClear && !isClearing,
                 visibility: visibleVisibility,
                 onEdit: {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -2133,6 +2167,9 @@ struct PlaylistDetailScreen: View {
                 onShare: { sharePlaylist() },
                 onToggleVisibility: { togglePlaylistVisibility() },
                 onSave: { savePlaylist() },
+                onClear: {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { confirmClear = true }
+                },
                 onDelete: {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                         confirmDelete = true
@@ -3184,7 +3221,7 @@ private struct ProfileScreen: View {
     }
 }
 
-private struct TelegramLoginScreen: View {
+struct TelegramLoginScreen: View {
     @EnvironmentObject private var session: LaneSession
     @Environment(\.openURL) private var openURL
 
@@ -4158,6 +4195,10 @@ private struct LocalPlaylistDetailScreen: View {
 private struct FavoriteTracksScreen: View {
     @EnvironmentObject private var session: LaneSession
     @Binding var showPlayer: Bool
+    @State private var confirmClear = false
+    @State private var clearCompleted = 0
+    @State private var clearTotal = 0
+    @State private var clearError: String?
 
     private var tracks: [TrackCandidate] {
         var seen = Set<String>()
@@ -4170,6 +4211,10 @@ private struct FavoriteTracksScreen: View {
 
     var body: some View {
         List {
+            if session.clearingPlaylistIDs.contains("lane_likes") {
+                ProgressView("Removing \(clearCompleted)/\(clearTotal) tracks…")
+            }
+            if let clearError { Text(clearError).foregroundStyle(lanePink) }
             if tracks.isEmpty {
                 EmptyLaneView(icon: "heart", title: "Favorite Tracks", subtitle: "Tap the heart on a track to save it.")
                     .listRowBackground(Color.clear)
@@ -4200,6 +4245,31 @@ private struct FavoriteTracksScreen: View {
         .scrollContentBackground(.hidden)
         .background(laneBackground)
         .navigationTitle("Liked tracks")
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Menu {
+                    Button("Удалить все треки", role: .destructive) { confirmClear = true }
+                        .accessibilityIdentifier("playlist.clear")
+                        .disabled(session.isGuest || session.clearingPlaylistIDs.contains("lane_likes"))
+                } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
+                .accessibilityIdentifier("playlist.actions")
+            }
+        }
+        .alert("Удалить все лайкнутые треки?", isPresented: $confirmClear) {
+            Button("Удалить все треки", role: .destructive) {
+                Task {
+                    clearError = nil
+                    do {
+                        try await session.clearPlaylistTracks(LanePlaylist(playlistId: "lane_likes")) { completed, total in
+                            clearCompleted = completed; clearTotal = total
+                        }
+                    } catch { clearError = error.localizedDescription }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Лайки будут удалены на сервере Lane и пропадут на всех устройствах. Скачанные файлы останутся. Это действие нельзя отменить.")
+        }
         .refreshable {
             session.refreshLibrary()
         }
@@ -4372,15 +4442,6 @@ private enum MusicImportStep: Equatable {
     case preview
 }
 
-private enum MusicImportSort: String, CaseIterable, Identifiable {
-    case original = "Yandex order"
-    case oldest = "Oldest first"
-    case title = "Title A–Z"
-    case artist = "Artist A–Z"
-
-    var id: String { rawValue }
-}
-
 private struct ImportTracksScreen: View {
     @EnvironmentObject private var session: LaneSession
     @Environment(\.openURL) private var openURL
@@ -4404,7 +4465,8 @@ private struct ImportTracksScreen: View {
     @State private var importTask: Task<Void, Never>?
     @State private var yandexTracks: [YandexImportTrack] = []
     @State private var importedTrackIDs: [String] = []
-    @State private var importSort: MusicImportSort = .original
+    @State private var importSort: LaneMusicImportSort = .original
+    @State private var yandexMetadataTask: Task<[YandexImportTrack], Never>?
     @State private var previewRequestID = UUID()
 
     var body: some View {
@@ -4752,23 +4814,21 @@ private struct ImportTracksScreen: View {
                 }
             }
 
+            Picker("Import order", selection: $importSort) {
+                ForEach(LaneMusicImportSort.allCases) { option in Text(option.rawValue).tag(option) }
+            }
+            .pickerStyle(.menu)
+            .accessibilityIdentifier("import.order")
+            .disabled(loading)
+            Text("This order will be saved in the Lane playlist. Existing unrelated tracks will be kept.")
+                .font(.caption2).foregroundStyle(.secondary)
+
             if !yandexTracks.isEmpty {
                 if yandexTracks.count != importSourceCount {
                     Text("Yandex shows \(yandexTracks.count) tracks, but Lane returned \(importSourceCount) importable IDs. Only the Lane preview can be added to a Lane playlist.")
                         .font(.caption)
                         .foregroundStyle(lanePink)
                 }
-
-                Picker("Display order", selection: $importSort) {
-                    ForEach(MusicImportSort.allCases) { option in
-                        Text(option.rawValue).tag(option)
-                    }
-                }
-                .pickerStyle(.menu)
-
-                Text("Display sorting does not change the Lane preview import order.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
 
                 ForEach(Array(sortedYandexTracks.prefix(8))) { track in
                     HStack(spacing: 10) {
@@ -4925,6 +4985,8 @@ private struct ImportTracksScreen: View {
     }
 
     private func resetPreview() {
+        yandexMetadataTask?.cancel()
+        yandexMetadataTask = nil
         preview = nil
         previewTracks = []
         yandexTracks = []
@@ -4994,8 +5056,10 @@ private struct ImportTracksScreen: View {
                 if platform == .yandex {
                     // Public Yandex metadata decorates the screen but does not
                     // delay or determine the Lane import ID list.
+                    let metadata = Task { (try? await session.yandexPlaylistTracks(from: input)) ?? [] }
+                    yandexMetadataTask = metadata
                     Task {
-                        let tracks = (try? await session.yandexPlaylistTracks(from: input)) ?? []
+                        let tracks = await metadata.value
                         if step == .preview && previewRequestID == requestID {
                             yandexTracks = tracks
                         }
@@ -5078,6 +5142,15 @@ private struct ImportTracksScreen: View {
                 importTask = nil
             }
             do {
+                // Public metadata loads alongside the first 15-row preview.
+                // If Import is tapped immediately, await that existing request
+                // rather than silently sending the unsorted resolver ID list.
+                var reference = yandexTracks
+                if platform == .yandex, reference.isEmpty, let metadata = yandexMetadataTask {
+                    importStage = "Loading Yandex playlist order…"
+                    reference = await metadata.value
+                    try Task.checkCancellation()
+                }
                 let updateProgress: (Int, Int, String) -> Void = { completed, total, stage in
                     importCompleted = completed
                     importTotal = total
@@ -5087,6 +5160,8 @@ private struct ImportTracksScreen: View {
                     ids,
                     into: targetPlaylistID,
                     resolvingSourceIDs: true,
+                    sort: importSort,
+                    orderReference: reference,
                     progress: updateProgress
                 ) { batch in
                     importedTrackIDs.append(contentsOf: batch)

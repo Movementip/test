@@ -478,6 +478,7 @@ struct APKPlaylistActionsSheet: View {
     let creatorName: String
     let isOwner: Bool
     let isSaved: Bool
+    let canClear: Bool
     let visibility: String
     let onEdit: () -> Void
     let onReorder: () -> Void
@@ -486,6 +487,7 @@ struct APKPlaylistActionsSheet: View {
     let onShare: () -> Void
     let onToggleVisibility: () -> Void
     let onSave: () -> Void
+    let onClear: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -524,6 +526,11 @@ struct APKPlaylistActionsSheet: View {
                 }
 
                 action("Share", icon: "square.and.arrow.up", asset: "ic_share", perform: onShare)
+
+                if canClear {
+                    action("Удалить все треки", icon: "trash", asset: "ic_delete", perform: onClear)
+                        .accessibilityIdentifier("playlist.clear")
+                }
 
                 if isOwner {
                     action(
