@@ -102,6 +102,10 @@ private struct LaneUITestRoot: View {
                 Button("Run range transport checks") { Task { await checkPlayback(direct: true) } }
                 Button("Run effects checks") { Task { await checkEffects() } }
                 Button("Run recovery checks") { Task { await checkPlaybackRecovery() } }
+                if ProcessInfo.processInfo.arguments.contains("--lane-background-fixture") {
+                    Button("Run background checks") { Task { await checkBackgroundPlayback() } }
+                }
+                NavigationLink("Track comments") { APKCommentsScreen(track: LaneUITestFixtures.track) }
                 Button("Edit profile") { showEdit = true }
                 Button("Open full app") { showFullApp = true }
                 if ProcessInfo.processInfo.arguments.contains("--lane-import-fixture") {
@@ -347,10 +351,49 @@ private struct LaneUITestRoot: View {
         } catch { result = "Recovery checks failed: \(error.localizedDescription)" }
     }
 
+    private func checkBackgroundPlayback() async {
+        do {
+            session.debugUseProgressiveTransport = true
+            let first = TrackCandidate(id: "background-first", title: "Short first song", subtitle: "Background test", trackID: "background-first")
+            let next = TrackCandidate(id: "background-next", title: "Next song in background", subtitle: "Background test", trackID: "background-next")
+            session.startPlayback(first, in: [first, next])
+            guard session.debugHasPlaybackBackgroundTask else { throw LaneAPIError.decoding("Missing transition execution window") }
+            result = "Background check ready"
+            var heardFirstInBackground = false
+            var heardNextInBackground = false
+            let started = Date()
+            for _ in 0..<240 {
+                if session.isPlaying, session.playbackPosition > 0.1,
+                   UIApplication.shared.applicationState != .active {
+                    if session.currentTrack?.trackID == first.trackID { heardFirstInBackground = true }
+                    if session.currentTrack?.trackID == next.trackID { heardNextInBackground = true }
+                }
+                if heardFirstInBackground && heardNextInBackground { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard heardFirstInBackground, heardNextInBackground else {
+                throw LaneAPIError.decoding("Real audio did not start/advance while backgrounded: \(session.output)")
+            }
+            guard LaneUITestURLProtocol.streamCount(for: "background-next") == 1 else {
+                throw LaneAPIError.decoding("Next did not reuse its in-flight preparation")
+            }
+            guard !session.debugHasPlaybackBackgroundTask else { throw LaneAPIError.decoding("Playing audio leaked background task") }
+            print("LANE_BACKGROUND_AUDIO first-and-next audible while backgrounded; next stream calls=1; elapsed=\(Date().timeIntervalSince(started))")
+            session.pause()
+            guard !session.debugHasPlaybackBackgroundTask else { throw LaneAPIError.decoding("Pause leaked background task") }
+            session.stop()
+            result = "Background checks passed"
+        } catch {
+            session.stop()
+            result = "Background checks failed: \(error.localizedDescription)"
+        }
+    }
+
     private func checkPlayback(direct: Bool = false) async {
         do {
             session.debugUseProgressiveTransport = direct
             try session.removeDownload(LaneUITestFixtures.track)
+            let started = Date()
             session.requestStream(for: LaneUITestFixtures.track)
             for _ in 0..<150 {
                 if session.isPlaying && session.playbackPosition > 0.1 { break }
@@ -363,6 +406,8 @@ private struct LaneUITestRoot: View {
             guard session.playbackBufferedDuration > 0, session.playbackDuration > 0 else {
                 throw LaneAPIError.decoding("Player did not publish loaded timeline ranges")
             }
+            guard Date().timeIntervalSince(started) < 8 else { throw LaneAPIError.decoding("Loopback audio startup exceeded 8 seconds") }
+            print("LANE_STREAM_START transport=\(direct ? "range" : "native") seconds=\(Date().timeIntervalSince(started)); completeFile=false")
             session.pause()
             session.downloadTrack(LaneUITestFixtures.track)
             for _ in 0..<150 {
@@ -406,6 +451,7 @@ private final class LaneUITestAudioServer {
     private var complete = false
     private var deliveredRanges: [Range<Int>] = []
     private let audio: Data
+    private let shortAudio: Data
     var url: String? { lock.lock(); defer { lock.unlock() }; return port.map { "http://127.0.0.1:\($0)/audio.wav" } }
     var finishedFullResponse: Bool { lock.lock(); defer { lock.unlock() }; return complete }
 
@@ -420,6 +466,14 @@ private final class LaneUITestAudioServer {
         data.append(Data("data".utf8)); word(UInt32(sampleCount * 2))
         for index in 0..<sampleCount { word(Int16(sin(Double(index) * 2 * .pi * 440 / Double(sampleRate)) * 400)) }
         audio = data
+        var short = Data(data.prefix(44 + Int(sampleRate) * 2 * 3))
+        func replaceWord(_ value: UInt32, at offset: Int) {
+            var little = value.littleEndian
+            withUnsafeBytes(of: &little) { short.replaceSubrange(offset..<(offset + 4), with: $0) }
+        }
+        replaceWord(UInt32(short.count - 8), at: 4)
+        replaceWord(UInt32(short.count - 44), at: 40)
+        shortAudio = short
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         listener = try! NWListener(using: parameters)
@@ -447,28 +501,29 @@ private final class LaneUITestAudioServer {
                 if !ended { self.receive(connection, accumulated: data) } else { connection.cancel() }
                 return
             }
-            var start = 0, end = self.audio.count - 1
+            let payload = text.contains("/short.wav ") ? self.shortAudio : self.audio
+            var start = 0, end = payload.count - 1
             let range = text.components(separatedBy: "\r\n").first { $0.lowercased().hasPrefix("range:") }
             if let range, let value = range.components(separatedBy: "bytes=").last {
                 let fields = value.components(separatedBy: "-")
                 start = Int(fields[0]) ?? 0
                 if fields.count > 1, let upper = Int(fields[1]) { end = min(upper, end) }
             }
-            guard start >= 0, start <= end, start < self.audio.count else { connection.cancel(); return }
+            guard start >= 0, start <= end, start < payload.count else { connection.cancel(); return }
             let length = end - start + 1
             var headers = "HTTP/1.1 \(range == nil ? "200 OK" : "206 Partial Content")\r\nContent-Type: audio/wav\r\nAccept-Ranges: bytes\r\nContent-Length: \(length)\r\nConnection: close\r\n"
-            if range != nil { headers += "Content-Range: bytes \(start)-\(end)/\(self.audio.count)\r\n" }
+            if range != nil { headers += "Content-Range: bytes \(start)-\(end)/\(payload.count)\r\n" }
             connection.send(content: Data((headers + "\r\n").utf8), completion: .contentProcessed { error in
                 if error != nil { connection.cancel(); return }
                 if text.hasPrefix("HEAD ") { connection.cancel(); return }
-                self.send(connection, offset: start, end: end, whole: start == 0 && end == self.audio.count - 1)
+                self.send(connection, offset: start, end: end, payload: payload)
             })
         }
     }
 
-    private func send(_ connection: NWConnection, offset: Int, end: Int, whole: Bool) {
+    private func send(_ connection: NWConnection, offset: Int, end: Int, payload: Data) {
         let next = min(offset + 16384, end + 1)
-        connection.send(content: audio.subdata(in: offset..<next), completion: .contentProcessed { [weak self] error in
+        connection.send(content: payload.subdata(in: offset..<next), completion: .contentProcessed { [weak self] error in
             guard let self, error == nil else { connection.cancel(); return }
             self.lock.lock()
             var merged: [Range<Int>] = []
@@ -483,7 +538,7 @@ private final class LaneUITestAudioServer {
             if next > end {
                 connection.cancel()
             } else {
-                self.queue.asyncAfter(deadline: .now() + 0.25) { self.send(connection, offset: next, end: end, whole: whole) }
+                self.queue.asyncAfter(deadline: .now() + 0.25) { self.send(connection, offset: next, end: end, payload: payload) }
             }
         })
     }
@@ -524,6 +579,10 @@ private final class LaneUITestURLProtocol: URLProtocol {
     private static var accountReadRace = false
     private static var accountReadStarted = false
     private static var failedStreamCanRetry = false
+    private static var streamCounts: [String: Int] = [:]
+    static func streamCount(for id: String) -> Int {
+        lock.lock(); defer { lock.unlock() }; return streamCounts[id] ?? 0
+    }
     private static var shareFailedOnce = false
     private var delayedDelivery: DispatchWorkItem?
 
@@ -735,13 +794,20 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 }
             } else if path == "/track/stream" || path == "/track/download" {
                 let id = query.first { $0.name == "trackId" }?.value ?? ""
+                if path == "/track/stream" { Self.streamCounts[id, default: 0] += 1 }
                 if id == "stream-failure" && !Self.failedStreamCanRetry || id == "late-failure" {
                     statusCode = 500; delayResponse = id == "late-failure"
                     data = Data(#"{"message":"Transient stream failure"}"#.utf8)
                 } else {
                     guard let url = LaneUITestAudioServer.shared.url else { throw URLError(.cannotConnectToHost) }
-                    data = try JSONSerialization.data(withJSONObject: ["url": url, "trackId": id])
+                    let selectedURL = id == "background-first" ? url.replacingOccurrences(of: "/audio.wav", with: "/short.wav") : url
+                    if id.hasPrefix("background-") { delayResponse = true; responseDelay = 4 }
+                    data = try JSONSerialization.data(withJSONObject: ["url": selectedURL, "trackId": id, "ttl": 90])
                 }
+            } else if path == "/track/lane-1/comments" {
+                data = Data(#"{"items":[{"id":"comment-1","userId":"friend","userName":"Friend profile","text":"Parent comment","repliesCount":1},{"id":"anonymous","userName":"Deleted user","text":"No profile"}],"hasNext":false}"#.utf8)
+            } else if path == "/comment/comment-1/replies" {
+                data = Data(#"{"items":[{"id":"reply-1","userId":"second","userName":"Second friend","text":"Reply comment","replyToUserId":"friend","replyToUserName":"Friend profile"}],"hasNext":false}"#.utf8)
             } else if path == "/track/stats" {
                 data = Data(#"{"likesCount":27,"commentsCount":4}"#.utf8)
             } else {

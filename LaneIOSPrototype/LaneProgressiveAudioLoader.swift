@@ -9,7 +9,7 @@ final class LaneProgressiveAudioLoader: NSObject, AVAssetResourceLoaderDelegate 
     typealias Fetch = (URLRequest) async throws -> (Data, HTTPURLResponse)
     private let remoteURL: URL
     private let fetch: Fetch
-    private let queue = DispatchQueue(label: "lane.progressive.audio")
+    private let queue = DispatchQueue(label: "lane.progressive.audio", qos: .userInitiated)
     private var tasks: [ObjectIdentifier: Task<Void, Never>] = [:]
     private var contentLength: Int64?
     private var contentType: String?
@@ -40,7 +40,7 @@ final class LaneProgressiveAudioLoader: NSObject, AVAssetResourceLoaderDelegate 
     func resourceLoader(_ resourceLoader: AVAssetResourceLoader, shouldWaitForLoadingOfRequestedResource request: AVAssetResourceLoadingRequest) -> Bool {
         guard request.request.url?.scheme == "lane-audio" else { return false }
         let key = ObjectIdentifier(request)
-        tasks[key] = Task { [weak self] in
+        tasks[key] = Task(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             do { try await self.load(request) }
             catch {

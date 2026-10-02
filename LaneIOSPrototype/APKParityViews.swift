@@ -1277,14 +1277,26 @@ struct APKAlbumDetailScreen: View {
         }
         .background(apkBackground.ignoresSafeArea())
         .tint(.white)
-        // Album cards are always pushed in a NavigationStack. UIKit's own
-        // back item pops that stack reliably and keeps interactive cancellation.
-        .navigationBarBackButtonHidden(false)
+        // Explicit, stable tap target: the synthesized iOS 26 back item
+        // intermittently ignored the first tap in repeated simulator runs.
+        // The gesture bridge retains UIKit's interactive, cancellable pop.
+        .navigationBarBackButtonHidden(true)
         .toolbarRole(.editor)
         .laneIOSBackSwipe()
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button { dismiss() } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 20, weight: .semibold))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier("album.back")
+            }
             ToolbarItem(placement: .principal) {
                 Text("Album")
                     .font(.system(size: 16, weight: .semibold))
@@ -1916,13 +1928,17 @@ struct APKCommentsScreen: View {
                         LazyVStack(spacing: 0) {
                             ForEach(session.comments) { comment in
                                 HStack(alignment: .top, spacing: 11) {
-                                    APKRemoteImage(url: comment.userAvatar, circle: true)
-                                        .frame(width: 40, height: 40)
+                                    commentProfileLink(comment.userId, identifier: "comment.avatar.\(comment.id)") {
+                                        APKRemoteImage(url: comment.userAvatar, circle: true)
+                                            .frame(width: 40, height: 40)
+                                    }
 
                                     VStack(alignment: .leading, spacing: 6) {
                                         HStack {
-                                            Text(comment.userName ?? "Lane user")
-                                                .font(.system(size: 14, weight: .bold))
+                                            commentProfileLink(comment.userId, identifier: "comment.author.\(comment.id)") {
+                                                Text(comment.userName ?? "Lane user")
+                                                    .font(.system(size: 14, weight: .bold))
+                                            }
                                             Spacer()
                                             if let timestamp = comment.timestamp {
                                                 Text(Self.relative(timestamp))
@@ -1988,19 +2004,25 @@ struct APKCommentsScreen: View {
                                     VStack(spacing: 0) {
                                         ForEach(replies) { reply in
                                             HStack(alignment: .top, spacing: 9) {
-                                                APKRemoteImage(url: reply.userAvatar, circle: true)
-                                                    .frame(width: 30, height: 30)
+                                                commentProfileLink(reply.userId, identifier: "comment.avatar.\(reply.id)") {
+                                                    APKRemoteImage(url: reply.userAvatar, circle: true)
+                                                        .frame(width: 30, height: 30)
+                                                }
 
                                                 VStack(alignment: .leading, spacing: 5) {
                                                     HStack(spacing: 5) {
-                                                        Text(reply.userName ?? "Lane user")
-                                                            .font(.system(size: 12, weight: .bold))
+                                                        commentProfileLink(reply.userId, identifier: "comment.author.\(reply.id)") {
+                                                            Text(reply.userName ?? "Lane user")
+                                                                .font(.system(size: 12, weight: .bold))
+                                                        }
 
                                                         if let replyName = reply.replyToUserName,
                                                            !replyName.isEmpty {
-                                                            Text("→ @\(replyName)")
-                                                                .font(.system(size: 11))
-                                                                .foregroundStyle(.secondary)
+                                                            commentProfileLink(reply.replyToUserId, identifier: "comment.target.\(reply.id)") {
+                                                                Text("→ @\(replyName)")
+                                                                    .font(.system(size: 11))
+                                                                    .foregroundStyle(.secondary)
+                                                            }
                                                         }
 
                                                         Spacer()
@@ -2114,6 +2136,18 @@ struct APKCommentsScreen: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    @ViewBuilder
+    private func commentProfileLink<Content: View>(_ userID: String?, identifier: String,
+                                                   @ViewBuilder content: () -> Content) -> some View {
+        if let userID, !userID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            NavigationLink { LaneUserProfileScreen(laneID: userID) } label: { content() }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier(identifier)
+        } else {
+            content() // Deleted/anonymous author is not a broken profile link.
+        }
     }
 
     private static func relative(_ raw: Int64) -> String {

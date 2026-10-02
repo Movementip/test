@@ -173,7 +173,7 @@ private final class DirectHTTPSOperation {
     private let originalHost: String
     private let address: String
     private let timeout: TimeInterval
-    private let queue = DispatchQueue(label: "lane.android-dns.transport")
+    private let queue = DispatchQueue(label: "lane.android-dns.transport", qos: .userInitiated)
     private let lock = NSLock()
 
     private var connection: NWConnection?

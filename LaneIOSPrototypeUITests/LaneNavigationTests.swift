@@ -73,19 +73,23 @@ final class LaneNavigationTests: XCTestCase {
     }
 
     func testAlbumKeepsCanonicalTracksAndBackButton() {
+        for index in 0..<4 {
+            app.buttons["Recommended album"].tap()
+            let back = app.buttons["album.back"]
+            XCTAssertTrue(back.waitForExistence(timeout: 10))
+            XCTAssertTrue(back.isHittable)
+            XCTAssertTrue(app.staticTexts["Fixture track 1"].waitForExistence(timeout: 10))
+            XCTAssertTrue(app.staticTexts["Fixture track 2"].exists)
+            if index == 0 { screenshot("iPhone13-album-two-canonical-tracks") }
+            back.tap()
+            XCTAssertTrue(app.buttons["Recommended album"].waitForExistence(timeout: 5), "Album back failed on opening \(index + 1)")
+        }
         app.buttons["Recommended album"].tap()
-        let back = app.navigationBars.buttons.firstMatch
-        XCTAssertTrue(back.waitForExistence(timeout: 10))
-        XCTAssertTrue(back.isHittable)
-        XCTAssertTrue(app.staticTexts["Fixture track 1"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Fixture track 2"].exists)
-        screenshot("iPhone13-album-two-canonical-tracks")
-        back.tap()
+        XCTAssertTrue(app.buttons["album.back"].waitForExistence(timeout: 10))
+        let window = app.windows.firstMatch
+        let edge = window.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.45))
+        edge.press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.45)))
         XCTAssertTrue(app.buttons["Recommended album"].waitForExistence(timeout: 5))
-        app.buttons["Recommended album"].tap()
-        XCTAssertTrue(back.waitForExistence(timeout: 10))
-        back.tap()
-        XCTAssertTrue(app.buttons["Recommended album"].waitForExistence(timeout: 5), "Native album return must still work after reopening")
     }
 
     func testSessionImportAndLikesAfterLocalStateRemoval() {
@@ -223,6 +227,45 @@ final class LaneNavigationTests: XCTestCase {
         app.buttons["Run playback checks"].tap()
         XCTAssertTrue(app.staticTexts["Playback checks passed"].waitForExistence(timeout: 45), app.staticTexts["session.result"].label)
         screenshot("iPhone13-streaming-and-offline-download")
+    }
+
+    func testDelayedAudioStartsAndAdvancesInBackgroundWithPreparedNextStream() {
+        app.terminate()
+        app.launchArguments = ["--lane-ui-test", "--lane-background-fixture"]
+        app.launch()
+        app.buttons["Run background checks"].tap()
+        XCTAssertTrue(app.staticTexts["Background check ready"].waitForExistence(timeout: 5))
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
+        // No foreground activation during the slow resolution, real WAV
+        // buffering, end notification, or the following in-flight resolution.
+        Thread.sleep(forTimeInterval: 16)
+        app.activate()
+        XCTAssertTrue(app.staticTexts["Background checks passed"].waitForExistence(timeout: 10), app.staticTexts["session.result"].label)
+        screenshot("iPhone13-background-real-audio-next")
+    }
+
+    func testCommentAndReplyAuthorsOpenProfilesAndReturn() {
+        app.buttons["Track comments"].tap()
+        let author = app.buttons["comment.author.comment-1"]
+        XCTAssertTrue(author.waitForExistence(timeout: 10))
+        author.tap()
+        XCTAssertTrue(app.staticTexts["Friend profile"].firstMatch.waitForExistence(timeout: 10))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(author.waitForExistence(timeout: 5))
+        app.buttons["Show 1 replies"].tap()
+        let reply = app.buttons["comment.author.reply-1"]
+        XCTAssertTrue(reply.waitForExistence(timeout: 10))
+        reply.tap()
+        XCTAssertTrue(app.staticTexts["Second friend"].firstMatch.waitForExistence(timeout: 10))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(reply.waitForExistence(timeout: 5))
+        app.buttons["comment.target.reply-1"].tap()
+        XCTAssertTrue(app.staticTexts["Friend profile"].firstMatch.waitForExistence(timeout: 10))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertFalse(app.buttons["comment.author.anonymous"].exists)
+        XCTAssertTrue(app.staticTexts["Deleted user"].exists)
+        screenshot("iPhone13-comment-reply-profile-links")
     }
 
     func testStream500RecoversForNextSongSameSongAndCancelledOldRequest() {
