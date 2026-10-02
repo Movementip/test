@@ -1307,17 +1307,22 @@ final class LaneSession: ObservableObject {
 
     private func loadAccount() async {
         guard !isGuest else { return }
+        let requestToken = token
         do {
             await configureAPI()
             let language = Locale.current.language.languageCode?.identifier ?? "en"
-            let accountValue = try await LaneAPI.shared.account(token: token, deviceLanguage: language)
+            let accountValue = try await LaneAPI.shared.account(token: requestToken, deviceLanguage: language)
+            guard token == requestToken else { return }
             account = accountValue
 
             if let laneId = accountValue.laneId, !laneId.isEmpty {
-                publicProfile = try? await LaneAPI.shared.userInfo(token: token, laneId: laneId)
+                let profile = try? await LaneAPI.shared.userInfo(token: requestToken, laneId: laneId)
+                guard token == requestToken else { return }
+                publicProfile = profile
             }
             status = 200
         } catch {
+            guard token == requestToken else { return }
             output = error.localizedDescription
         }
     }
@@ -1332,7 +1337,11 @@ final class LaneSession: ObservableObject {
         let value = try await LaneAPI.shared.account(token: requestToken, deviceLanguage: Locale.current.language.languageCode?.identifier ?? "en")
         guard token == requestToken else { throw CancellationError() }
         account = value
-        if let id = value.laneId { publicProfile = try? await LaneAPI.shared.userInfo(token: requestToken, laneId: id) }
+        if let id = value.laneId {
+            let profile = try? await LaneAPI.shared.userInfo(token: requestToken, laneId: id)
+            guard token == requestToken else { throw CancellationError() }
+            publicProfile = profile
+        }
     }
 
     func uploadProfileImage(_ data: Data, target: String, isGIF: Bool) async throws -> String {
@@ -1342,17 +1351,23 @@ final class LaneSession: ObservableObject {
 
     func loadPrivacySettings() async throws -> LanePrivacySettings {
         guard !isGuest else { throw LaneAPIError.decoding("Sign in to change privacy settings.") }
+        let requestToken = token
         await configureAPI()
-        let value = try await LaneAPI.shared.account(token: token, deviceLanguage: Locale.current.language.languageCode?.identifier ?? "en")
+        let value = try await LaneAPI.shared.account(token: requestToken, deviceLanguage: Locale.current.language.languageCode?.identifier ?? "en")
+        guard token == requestToken else { throw CancellationError() }
         account = value
         return value.privacySettings ?? LanePrivacySettings()
     }
 
     func savePrivacySettings(_ settings: LanePrivacySettings) async throws {
+        guard !isGuest else { throw LaneAPIError.decoding("Sign in to change privacy settings.") }
+        let requestToken = token
         await configureAPI()
-        let result = try await LaneAPI.shared.updatePrivacy(token: token, settings: settings)
+        guard token == requestToken else { throw CancellationError() }
+        let result = try await LaneAPI.shared.updatePrivacy(token: requestToken, settings: settings)
         try result.requireSuccess()
         for attempt in 0..<4 {
+            guard token == requestToken else { throw CancellationError() }
             if try await loadPrivacySettings() == settings { return }
             if attempt < 3 { try await Task.sleep(nanoseconds: 350_000_000) }
         }
@@ -1676,10 +1691,11 @@ final class LaneSession: ObservableObject {
     private func loadLibrary() async {
         guard !isGuest else { return }
 
-        await configureAPI()
         let requestToken = token
         let loadGeneration = UUID()
         libraryLoadGeneration = loadGeneration
+        await configureAPI()
+        guard token == requestToken, libraryLoadGeneration == loadGeneration else { return }
         async let playlistsRequest = try? LaneAPI.shared.userPlaylists(token: requestToken)
         async let albumsRequest = try? LaneAPI.shared.userAlbums(token: requestToken)
         async let artistsRequest = try? LaneAPI.shared.userArtists(token: requestToken)
@@ -1809,8 +1825,10 @@ final class LaneSession: ObservableObject {
 
             if let likedIDs {
                 let serverIDs = Set(likedIDs)
+                let isCompleteLikedRead = expectedLikedCount <= serverIDs.count
                 let confirmedPendingIDs = pendingFavoriteStates.compactMap { id, desired in
-                    serverIDs.contains(id) == desired ? id : nil
+                    let confirmed = desired ? serverIDs.contains(id) : (isCompleteLikedRead && !serverIDs.contains(id))
+                    return confirmed ? id : nil
                 }
                 for id in confirmedPendingIDs {
                     pendingFavoriteStates.removeValue(forKey: id)
@@ -1824,7 +1842,8 @@ final class LaneSession: ObservableObject {
                 let pendingMigration = favoriteMigrationInProgress
                     ? favorites.subtracting(serverIDs)
                     : Set(legacyIDs)
-                var reconciledFavorites = serverIDs
+                let readFavorites = isCompleteLikedRead ? serverIDs : serverIDs.union(favorites)
+                var reconciledFavorites = readFavorites
                     .subtracting(favoriteMutationsInFlight)
                     .union(favorites.intersection(favoriteMutationsInFlight))
                     .union(pendingMigration)
@@ -1849,17 +1868,27 @@ final class LaneSession: ObservableObject {
                     }
                 }
 
-                if !embeddedLikedData.isEmpty {
-                    likedTracks = embeddedLikedData.map { TrackCandidate($0, refID: "lane_likes") }
-                    rememberResolvedTracks(likedTracks)
-                } else if likedIDs.isEmpty {
-                    likedTracks = []
-                } else {
-                    likedTracks = await resolveTracksByIDs(
-                        likedIDs,
+                let missingMetadata = likedIDs.filter { !embeddedLikedIDs.contains($0) }
+                let resolved = missingMetadata.isEmpty ? [] : await resolveTracksByIDs(
+                        missingMetadata,
                         prefetch: false,
                         refID: "lane_likes"
                     )
+                // Resolving metadata suspends this read. A like may already
+                // have been committed/confirmed meanwhile, so pending state
+                // alone cannot protect the new row from this older snapshot.
+                guard token == requestToken, libraryLoadGeneration == loadGeneration else { return }
+                let loadedLikedTracks = LaneTrackBatching.ordered(
+                    embeddedLikedData.map { TrackCandidate($0, refID: "lane_likes") } + resolved,
+                    sourceIDs: likedIDs
+                )
+                likedTracks = loadedLikedTracks
+                rememberResolvedTracks(loadedLikedTracks)
+                if !isCompleteLikedRead {
+                    let loadedIDs = Set(likedTracks.compactMap(\.trackID))
+                    likedTracks.append(contentsOf: previousLikedTracks.filter {
+                        $0.trackID.map { favorites.contains($0) && !loadedIDs.contains($0) } ?? false
+                    })
                 }
 
                 for (id, shouldBeLiked) in pendingFavoriteStates {
@@ -4530,26 +4559,35 @@ final class LaneSession: ObservableObject {
         let (detail, tracks, playlists) = await (detailRequest, tracksRequest, playlistsRequest)
 
         var didReadState = false
+        var readIDs = Set<String>()
+        var expectedCount = detail?.effectiveTrackCount ?? 0
         if let ids = detail?.playlistTracksIds {
             didReadState = true
+            readIDs.formUnion(ids)
             if ids.contains(trackID) { return true }
         }
         if let embedded = detail?.playlistTracks {
             didReadState = true
+            readIDs.formUnion(embedded.compactMap(\.songId))
             if embedded.contains(where: { $0.songId == trackID }) { return true }
         }
         if let tracks {
             didReadState = true
+            readIDs.formUnion(tracks.compactMap(\.songId))
             if tracks.contains(where: { $0.songId == trackID }) { return true }
         }
         if let likedPlaylist = playlists?.first(where: { $0.playlistId == "lane_likes" }) {
-            didReadState = true
+            expectedCount = max(expectedCount, likedPlaylist.effectiveTrackCount)
+            if let ids = likedPlaylist.playlistTracksIds { didReadState = true; readIDs.formUnion(ids) }
+            if let embedded = likedPlaylist.playlistTracks { didReadState = true; readIDs.formUnion(embedded.compactMap(\.songId)) }
             if likedPlaylist.playlistTracksIds?.contains(trackID) == true ||
                 likedPlaylist.playlistTracks?.contains(where: { $0.songId == trackID }) == true {
                 return true
             }
         }
-        return didReadState ? false : nil
+        // Metadata-only and truncated pages cannot confirm a removal. A
+        // positive occurrence proves membership; absence needs a complete read.
+        return didReadState && readIDs.count >= expectedCount ? false : nil
     }
 
     private func waitForFavoriteState(
@@ -4679,6 +4717,7 @@ final class LaneSession: ObservableObject {
               pendingFavoriteStates[trackID] == shouldBeLiked else { return }
 
         if confirmedOnServer {
+            libraryLoadGeneration = UUID()
             pendingFavoriteStates.removeValue(forKey: trackID)
             output = shouldBeLiked ? "Added to liked tracks." : "Removed from liked tracks."
         } else if acceptedByServer {
@@ -4712,6 +4751,7 @@ final class LaneSession: ObservableObject {
         }
         guard favoriteMutationsInFlight.insert(trackID).inserted else { return }
 
+        libraryLoadGeneration = UUID()
         let requestToken = token
         let shouldBeLiked = !favorites.contains(trackID)
         pendingFavoriteStates[trackID] = shouldBeLiked

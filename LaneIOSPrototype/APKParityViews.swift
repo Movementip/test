@@ -1270,23 +1270,14 @@ struct APKAlbumDetailScreen: View {
         }
         .background(apkBackground.ignoresSafeArea())
         .tint(.white)
-        .navigationBarBackButtonHidden(true)
+        // Album cards are always pushed in a NavigationStack. UIKit's own
+        // back item pops that stack reliably and keeps interactive cancellation.
+        .navigationBarBackButtonHidden(false)
+        .toolbarRole(.editor)
         .laneIOSBackSwipe()
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 18, weight: .semibold))
-                        .frame(width: 36, height: 36)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Back")
-                .accessibilityIdentifier("album.back")
-            }
             ToolbarItem(placement: .principal) {
                 Text("Album")
                     .font(.system(size: 16, weight: .semibold))
@@ -2766,6 +2757,8 @@ struct APKFullPlayerView: View {
                     session.toggleFavorite(track)
                     session.loadTrackStats(track)
                 }
+                .accessibilityIdentifier("player.likes")
+                .accessibilityLabel("Likes \(session.trackStats?.likesCount ?? 0)")
                 .overlay(alignment: .topTrailing) {
                     if session.isFavoriteSyncPending(track) {
                         Image(systemName: "clock.arrow.circlepath")
@@ -2783,6 +2776,8 @@ struct APKFullPlayerView: View {
                     session.loadComments(for: track)
                     showComments = true
                 }
+                .accessibilityIdentifier("player.comments")
+                .accessibilityLabel("Comments \(session.trackStats?.commentsCount ?? 0)")
             }
 
             Spacer()

@@ -122,6 +122,53 @@ private struct LaneUITestRoot: View {
             guard fresh.isFavorite(LaneUITestFixtures.track), fresh.likedTracks.contains(where: { $0.trackID == "lane-1" }) else {
                 throw LaneAPIError.decoding("Fresh installation did not restore server likes")
             }
+
+            // Hold an older library read inside metadata resolution. Commit a
+            // new like while it is suspended, then deliver the old response.
+            // A pending-state-only fix loses the row after confirmation here.
+            LaneUITestURLProtocol.prepareFavoriteReadRace()
+            defer { LaneUITestURLProtocol.finishFavoriteReadRace() }
+            UserDefaults.standard.removeObject(forKey: "lane.cachedTrackMetadata")
+            let racing = LaneSession()
+            racing.backendMode = .custom
+            racing.baseURL = "https://lane-ui.test"
+            racing.token = "ui-fixture-race"
+            let refresh = Task { await racing.refreshAfterLogin() }
+            for _ in 0..<50 {
+                if LaneUITestURLProtocol.favoriteResolutionStarted { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard LaneUITestURLProtocol.favoriteResolutionStarted else {
+                throw LaneAPIError.decoding("Favorite race did not reach delayed metadata resolution")
+            }
+            let added = TrackCandidate(id: "lane-99", title: "New like", subtitle: "Lane fixture", trackID: "lane-99", platform: "spotify")
+            racing.toggleFavorite(added)
+            for _ in 0..<50 {
+                if !racing.isFavoriteSyncPending(added) { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard !racing.isFavoriteSyncPending(added) else { throw LaneAPIError.decoding("Concurrent like was not confirmed") }
+            await refresh.value
+            guard racing.isFavorite(added), racing.likedTracks.contains(where: { $0.trackID == "lane-99" }) else {
+                throw LaneAPIError.decoding("A delayed library read erased a newer confirmed like")
+            }
+            LaneUITestURLProtocol.finishFavoriteReadRace()
+
+            // A delayed account response must not sign a cleared account back
+            // in, nor expose its privacy/profile state after logout.
+            LaneUITestURLProtocol.prepareAccountReadRace()
+            let privacyRead = Task { try await racing.loadPrivacySettings() }
+            for _ in 0..<50 {
+                if LaneUITestURLProtocol.accountResolutionStarted { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard LaneUITestURLProtocol.accountResolutionStarted else { throw LaneAPIError.decoding("Account race did not start") }
+            racing.clearAccount()
+            do {
+                _ = try await privacyRead.value
+                throw LaneAPIError.decoding("Old account response was accepted after logout")
+            } catch is CancellationError { }
+            guard racing.account == nil, racing.publicProfile == nil else { throw LaneAPIError.decoding("Old profile reappeared after logout") }
             result = "Session checks passed"
         } catch {
             result = "Session checks failed: \(error.localizedDescription)"
@@ -323,10 +370,41 @@ private final class LaneUITestURLProtocol: URLProtocol {
     private static var effectFailedOnce = false
     private static var followingFriend = false
     private static var followFailedOnce = false
+    private static var favoriteReadRace = false
+    private static var favoriteReadStarted = false
+    private static var accountReadRace = false
+    private static var accountReadStarted = false
+    private var delayedDelivery: DispatchWorkItem?
+
+    static func prepareFavoriteReadRace() {
+        lock.lock(); defer { lock.unlock() }
+        saved["lane_likes"] = ["lane-1"]
+        favoriteReadRace = true
+        favoriteReadStarted = false
+    }
+
+    static func finishFavoriteReadRace() {
+        lock.lock(); defer { lock.unlock() }
+        favoriteReadRace = false
+    }
+
+    static var favoriteResolutionStarted: Bool {
+        lock.lock(); defer { lock.unlock() }; return favoriteReadStarted
+    }
+
+    static func prepareAccountReadRace() {
+        lock.lock(); defer { lock.unlock() }
+        accountReadRace = true
+        accountReadStarted = false
+    }
+
+    static var accountResolutionStarted: Bool {
+        lock.lock(); defer { lock.unlock() }; return accountReadStarted
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "lane-ui.test" }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-    override func stopLoading() {}
+    override func stopLoading() { delayedDelivery?.cancel() }
 
     override func startLoading() {
         guard let url = request.url else { return }
@@ -336,6 +414,8 @@ private final class LaneUITestURLProtocol: URLProtocol {
             let data: Data
             var contentType = "application/json"
             var statusCode = 200
+            var delayResponse = false
+            let isRaceClient = request.value(forHTTPHeaderField: "Authorization") == "Bearer ui-fixture-race"
             Self.lock.lock()
             defer { Self.lock.unlock() }
             if path == "/panorama" {
@@ -362,6 +442,10 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 }
                 let object = try JSONSerialization.jsonObject(with: body)
                 let ids = (object as? [String]) ?? (object as? [String: Any])?["trackIds"] as? [String] ?? []
+                if isRaceClient, Self.favoriteReadRace, !Self.favoriteReadStarted, ids == ["lane-1"] {
+                    Self.favoriteReadStarted = true
+                    delayResponse = true
+                }
                 data = try JSONSerialization.data(withJSONObject: ids.map { id in
                     ["songId": id.replacingOccurrences(of: "source-", with: "lane-"), "title": "Fixture track \(id.split(separator: "-").last!)",
                      "artistsDisplayedName": "shadowraze", "platform": "spotify"]
@@ -391,11 +475,17 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 let parts = path.split(separator: "/")
                 let id = String(parts[1])
                 if parts.last == "tracks" {
-                    data = try JSONSerialization.data(withJSONObject: ["items": (Self.saved[id] ?? []).map { ["songId": $0, "title": "Fixture track"] }, "totalItems": Self.saved[id]?.count ?? 0, "page": 1, "pageSize": 100, "totalPages": 1])
+                    let ids = isRaceClient && Self.favoriteReadRace && id == "lane_likes" ? [] : (Self.saved[id] ?? [])
+                    data = try JSONSerialization.data(withJSONObject: ["items": ids.map { ["songId": $0, "title": "Fixture track"] }, "totalItems": ids.count, "page": 1, "pageSize": 100, "totalPages": 1])
                 } else {
                     data = try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": Self.saved[id] ?? []])
                 }
             } else if path == "/account" {
+                if isRaceClient, Self.accountReadRace {
+                    Self.accountReadRace = false
+                    Self.accountReadStarted = true
+                    delayResponse = true
+                }
                 let privacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(Self.privacy))
                 data = try JSONSerialization.data(withJSONObject: ["laneId": "fixture-user", "displayedName": Self.profileName, "userPlaylists": ["lane_likes"], "privacySettings": privacy,
                                                                  "premiumExpiresIn": Int64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000)])
@@ -458,9 +548,19 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 data = Data("[]".utf8)
             }
             let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": contentType])!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
+            if delayResponse {
+                let delivery = DispatchWorkItem { [self] in
+                    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                    client?.urlProtocol(self, didLoad: data)
+                    client?.urlProtocolDidFinishLoading(self)
+                }
+                delayedDelivery = delivery
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: delivery)
+            } else {
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: data)
+                client?.urlProtocolDidFinishLoading(self)
+            }
         } catch {
             client?.urlProtocol(self, didFailWithError: error)
         }

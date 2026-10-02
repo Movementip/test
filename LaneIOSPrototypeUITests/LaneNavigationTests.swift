@@ -59,6 +59,10 @@ final class LaneNavigationTests: XCTestCase {
         app.buttons["Open player"].tap()
         let artist = app.buttons["player.artist"]
         XCTAssertTrue(artist.waitForExistence(timeout: 10))
+        let likes = app.buttons["player.likes"]
+        let comments = app.buttons["player.comments"]
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Likes 27"), object: likes)], timeout: 10), .completed)
+        XCTAssertEqual(comments.label, "Comments 4", "Counters must load without tapping either action")
         artist.tap()
         let back = app.buttons["artist.back"]
         XCTAssertTrue(back.waitForExistence(timeout: 10))
@@ -70,12 +74,18 @@ final class LaneNavigationTests: XCTestCase {
 
     func testAlbumKeepsCanonicalTracksAndBackButton() {
         app.buttons["Recommended album"].tap()
-        XCTAssertTrue(app.buttons["album.back"].waitForExistence(timeout: 10))
+        let back = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 10))
+        XCTAssertTrue(back.isHittable)
         XCTAssertTrue(app.staticTexts["Fixture track 1"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Fixture track 2"].exists)
         screenshot("iPhone13-album-two-canonical-tracks")
-        app.buttons["album.back"].tap()
+        back.tap()
         XCTAssertTrue(app.buttons["Recommended album"].waitForExistence(timeout: 5))
+        app.buttons["Recommended album"].tap()
+        XCTAssertTrue(back.waitForExistence(timeout: 10))
+        back.tap()
+        XCTAssertTrue(app.buttons["Recommended album"].waitForExistence(timeout: 5), "Native album return must still work after reopening")
     }
 
     func testSessionImportAndLikesAfterLocalStateRemoval() {
