@@ -17,6 +17,100 @@ final class LaneNavigationTests: XCTestCase {
         add(image)
     }
 
+    private func scrollTo(_ element: XCUIElement) {
+        for _ in 0..<7 {
+            if element.exists && element.isHittable { return }
+            app.swipeUp()
+        }
+        XCTAssertTrue(element.exists && element.isHittable, "Element did not become tappable: \(element)")
+    }
+
+    func testEarnedBadgeSelectionFailureRemovalAndFreshClientRestore() {
+        app.terminate()
+        app.launchArguments = ["--lane-ui-test", "--lane-community-fixture"]
+        app.launch()
+        app.buttons["Your badges"].tap()
+        let choose = app.buttons["badge.select.legend"]
+        XCTAssertTrue(choose.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["badge.current"].label, "Not selected")
+        choose.tap()
+        app.buttons["badge.save"].tap()
+        XCTAssertTrue(app.staticTexts["badge.error"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["badge.current"].label, "Not selected", "Rejected writes must not look equipped")
+        XCTAssertFalse(app.staticTexts["badge.saved"].exists)
+        screenshot("iPhone13-badge-write-error")
+        app.buttons["badge.save"].tap()
+        XCTAssertTrue(app.staticTexts["badge.saved"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["badge.current"].label, "Legend")
+        app.buttons["badge.none"].tap()
+        app.buttons["badge.save"].tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Not selected"), object: app.staticTexts["badge.current"])], timeout: 10), .completed)
+        choose.tap()
+        app.buttons["badge.save"].tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Legend"), object: app.staticTexts["badge.current"])], timeout: 10), .completed)
+        screenshot("iPhone13-server-badge-equipped")
+        app.buttons["badge.back"].tap()
+        app.buttons["Check badge on fresh client"].tap()
+        XCTAssertTrue(app.staticTexts["Server badge restored on fresh client"].waitForExistence(timeout: 10))
+        app.buttons["Public profile"].tap()
+        let detail = app.buttons["badge.details.legend"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 10))
+        scrollTo(detail); detail.tap()
+        XCTAssertTrue(app.staticTexts["Date earned:"].waitForExistence(timeout: 5))
+        screenshot("iPhone13-earned-badge-details")
+        app.buttons["Close"].tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 5))
+    }
+
+    func testMemorialRetryPaginationConfirmedCandleAndBack() {
+        app.terminate()
+        app.launchArguments = ["--lane-ui-test", "--lane-community-fixture"]
+        app.launch()
+        app.buttons["Memorial artist"].tap()
+        let memorial = app.buttons["artist.memorial"]
+        XCTAssertTrue(memorial.waitForExistence(timeout: 10))
+        scrollTo(memorial); memorial.tap()
+        XCTAssertTrue(app.staticTexts["memorial.error"].waitForExistence(timeout: 10))
+        let retry = app.buttons["memorial.retry"]
+        scrollTo(retry); retry.tap()
+        XCTAssertTrue(app.staticTexts["First memory"].waitForExistence(timeout: 10))
+        let more = app.buttons["memorial.more"]
+        scrollTo(more); more.tap()
+        XCTAssertTrue(app.staticTexts["Second memory"].waitForExistence(timeout: 10))
+        XCTAssertFalse(more.exists, "No page 3 after the final page")
+        screenshot("iPhone13-memorial-pagination")
+        for _ in 0..<5 { app.swipeDown() }
+        let compose = app.buttons["memorial.compose"]
+        XCTAssertTrue(compose.isHittable); compose.tap()
+        let submit = app.buttons["memorial.submit"]
+        XCTAssertFalse(submit.isEnabled, "An empty message must not be sent")
+        let message = app.descendants(matching: .any).matching(identifier: "memorial.message").firstMatch
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+        message.tap(); message.typeText("Music stays with us")
+        app.buttons["Done"].tap()
+        submit.tap()
+        XCTAssertTrue(app.staticTexts["memorial.error"].waitForExistence(timeout: 10))
+        XCTAssertTrue(message.exists)
+        XCTAssertEqual(message.value as? String, "Music stays with us", "Failure must retain the draft")
+        XCTAssertFalse(app.staticTexts["memorial.confirmed"].exists)
+        submit.tap()
+        XCTAssertTrue(app.staticTexts["memorial.confirmed"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["memorial.count"].label, "3 candles")
+        screenshot("iPhone13-memorial-confirmed-candle")
+        let author = app.buttons["memorial.author.candle-own"]
+        scrollTo(author); author.tap()
+        XCTAssertTrue(app.staticTexts["user.name"].waitForExistence(timeout: 10))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["memorial.confirmed"].waitForExistence(timeout: 5))
+        app.buttons["memorial.back"].tap()
+        XCTAssertTrue(memorial.waitForExistence(timeout: 5))
+        memorial.tap()
+        XCTAssertTrue(app.staticTexts["Music stays with us"].waitForExistence(timeout: 10), "Server candle must remain after reopening")
+        screenshot("iPhone13-memorial-server-restored")
+        app.buttons["memorial.back"].tap()
+        XCTAssertTrue(memorial.waitForExistence(timeout: 5))
+    }
+
     func testRecommendedArtistHasBackAndStaysWithinIPhone13Width() {
         app.buttons["Recommended artist"].tap()
         let back = app.navigationBars.buttons.firstMatch

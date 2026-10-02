@@ -2920,10 +2920,10 @@ private struct ProfileScreen: View {
                                 .font(.system(size: 25, weight: .bold))
                                 .lineLimit(1)
 
-                            if session.publicProfile?.equippedBadgeId != nil {
-                                Image(systemName: "checkmark.seal.fill")
-                                    .font(.system(size: 14))
-                                    .foregroundStyle(.blue)
+                            if let badge = session.publicProfile?.equippedBadge {
+                                NavigationLink { LaneBadgeSelectionScreen() } label: {
+                                    LaneBadgeImage(badge: badge.definition, size: 24)
+                                }.buttonStyle(.plain)
                             }
                         }
 
@@ -3003,6 +3003,13 @@ private struct ProfileScreen: View {
                             .buttonStyle(.plain)
                         }
                         .padding(.horizontal, 16)
+
+                        NavigationLink { LaneBadgeSelectionScreen() } label: {
+                            Label("Your badges", systemImage: "rosette").font(.headline)
+                        }.buttonStyle(.plain).accessibilityIdentifier("profile.badges")
+                        if let badges = session.publicProfile?.badges, !badges.isEmpty {
+                            LaneBadgesSection(badges: badges, own: true).padding(.horizontal, 16)
+                        }
 
                         if let statusTrack = session.publicProfile?.statusTrack {
                             let track = TrackCandidate(statusTrack)
@@ -3530,6 +3537,16 @@ struct EditProfileSheet: View {
                     TextField("About me", text: $statusText, axis: .vertical)
                 }
                 .disabled(saving || uploading)
+                Section("Current badge") {
+                    NavigationLink { LaneBadgeSelectionScreen() } label: {
+                        HStack {
+                            if let badge = session.publicProfile?.equippedBadge {
+                                LaneBadgeImage(badge: badge.definition)
+                                Text(badge.definition.name)
+                            } else { Text("Not selected") }
+                        }
+                    }.accessibilityIdentifier("profile.badges")
+                }.disabled(saving || uploading)
                 if let errorMessage { Text(errorMessage).foregroundStyle(lanePink) }
             }
             .navigationTitle("Edit Profile")
@@ -3703,8 +3720,11 @@ struct LaneUserProfileScreen: View {
                     }.frame(height: 170)
                     AvatarView(url: user.avatarUrl, size: 90).padding(.top, -58)
                     VStack(spacing: 6) {
-                        Text(user.displayedName ?? user.userName ?? "Lane user").font(.title2.bold())
-                            .accessibilityIdentifier("user.name")
+                        HStack(spacing: 8) {
+                            Text(user.displayedName ?? user.userName ?? "Lane user").font(.title2.bold())
+                                .accessibilityIdentifier("user.name")
+                            if let badge = user.equippedBadge { LaneBadgeImage(badge: badge.definition, size: 24) }
+                        }
                         if let name = user.userName, !name.isEmpty { Text("@\(name)").foregroundStyle(.secondary) }
                         if let status = user.statusText, !status.isEmpty { Text(status).font(.callout).multilineTextAlignment(.center) }
                     }.padding(.horizontal, 20)
@@ -3738,6 +3758,9 @@ struct LaneUserProfileScreen: View {
                     if let error {
                         Text(error).font(.callout).foregroundStyle(lanePink).padding(.horizontal, 20)
                         Button("Refresh profile") { Task { await load() } }.disabled(loading || saving)
+                    }
+                    if let badges = user.badges, !badges.isEmpty {
+                        LaneBadgesSection(badges: badges, own: laneID == session.account?.laneId).padding(.horizontal, 16)
                     }
                     if let status = user.statusTrack {
                         Button {

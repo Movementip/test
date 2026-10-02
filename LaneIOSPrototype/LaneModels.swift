@@ -354,6 +354,7 @@ struct LaneArtist: Codable, Hashable {
     let albums: [LaneAlbum]?
     let relatedArtists: [LaneRelatedArtist]?
     let lastUpdated: Int64?
+    let custom: LaneArtistCustoms?
 
     init(
         name: String? = nil,
@@ -368,7 +369,8 @@ struct LaneArtist: Codable, Hashable {
         recentTracks: [String]? = nil,
         albums: [LaneAlbum]? = nil,
         relatedArtists: [LaneRelatedArtist]? = nil,
-        lastUpdated: Int64? = nil
+        lastUpdated: Int64? = nil,
+        custom: LaneArtistCustoms? = nil
     ) {
         self.name = name
         self.id = id
@@ -383,7 +385,61 @@ struct LaneArtist: Codable, Hashable {
         self.albums = albums
         self.relatedArtists = relatedArtists
         self.lastUpdated = lastUpdated
+        self.custom = custom
     }
+}
+
+// APK LaneArtistItem.custom, not a guessed top-level isRip flag.
+struct LaneArtistCustoms: Codable, Hashable {
+    let badges: [String]?
+    let ripInfo: LaneArtistRIPInfo?
+}
+
+struct LaneArtistRIPInfo: Codable, Hashable {
+    let startDate: Int64
+    let endDate: Int64
+    let additionalText: String?
+}
+
+struct LaneArtistCandle: Decodable, Hashable, Identifiable {
+    let id: String
+    let text: String
+    let timestamp: Int64
+    let author: UserInfoDTO?
+}
+
+enum LaneCandleText {
+    // Android counts UTF-16 code units (String.length), including emoji pairs.
+    static let maximumLength = 200
+    static func isValid(_ text: String) -> Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && text.utf16.count <= maximumLength
+    }
+}
+
+struct LaneBadgeDescription: Codable, Hashable {
+    let en: String?
+    let ru: String?
+    let uk: String?
+
+    func localized(language: String = Locale.current.language.languageCode?.identifier ?? "en") -> String {
+        let preferred = language == "ru" ? ru : (language == "uk" ? uk : en)
+        return [preferred, en, ru, uk].compactMap { $0 }.first { !$0.isEmpty } ?? ""
+    }
+}
+
+struct LaneBadgeDefinition: Codable, Hashable, Identifiable {
+    let badgeId: String
+    let name: String
+    let description: LaneBadgeDescription
+    let imageUrl: String
+    let badgeColor: String
+    var id: String { badgeId }
+}
+
+struct LaneUserBadge: Decodable, Hashable, Identifiable {
+    let definition: LaneBadgeDefinition
+    let earnedAt: Int64
+    var id: String { definition.badgeId }
 }
 
 struct LaneAlbum: Codable, Hashable {
@@ -641,6 +697,11 @@ struct UserInfoDTO: Decodable, Hashable {
     let equippedBadgeId: String?
     let statusText: String?
     let privacySettings: LanePrivacySettings?
+    let badges: [LaneUserBadge]?
+
+    var equippedBadge: LaneUserBadge? {
+        badges?.first { $0.definition.badgeId == equippedBadgeId }
+    }
 }
 
 struct PaginatedResult<T: Decodable>: Decodable {

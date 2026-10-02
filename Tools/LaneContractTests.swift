@@ -108,6 +108,9 @@ final class LaneMockURLProtocol: URLProtocol {
     private static var failedNonce: String?
     private static var didVerifyDirectRetry = false
     private static var followingFriend = false
+    private static var equippedBadge: String?
+    private static var candleWriteCount = 0
+    private static var candleSaved = false
     private static var clearFailedOnce = false
     private static var reorderFailedOnce = false
     private static var limitedUntil: [String: Date] = [:]
@@ -363,9 +366,45 @@ final class LaneMockURLProtocol: URLProtocol {
             return (200, Data(#"{"ok":true}"#.utf8))
 
         case "/user-info":
-            try require(query.first { $0.name == "laneId" }?.value == "friend", "Profile must use laneId")
-            Self.lock.lock(); let followed = Self.followingFriend; Self.lock.unlock()
-            return (200, try JSONSerialization.data(withJSONObject: ["laneId": "friend", "displayedName": "Friend", "isFollowing": followed]))
+            let id = query.first { $0.name == "laneId" }?.value
+            try require(id == "friend" || id == "badge-user", "Profile must use laneId")
+            Self.lock.lock(); let followed = Self.followingFriend; let equipped = Self.equippedBadge; Self.lock.unlock()
+            return (200, try JSONSerialization.data(withJSONObject: ["laneId": id!, "displayedName": "Friend", "isFollowing": followed,
+                "equippedBadgeId": equipped.map { $0 as Any } ?? NSNull(),
+                "badges": [["definition": ["badgeId": "legend", "name": "Legend", "imageUrl": "https://lane.test/legend.png",
+                    "badgeColor": "#ff8284", "description": ["en": "Reward", "ru": "Награда", "uk": "Винагорода"]], "earnedAt": Int64(1700000000000)]]]))
+
+        case "/badges/definitions":
+            try require(request.httpMethod == "GET" && body.isEmpty, "Badge definitions must be a read")
+            return (200, Data(##"[{"badgeId":"legend","name":"Legend","imageUrl":"https://lane.test/legend.png","badgeColor":"#ff8284","description":{"en":"Reward","ru":"Награда","uk":"Винагорода"}}]"##.utf8))
+
+        case "/user/badge/equip":
+            let json = try object(body)
+            try require(request.httpMethod == "POST" && Set(json.keys) == ["badgeId"], "EquipBadgeRequest body changed")
+            try require(json["badgeId"] as? String == "legend" || json["badgeId"] is NSNull, "Removing a badge must encode explicit null")
+            Self.lock.lock(); Self.equippedBadge = json["badgeId"] as? String; Self.lock.unlock()
+            return (200, Data())
+
+        case "/platforms/artist/rip/candles-count":
+            try require(query.first { $0.name == "artistId" }?.value == "rip-artist", "Candle count uses artistId")
+            Self.lock.lock(); let saved = Self.candleSaved; Self.lock.unlock()
+            return (200, Data((saved ? "2" : "1").utf8))
+
+        case "/artist/rip-artist/candles":
+            try require(request.httpMethod == "GET" && body.isEmpty, "Candles must be GET")
+            try require(query.first { $0.name == "page" }?.value == "1" && query.first { $0.name == "pageSize" }?.value == "20", "APK candles use 1-based pages of 20")
+            Self.lock.lock(); let saved = Self.candleSaved; Self.lock.unlock()
+            let values: [[String: Any]] = [["id": saved ? "saved-candle" : "old-candle", "text": saved ? "Music stays with us" : "A memory",
+                "timestamp": Int64(1700000000000), "author": NSNull()]]
+            return (200, try JSONSerialization.data(withJSONObject: ["items": values, "page": 1, "pageSize": 20, "totalPages": 1]))
+
+        case "/artist/rip-artist/candle":
+            let json = try object(body)
+            try require(request.httpMethod == "POST" && Set(json.keys) == ["text"] && json["text"] as? String == "Music stays with us", "PlaceCandleRequest must send only text")
+            Self.lock.lock(); Self.candleWriteCount += 1; let writes = Self.candleWriteCount; Self.candleSaved = writes > 1; Self.lock.unlock()
+            if writes == 1 { return (503, Data(#"{"message":"Transient candle error"}"#.utf8)) }
+            try require(writes == 2, "A non-idempotent candle write must not replay automatically")
+            return (200, Data(#"{"id":"saved-candle","text":"Music stays with us","timestamp":1700000000000,"author":null}"#.utf8))
 
         case "/user/followers", "/user/following":
             try require(query.first { $0.name == "laneId" }?.value == "friend", "People list must use laneId")
@@ -641,6 +680,42 @@ struct LaneContractTestRunner {
 
         let privacyDefaults = try JSONDecoder().decode(LanePrivacySettings.self, from: Data("{}".utf8))
         precondition(privacyDefaults == LanePrivacySettings())
+        let definitions = try await api.badgeDefinitions(token: "test-token")
+        precondition(definitions.first?.description.localized(language: "ru") == "Награда")
+        try await api.equipBadge(token: "test-token", badgeId: "legend").requireSuccess()
+        let badgeOwner = try await api.userInfo(token: "test-token", laneId: "badge-user")
+        precondition(badgeOwner.equippedBadge?.definition.imageUrl == "https://lane.test/legend.png")
+        let freshBadgeAPI = LaneAPI(urlSession: session, requestSigner: BNITLaneRequestSigner())
+        await freshBadgeAPI.setBase("https://lane.test")
+        let restoredBadge = try await freshBadgeAPI.userInfo(token: "test-token", laneId: "badge-user")
+        precondition(restoredBadge.equippedBadgeId == "legend")
+        try await api.equipBadge(token: "test-token", badgeId: nil).requireSuccess()
+        let removedBadge = try await freshBadgeAPI.userInfo(token: "test-token", laneId: "badge-user")
+        precondition(removedBadge.equippedBadge == nil && removedBadge.badges?.count == 1)
+        let ripArtist = try JSONDecoder().decode(LaneArtist.self, from: Data(#"{"id":"rip-artist","custom":{"badges":["rip"],"ripInfo":{"startDate":631152000000,"endDate":1700000000000,"additionalText":"Eternal memory"}}}"#.utf8))
+        precondition(ripArtist.custom?.ripInfo?.endDate == 1700000000000)
+        precondition(LaneCandleText.isValid(String(repeating: "😀", count: 100)))
+        precondition(!LaneCandleText.isValid(String(repeating: "😀", count: 101)))
+        precondition(!LaneCandleText.isValid(" \n"))
+        let beforeCandles = try await api.artistCandleCount(token: "test-token", artistId: "rip-artist")
+        precondition(beforeCandles == 1)
+        do {
+            _ = try await api.placeArtistCandle(token: "test-token", artistId: "rip-artist", text: "Music stays with us")
+            preconditionFailure("Rejected candle must not silently retry")
+        } catch LaneAPIError.http(let code, _) { precondition(code == 503) }
+        let beforePage = try await api.artistCandles(token: "test-token", artistId: "rip-artist")
+        precondition(beforePage.items.first?.id == "old-candle")
+        let savedCandle = try await api.placeArtistCandle(token: "test-token", artistId: "rip-artist", text: "Music stays with us")
+        precondition(savedCandle.id == "saved-candle")
+        let restoredCandles = try await freshBadgeAPI.artistCandles(token: "test-token", artistId: "rip-artist")
+        let restoredCount = try await freshBadgeAPI.artistCandleCount(token: "test-token", artistId: "rip-artist")
+        precondition(restoredCandles.items.first?.id == "saved-candle" && restoredCount == 2)
+        for invalidID in ["", "../other", "id?other=1", "id#fragment", "..", "%2F"] {
+            do {
+                _ = try await api.placeArtistCandle(token: "test-token", artistId: invalidID, text: "Music stays with us")
+                preconditionFailure("Invalid artist ID must not issue a write")
+            } catch LaneAPIError.decoding { }
+        }
         let privacyWrite = try await api.updatePrivacy(token: "test-token", settings: LanePrivacySettings(showPlaylists: false, showFollowers: true, showFollowing: false))
         try privacyWrite.requireSuccess()
         let notices = try await api.notificationPage(token: "test-token")

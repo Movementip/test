@@ -3006,6 +3006,65 @@ final class LaneSession: ObservableObject {
         return value
     }
 
+    func fetchOwnBadgeProfile() async throws -> UserInfoDTO {
+        guard !isGuest else { throw LaneAPIError.decoding("Sign in to view your badges.") }
+        let requestToken = token
+        await configureAPI()
+        let value = try await LaneAPI.shared.account(token: requestToken, deviceLanguage: Locale.current.language.languageCode?.identifier ?? "en")
+        guard token == requestToken else { throw CancellationError() }
+        guard let id = value.laneId, !id.isEmpty else { throw LaneAPIError.decoding("Lane did not return your profile ID.") }
+        let profile = try await LaneAPI.shared.userInfo(token: requestToken, laneId: id)
+        guard token == requestToken else { throw CancellationError() }
+        account = value; publicProfile = profile
+        return profile
+    }
+
+    func equipBadgeConfirmed(_ badgeId: String?) async throws -> UserInfoDTO {
+        let requestToken = token
+        let profile = try await fetchOwnBadgeProfile()
+        guard token == requestToken else { throw CancellationError() }
+        guard badgeId == nil || profile.badges?.contains(where: { $0.id == badgeId }) == true else {
+            throw LaneAPIError.decoding("This badge has not been earned by your account.")
+        }
+        try await LaneAPI.shared.equipBadge(token: requestToken, badgeId: badgeId).requireSuccess()
+        guard token == requestToken, let id = profile.laneId else { throw CancellationError() }
+        for attempt in 0..<3 {
+            let confirmed = try await LaneAPI.shared.userInfo(token: requestToken, laneId: id)
+            guard token == requestToken else { throw CancellationError() }
+            if confirmed.equippedBadgeId == badgeId {
+                publicProfile = confirmed
+                return confirmed
+            }
+            if attempt < 2 { try await Task.sleep(nanoseconds: 500_000_000) }
+        }
+        throw LaneAPIError.decoding("Lane accepted the change but has not confirmed the current badge yet. Refresh to check.")
+    }
+
+    func fetchArtistCandleCount(_ id: String) async throws -> Int64 {
+        let requestToken = token
+        await configureAPI()
+        let value = try await LaneAPI.shared.artistCandleCount(token: requestToken, artistId: id)
+        guard token == requestToken else { throw CancellationError() }
+        return value
+    }
+
+    func fetchArtistCandles(_ id: String, page: Int) async throws -> PaginatedResult<LaneArtistCandle> {
+        let requestToken = token
+        await configureAPI()
+        let value = try await LaneAPI.shared.artistCandles(token: requestToken, artistId: id, page: page)
+        guard token == requestToken else { throw CancellationError() }
+        return value
+    }
+
+    func placeArtistCandle(_ id: String, text: String) async throws -> LaneArtistCandle {
+        guard !isGuest else { throw LaneAPIError.decoding("Sign in to leave a candle.") }
+        let requestToken = token
+        await configureAPI()
+        let value = try await LaneAPI.shared.placeArtistCandle(token: requestToken, artistId: id, text: text)
+        guard token == requestToken else { throw CancellationError() }
+        return value
+    }
+
     func setFollowingConfirmed(_ user: UserInfoDTO, follow: Bool) async throws -> UserInfoDTO {
         guard !isGuest, let id = user.laneId, !id.isEmpty else { throw LaneAPIError.decoding("Sign in to follow this user.") }
         await configureAPI()

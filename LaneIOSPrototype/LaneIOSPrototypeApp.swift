@@ -77,6 +77,10 @@ enum LaneUITestFixtures {
     static let track = TrackCandidate(id: "lane-1", title: "Fixture track 1", subtitle: "Автостопом по фазе сна",
                                       trackID: "lane-1", platform: "spotify", coverURL: "https://lane-ui.test/panorama",
                                       artistIDs: ["fixture-artist"])
+    static let memorialArtist = LaneArtist(name: "Memorial artist", id: "memorial-artist", platform: "lane",
+        headerUrl: "https://lane-ui.test/panorama", topTracks: ["source-1", "source-2"],
+        custom: LaneArtistCustoms(badges: ["rip"], ripInfo: LaneArtistRIPInfo(startDate: 631152000000,
+            endDate: 1700000000000, additionalText: "Remembered through music")))
 }
 
 private struct LaneUITestRoot: View {
@@ -91,6 +95,11 @@ private struct LaneUITestRoot: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 12) {
+                if ProcessInfo.processInfo.arguments.contains("--lane-community-fixture") {
+                    NavigationLink("Your badges") { LaneBadgeSelectionScreen() }
+                    NavigationLink("Memorial artist") { APKArtistDetailScreen(seed: LaneUITestFixtures.memorialArtist) }
+                    Button("Check badge on fresh client") { Task { await checkFreshBadge() } }
+                }
                 NavigationLink("Recommended artist") { APKArtistDetailScreen(seed: LaneUITestFixtures.artist) }
                 NavigationLink("Recommended album") { APKAlbumDetailScreen(seed: LaneUITestFixtures.album) }
                 NavigationLink("Privacy settings") { PrivacySettingsScreen() }
@@ -139,6 +148,18 @@ private struct LaneUITestRoot: View {
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("LaneEdgeSwipeUIProbe"))) { message in
             if let value = message.object as? String { gestureReport = value }
         }
+    }
+
+    private func checkFreshBadge() async {
+        do {
+            let fresh = LaneSession()
+            fresh.backendMode = .custom; fresh.baseURL = "https://lane-ui.test"; fresh.token = "ui-fixture-token"
+            let profile = try await fresh.fetchOwnBadgeProfile()
+            guard profile.equippedBadgeId == "legend", profile.equippedBadge?.definition.name == "Legend" else {
+                throw LaneAPIError.decoding("Badge did not survive a new client")
+            }
+            result = "Server badge restored on fresh client"
+        } catch { result = "Badge check failed: " + error.localizedDescription }
     }
 
     private func checkSession() async {
@@ -587,6 +608,14 @@ private final class LaneUITestURLProtocol: URLProtocol {
     private static var profileFailedOnce = false
     private static var effectFailedOnce = false
     private static var followingFriend = false
+    private static var equippedBadgeID: String?
+    private static var badgeFailedOnce = false
+    private static var candleFailedOnce = false
+    private static var candleReadFailedOnce = false
+    private static var placedCandle: [String: Any]?
+    private static let badgeDefinition: [String: Any] = ["badgeId": "legend", "name": "Legend",
+        "description": ["en": "An original Lane reward", "ru": "Оригинальная награда Lane", "uk": "Нагорода Lane"],
+        "imageUrl": "https://lane-ui.test/panorama", "badgeColor": "#ff8284"]
     private static var followFailedOnce = false
     private static var favoriteReadRace = false
     private static var favoriteReadStarted = false
@@ -663,7 +692,8 @@ private final class LaneUITestURLProtocol: URLProtocol {
                     data = try JSONSerialization.data(withJSONObject: ["shareContentType": "album", "shareItemId": "fixture-album", "albumName": "bastards", "artistName": "shadowraze", "shareCoverUrl": "https://lane-ui.test/panorama", "userName": "Friend profile", "userId": "friend", "userAvatarUrl": ""])
                 }
             } else if path == "/platforms/artist" {
-                data = try JSONEncoder().encode(LaneUITestFixtures.artist)
+                let memorial = query.first { $0.name == "artistId" }?.value == "memorial-artist"
+                data = try JSONEncoder().encode(memorial ? LaneUITestFixtures.memorialArtist : LaneUITestFixtures.artist)
             } else if path == "/platforms/album" {
                 data = try JSONEncoder().encode(LaneUITestFixtures.album)
             } else if path == "/user/tracks" {
@@ -769,7 +799,46 @@ private final class LaneUITestURLProtocol: URLProtocol {
                     "headerUrl": "https://lane-ui.test/panorama", "followersCount": Self.followingFriend ? 6 : 5, "followingCount": 2,
                     "isFollowing": id == "friend" && Self.followingFriend,
                     "privacySettings": ["showPlaylists": id != "second", "showFollowers": id != "second", "showFollowing": id != "second"],
+                    "equippedBadgeId": (id == "fixture-user" ? Self.equippedBadgeID : "legend").map { $0 as Any } ?? NSNull(),
+                    "badges": ProcessInfo.processInfo.arguments.contains("--lane-community-fixture") ? [["definition": Self.badgeDefinition, "earnedAt": Int64(1700000000000)]] : [],
                     "publicPlaylists": [["playlistId": "fixture-playlist", "playlistName": "Fixture playlist", "playlistTracksIds": ["lane-1", "lane-2"]]]])
+            } else if path == "/user/badge/equip" {
+                let json = try JSONSerialization.jsonObject(with: readBody()) as? [String: Any]
+                guard request.httpMethod == "POST", let json, Set(json.keys) == ["badgeId"],
+                      json["badgeId"] is NSNull || json["badgeId"] as? String == "legend" else { throw URLError(.badURL) }
+                if !Self.badgeFailedOnce { Self.badgeFailedOnce = true; statusCode = 503 }
+                else { Self.equippedBadgeID = json["badgeId"] as? String }
+                data = Data((statusCode == 200 ? #"{"ok":true}"# : #"{"message":"Retry badge selection"}"#).utf8)
+            } else if path == "/platforms/artist/rip/candles-count" {
+                guard query.first(where: { $0.name == "artistId" })?.value == "memorial-artist" else { throw URLError(.badURL) }
+                data = Data((Self.placedCandle == nil ? "2" : "3").utf8)
+            } else if path == "/artist/memorial-artist/candles" {
+                let page = Int(query.first { $0.name == "page" }?.value ?? "0") ?? 0
+                guard page > 0, query.first(where: { $0.name == "pageSize" })?.value == "20" else { throw URLError(.badURL) }
+                if !Self.candleReadFailedOnce {
+                    Self.candleReadFailedOnce = true; statusCode = 503
+                    data = Data(#"{"message":"Retry candle list"}"#.utf8)
+                } else {
+                    let value: [String: Any] = ["id": "candle-\(page)", "text": page == 1 ? "First memory" : "Second memory",
+                        "timestamp": Int64(1700000000000), "author": ["laneId": "friend", "displayedName": "Friend profile"]]
+                    let items = page == 1 ? [Self.placedCandle, value].compactMap { $0 } : [value]
+                    data = try JSONSerialization.data(withJSONObject: ["items": items, "page": page, "pageSize": 20, "totalPages": 2,
+                        "totalItems": Self.placedCandle == nil ? 2 : 3])
+                }
+            } else if path == "/artist/memorial-artist/candle" {
+                let json = try JSONSerialization.jsonObject(with: readBody()) as? [String: Any]
+                guard request.httpMethod == "POST", let text = json?["text"] as? String,
+                      Set(json!.keys) == ["text"], LaneCandleText.isValid(text) else { throw URLError(.badURL) }
+                if !Self.candleFailedOnce {
+                    Self.candleFailedOnce = true; statusCode = 503
+                    data = Data(#"{"message":"Retry candle message"}"#.utf8)
+                } else {
+                    guard Self.placedCandle == nil else { throw URLError(.badURL) }
+                    let value: [String: Any] = ["id": "candle-own", "text": text, "timestamp": Int64(1700000000000),
+                        "author": ["laneId": "fixture-user", "displayedName": "Lane fixture"]]
+                    Self.placedCandle = value
+                    data = try JSONSerialization.data(withJSONObject: value)
+                }
             } else if path == "/user/follow/friend" {
                 if !Self.followFailedOnce { Self.followFailedOnce = true; statusCode = 503 }
                 else { Self.followingFriend = true }

@@ -1221,6 +1221,50 @@ actor LaneAPI {
         try await decoded(LaneArtist.self, path: "/platforms/artist", token: token, query: [.init(name: "artistId", value: artistId)])
     }
 
+    private func artistPathID(_ id: String) throws -> String {
+        guard !id.isEmpty, !id.contains("/"), !id.contains("?"), !id.contains("#"),
+              id != ".", id != "..", !id.contains("%"),
+              id.rangeOfCharacter(from: .controlCharacters) == nil else {
+            throw LaneAPIError.decoding("Invalid artist ID.")
+        }
+        // build() appends a raw path component and escapes it once.
+        return id
+    }
+
+    func artistCandleCount(token: String, artistId: String) async throws -> Int64 {
+        _ = try artistPathID(artistId)
+        return try await decoded(Int64.self, path: "/platforms/artist/rip/candles-count", token: token,
+            query: [.init(name: "artistId", value: artistId)], headers: ["Cache-Control": "no-cache"])
+    }
+
+    func artistCandles(token: String, artistId: String, page: Int = 1) async throws -> PaginatedResult<LaneArtistCandle> {
+        guard page > 0 else { throw LaneAPIError.decoding("Candle pages start at 1.") }
+        let id = try artistPathID(artistId)
+        return try await decoded(PaginatedResult<LaneArtistCandle>.self, path: "/artist/\(id)/candles", token: token,
+            query: [.init(name: "page", value: String(page)), .init(name: "pageSize", value: "20")],
+            headers: ["Cache-Control": "no-cache"])
+    }
+
+    func placeArtistCandle(token: String, artistId: String, text: String) async throws -> LaneArtistCandle {
+        guard LaneCandleText.isValid(text) else { throw LaneAPIError.decoding("Write a message of 1–200 characters.") }
+        let id = try artistPathID(artistId)
+        // Not idempotent: never automatically replay this POST after a timeout.
+        let candle = try await decoded(LaneArtistCandle.self, path: "/artist/\(id)/candle", method: "POST", token: token,
+            json: ["text": text])
+        guard !candle.id.isEmpty else { throw LaneAPIError.decoding("Lane did not confirm the candle.") }
+        return candle
+    }
+
+    func badgeDefinitions(token: String) async throws -> [LaneBadgeDefinition] {
+        try await decoded([LaneBadgeDefinition].self, path: "/badges/definitions", token: token)
+    }
+
+    func equipBadge(token: String, badgeId: String?) async throws -> APIResult {
+        // APK EquipBadgeRequest explicitly encodes null when removing a badge.
+        try await request(path: "/user/badge/equip", method: "POST", token: token,
+            json: ["badgeId": badgeId.map { $0 as Any } ?? NSNull()])
+    }
+
     // MARK: Home / account
     func home(token: String) async throws -> APIResult {
         try await request(path: "/feed/home", token: token)
@@ -1231,7 +1275,8 @@ actor LaneAPI {
     }
 
     func userInfo(token: String, laneId: String) async throws -> UserInfoDTO {
-        try await decoded(UserInfoDTO.self, path: "/user-info", token: token, query: [.init(name: "laneId", value: laneId)])
+        try await decoded(UserInfoDTO.self, path: "/user-info", token: token, query: [.init(name: "laneId", value: laneId)],
+            headers: ["Cache-Control": "no-cache"])
     }
 
     func editProfile(

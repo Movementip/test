@@ -2,14 +2,21 @@
 { archiveVersion = 1; classes = {}; objectVersion = 56; objects = {
 A1 = {isa = PBXProject; attributes = {LastSwiftUpdateCheck = 1600; LastUpgradeCheck = 1600;}; buildConfigurationList = A2; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A3; productRefGroup = A4; projectDirPath = ""; projectRoot = ""; targets = (A5,T1);};
 A2 = {isa = XCConfigurationList; buildConfigurations = (D1,D2); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
-A3 = {isa = PBXGroup; children = (B1,B2,A4); sourceTree = "<group>";};
+A3 = {isa = PBXGroup; children = (B1,B2,B3,A4); sourceTree = "<group>";};
 A4 = {isa = PBXGroup; children = (C1,C2); name = Products; sourceTree = "<group>";};
 A5 = {isa = PBXNativeTarget; buildConfigurationList = A6; buildPhases = (A7,A8,A9); buildRules = (); dependencies = (); name = LaneIOSPrototype; productName = LaneIOSPrototype; productReference = C1; productType = "com.apple.product-type.application";};
 A6 = {isa = XCConfigurationList; buildConfigurations = (D3,D4); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
-A7 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (E1,E2,E3,E4,E5,E6,E7,E8,E9,E11,E12); runOnlyForDeploymentPostprocessing = 0;};
+A7 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (E1,E2,E3,E4,E5,E6,E7,E8,E9,E11,E12,E13); runOnlyForDeploymentPostprocessing = 0;};
 A8 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
-A9 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
-B1 = {isa = PBXGroup; children = (F1,F2,F3,F4,F5,F6,F7,F8,F9,F11,F12); path = LaneIOSPrototype; sourceTree = "<group>";};
+A9 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (R1,R2); runOnlyForDeploymentPostprocessing = 0;};
+B1 = {isa = PBXGroup; children = (F1,F2,F3,F4,F5,F6,F7,F8,F9,F11,F12,F13); path = LaneIOSPrototype; sourceTree = "<group>";};
+B3 = {isa = PBXGroup; children = (F14,F15); path = LaneAssets; sourceTree = "<group>";};
+F13 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaneCommunityViews.swift; sourceTree = "<group>";};
+E13 = {isa = PBXBuildFile; fileRef = F13;};
+F14 = {isa = PBXFileReference; lastKnownFileType = image.png; path = candle.png; sourceTree = "<group>";};
+F15 = {isa = PBXFileReference; lastKnownFileType = image.gif; path = amen.gif; sourceTree = "<group>";};
+R1 = {isa = PBXBuildFile; fileRef = F14;};
+R2 = {isa = PBXBuildFile; fileRef = F15;};
 C1 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LaneIOSPrototype.app; sourceTree = BUILT_PRODUCTS_DIR;};
 F1 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaneIOSPrototypeApp.swift; sourceTree = "<group>";};
 F2 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>";};
@@ -26,8 +33,8 @@ F12 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Lane
 E12 = {isa = PBXBuildFile; fileRef = F12;};
 E1 = {isa = PBXBuildFile; fileRef = F1;}; E2 = {isa = PBXBuildFile; fileRef = F2;}; E3 = {isa = PBXBuildFile; fileRef = F3;}; E4 = {isa = PBXBuildFile; fileRef = F4;}; E5 = {isa = PBXBuildFile; fileRef = F5;}; E6 = {isa = PBXBuildFile; fileRef = F6;}; E7 = {isa = PBXBuildFile; fileRef = F7;}; E8 = {isa = PBXBuildFile; fileRef = F8;}; E9 = {isa = PBXBuildFile; fileRef = F9;};
 D1 = {isa = XCBuildConfiguration; buildSettings = {SWIFT_VERSION = 5.0;}; name = Debug;}; D2 = {isa = XCBuildConfiguration; buildSettings = {SWIFT_VERSION = 5.0;}; name = Release;};
-D3 = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 90; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = LaneIOSPrototype/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; MARKETING_VERSION = 0.90; PRODUCT_BUNDLE_IDENTIFIER = com.lane.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1;}; name = Debug;};
-D4 = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 90; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = LaneIOSPrototype/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; MARKETING_VERSION = 0.90; PRODUCT_BUNDLE_IDENTIFIER = com.lane.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1;}; name = Release;};
+D3 = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 91; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = LaneIOSPrototype/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; MARKETING_VERSION = 0.91; PRODUCT_BUNDLE_IDENTIFIER = com.lane.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1;}; name = Debug;};
+D4 = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 91; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = LaneIOSPrototype/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; MARKETING_VERSION = 0.91; PRODUCT_BUNDLE_IDENTIFIER = com.lane.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1;}; name = Release;};
 B2 = {isa = PBXGroup; children = (F10); path = LaneIOSPrototypeUITests; sourceTree = "<group>";};
 F10 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaneNavigationTests.swift; sourceTree = "<group>";};
 C2 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LaneIOSPrototypeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR;};

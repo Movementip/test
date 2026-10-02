@@ -1596,6 +1596,16 @@ struct APKArtistDetailScreen: View {
                         }
                     }
 
+                    if value.custom?.ripInfo != nil {
+                        NavigationLink { LaneMemorialScreen(artist: value) } label: {
+                            HStack(spacing: 12) {
+                                Image("candle").resizable().scaledToFit().frame(width: 28, height: 36)
+                                Text("Leave a candle").font(.headline)
+                                Spacer(); Image(systemName: "chevron.right")
+                            }.padding(12).background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+                        }.buttonStyle(.plain).accessibilityIdentifier("artist.memorial")
+                    }
+
                     if let description = value.description, !description.isEmpty {
                         Text(description)
                             .font(.system(size: 14))
