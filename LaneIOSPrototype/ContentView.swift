@@ -7,37 +7,26 @@ private let laneCard = Color.white.opacity(0.07)
 private let laneBottomSurface = Color(red: 21.0 / 255.0, green: 21.0 / 255.0, blue: 21.0 / 255.0)
 
 private struct LaneInteractivePopGestureEnabler: UIViewControllerRepresentable {
-    let onBack: () -> Void
-
     func makeUIViewController(context: Context) -> UIViewController {
-        LaneInteractivePopController(onBack: onBack)
+        LaneInteractivePopController()
     }
 
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
         guard let controller = uiViewController as? LaneInteractivePopController else { return }
-        controller.onBack = onBack
         controller.activateLaneInteractivePop()
+    }
+
+    static func dismantleUIViewController(_ uiViewController: UIViewController, coordinator: ()) {
+        (uiViewController as? LaneInteractivePopController)?.restoreDelegate()
     }
 }
 
 private final class LaneInteractivePopController: UIViewController, UIGestureRecognizerDelegate {
     private weak var laneNavigationController: UINavigationController?
     private weak var previousDelegate: UIGestureRecognizerDelegate?
-    private weak var gestureWindow: UIWindow?
-    private var edgeBackGesture: UIScreenEdgePanGestureRecognizer?
-    private var isVisible = false
-    var onBack: () -> Void
-
-    init(onBack: @escaping () -> Void) {
-        self.onBack = onBack
-        super.init(nibName: nil, bundle: nil)
-    }
-
-    required init?(coder: NSCoder) { fatalError("Use init(onBack:)") }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        isVisible = true
         activateLaneInteractivePop()
     }
 
@@ -53,10 +42,10 @@ private final class LaneInteractivePopController: UIViewController, UIGestureRec
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        isVisible = false
-        if let edgeBackGesture { gestureWindow?.removeGestureRecognizer(edgeBackGesture) }
-        edgeBackGesture = nil
-        gestureWindow = nil
+        restoreDelegate()
+    }
+
+    func restoreDelegate() {
         if let gesture = laneNavigationController?.interactivePopGestureRecognizer,
            gesture.delegate === self {
             gesture.delegate = previousDelegate
@@ -67,7 +56,7 @@ private final class LaneInteractivePopController: UIViewController, UIGestureRec
         // SwiftUI updates its navigation/gesture delegate after the child is
         // mounted. Install on the following run-loop, not before that update.
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.isVisible, let window = self.view.window else { return }
+            guard let self, self.view.window != nil else { return }
             let nativeGesture = self.navigationController?.interactivePopGestureRecognizer
             if let navigation = self.navigationController, let nativeGesture,
                navigation.viewControllers.count > 1 {
@@ -78,55 +67,61 @@ private final class LaneInteractivePopController: UIViewController, UIGestureRec
                 }
                 nativeGesture.isEnabled = true
             }
-            guard self.edgeBackGesture == nil else { return }
-            // Some SwiftUI hosting stacks (notably iOS 26) expose a back
-            // control without a working UIKit pop recognizer. A system edge
-            // recognizer dispatches the environment's back action in that case.
-            let edge = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(self.handleEdgeBack(_:)))
-            edge.edges = .left
-            edge.delegate = self
-            edge.cancelsTouchesInView = false
-            if let nativeGesture { edge.require(toFail: nativeGesture) }
-            window.addGestureRecognizer(edge)
-            self.gestureWindow = window
-            self.edgeBackGesture = edge
         }
     }
 
-    @objc private func handleEdgeBack(_ gesture: UIScreenEdgePanGestureRecognizer) {
-        guard isVisible, gesture.state == .ended else { return }
-        let translation = gesture.translation(in: gestureWindow)
-        let velocity = gesture.velocity(in: gestureWindow)
-        guard translation.x > 80, translation.x > abs(translation.y) * 1.25,
-              velocity.x >= 0 else { return }
-        onBack()
-    }
-
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        if gestureRecognizer === edgeBackGesture { return isVisible }
         guard let navigation = laneNavigationController else { return false }
         // Keep the native interactive transition, including cancellation, and
         // never start a pop at the root or during another push/pop transition.
         return navigation.viewControllers.count > 1 && navigation.transitionCoordinator == nil
     }
 
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
-                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        gestureRecognizer === edgeBackGesture && otherGestureRecognizer !== laneNavigationController?.interactivePopGestureRecognizer
-    }
 }
 
 private struct LaneBackSwipeModifier: ViewModifier {
     @Environment(\.dismiss) private var dismiss
+    @State private var isVisible = false
     let onBack: (() -> Void)?
 
     func body(content: Content) -> some View {
         content
+            .contentShape(Rectangle())
             .background(
-                LaneInteractivePopGestureEnabler(onBack: { if let onBack { onBack() } else { dismiss() } })
+                LaneInteractivePopGestureEnabler()
                     .frame(width: 0, height: 0)
                     .allowsHitTesting(false)
             )
+            .onAppear { isVisible = true }
+            .onDisappear { isVisible = false }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 20, coordinateSpace: .local)
+                    .onEnded { value in
+                        #if DEBUG
+                        if ProcessInfo.processInfo.arguments.contains("--lane-ui-test") {
+                            NotificationCenter.default.post(name: Notification.Name("LaneEdgeSwipeUIProbe"), object:
+                                "visible=\(isVisible), start=\(value.startLocation), move=\(value.translation)")
+                        }
+                        #endif
+                        guard isVisible, value.startLocation.x >= 0, value.startLocation.x < 24,
+                              value.translation.width > 80,
+                              value.translation.width > abs(value.translation.height) * 1.25,
+                              !hasNativeInteractiveTransition() else { return }
+                        if let onBack { onBack() } else { dismiss() }
+                    }
+            )
+    }
+
+    // If UIKit is already performing the interactive pop, leave that native
+    // transition in charge; the fallback must not dismiss a second screen.
+    private func hasNativeInteractiveTransition() -> Bool {
+        func transitioning(_ controller: UIViewController) -> Bool {
+            if controller.transitionCoordinator?.isInteractive == true { return true }
+            if controller.children.contains(where: transitioning) { return true }
+            return controller.presentedViewController.map(transitioning) ?? false
+        }
+        return UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows).compactMap(\.rootViewController).contains(where: transitioning)
     }
 }
 

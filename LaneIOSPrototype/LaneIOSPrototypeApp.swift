@@ -55,6 +55,7 @@ private struct LaneUITestRoot: View {
     @EnvironmentObject private var session: LaneSession
     @State private var showPlayer = false
     @State private var result = ""
+    @State private var gestureReport = "Waiting for edge swipe"
 
     var body: some View {
         NavigationStack {
@@ -69,6 +70,12 @@ private struct LaneUITestRoot: View {
         }
         .fullScreenCover(isPresented: $showPlayer) { APKFullPlayerView().environmentObject(session) }
         .preferredColorScheme(.dark)
+        .overlay(alignment: .bottom) {
+            Text(gestureReport).font(.system(size: 9)).accessibilityIdentifier("gesture.report")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("LaneEdgeSwipeUIProbe"))) { message in
+            if let value = message.object as? String { gestureReport = value }
+        }
     }
 
     private func checkSession() async {

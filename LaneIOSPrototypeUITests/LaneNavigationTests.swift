@@ -52,7 +52,7 @@ final class LaneNavigationTests: XCTestCase {
         let start = window.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
         start.press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)))
         screenshot("iPhone13-native-swipe-back")
-        XCTAssertTrue(app.buttons["Recommended artist"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Recommended artist"].waitForExistence(timeout: 5), app.staticTexts["gesture.report"].label)
     }
 
     func testPlayerArtistCanCloseBackToPlayer() {
