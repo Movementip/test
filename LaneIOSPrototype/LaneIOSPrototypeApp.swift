@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import AVFoundation
 #if DEBUG
 import Network
 #endif
@@ -118,6 +119,7 @@ private struct LaneUITestRoot: View {
                 Button("Run recovery checks") { Task { await checkPlaybackRecovery() } }
                 if ProcessInfo.processInfo.arguments.contains("--lane-background-fixture") {
                     Button("Run background checks") { Task { await checkBackgroundPlayback() } }
+                    Button("Run audio lifecycle checks") { Task { await checkAudioLifecycle() } }
                 }
                 NavigationLink("Track comments") { APKCommentsScreen(track: LaneUITestFixtures.track) }
                 Button("Edit profile") { showEdit = true }
@@ -441,6 +443,58 @@ private struct LaneUITestRoot: View {
         } catch { result = "Recovery checks failed: \(error.localizedDescription)" }
     }
 
+    private func checkAudioLifecycle() async {
+        func waitForAudio() async throws {
+            for _ in 0..<120 {
+                if session.isPlaying && session.playbackPosition > 0.1 { return }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            throw LaneAPIError.decoding("Audio did not recover: \(session.output)")
+        }
+        func interruption(_ type: AVAudioSession.InterruptionType) {
+            NotificationCenter.default.post(name: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(), userInfo: [
+                AVAudioSessionInterruptionTypeKey: type.rawValue,
+                AVAudioSessionInterruptionOptionKey: AVAudioSession.InterruptionOptions.shouldResume.rawValue
+            ])
+        }
+        do {
+            guard LaneTypography.allNames.allSatisfy({ UIFont(name: $0, size: 16) != nil }) else {
+                throw LaneAPIError.decoding("Original APK fonts were not registered")
+            }
+            session.debugUseProgressiveTransport = true
+            session.requestStream(for: LaneUITestFixtures.track)
+            try await waitForAudio()
+            interruption(.began)
+            try await Task.sleep(nanoseconds: 300_000_000)
+            guard !session.isPlaying, !session.debugHasPlaybackBackgroundTask else { throw LaneAPIError.decoding("Interruption leaked playback or assertion") }
+            interruption(.ended)
+            try await waitForAudio()
+            interruption(.began)
+            try await Task.sleep(nanoseconds: 200_000_000)
+            session.pause()
+            interruption(.ended)
+            try await Task.sleep(nanoseconds: 400_000_000)
+            guard !session.isPlaying else { throw LaneAPIError.decoding("Ignored user pause during interruption") }
+            session.resume(); try await waitForAudio()
+            let position = session.playbackPosition
+            NotificationCenter.default.post(name: AVAudioSession.mediaServicesWereResetNotification, object: nil)
+            try await Task.sleep(nanoseconds: 300_000_000)
+            guard !session.isPlaying else { throw LaneAPIError.decoding("Media reset resumed without user action") }
+            session.resume(); try await waitForAudio()
+            guard session.playbackPosition >= position else { throw LaneAPIError.decoding("Media reset lost position") }
+            NotificationCenter.default.post(name: AVAudioSession.routeChangeNotification, object: nil,
+                userInfo: [AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue])
+            try await Task.sleep(nanoseconds: 300_000_000)
+            guard !session.isPlaying else { throw LaneAPIError.decoding("Headphone removal leaked speaker audio") }
+            let report = LaneAudioDiagnostics.shared.report()
+            guard report.contains("interruption-began"), report.contains("media-services-reset"),
+                  !report.contains("ui-fixture-token"), !report.contains("http://") else {
+                throw LaneAPIError.decoding("Missing or unsafe local diagnostics")
+            }
+            session.stop(); result = "Audio lifecycle checks passed"
+        } catch { session.stop(); result = "Audio lifecycle checks failed: \(error.localizedDescription)" }
+    }
+
     private func checkBackgroundPlayback() async {
         do {
             session.debugUseProgressiveTransport = true
@@ -452,11 +506,19 @@ private struct LaneUITestRoot: View {
             var heardFirstInBackground = false
             var heardNextInBackground = false
             let started = Date()
-            for _ in 0..<240 {
+            var expiredLeaseWhilePlaying = false
+            for _ in 0..<1000 {
                 if session.isPlaying, session.playbackPosition > 0.1,
                    UIApplication.shared.applicationState == .background {
                     if session.currentTrack?.trackID == first.trackID { heardFirstInBackground = true }
-                    if session.currentTrack?.trackID == next.trackID { heardNextInBackground = true }
+                    if session.currentTrack?.trackID == next.trackID {
+                        if !expiredLeaseWhilePlaying {
+                            session.debugBeginPlaybackLease()
+                            session.debugExpirePlaybackLease()
+                            expiredLeaseWhilePlaying = true
+                        }
+                        if session.playbackPosition >= 65 { heardNextInBackground = true }
+                    }
                 }
                 if heardFirstInBackground && heardNextInBackground { break }
                 try await Task.sleep(nanoseconds: 100_000_000)
@@ -468,7 +530,10 @@ private struct LaneUITestRoot: View {
                 throw LaneAPIError.decoding("Next did not reuse its in-flight preparation")
             }
             guard !session.debugHasPlaybackBackgroundTask else { throw LaneAPIError.decoding("Playing audio leaked background task") }
-            print("LANE_BACKGROUND_AUDIO first-and-next audible while backgrounded; next stream calls=1; elapsed=\(Date().timeIntervalSince(started))")
+            guard expiredLeaseWhilePlaying, session.playbackPosition >= 65, session.playerError.isEmpty else {
+                throw LaneAPIError.decoding("Expiration retired audible audio")
+            }
+            print("LANE_BACKGROUND_AUDIO first-and-next audible while backgrounded for over a minute; expired assertion did not retire audio; next stream calls=1; elapsed=\(Date().timeIntervalSince(started))")
             session.pause()
             guard !session.debugHasPlaybackBackgroundTask else { throw LaneAPIError.decoding("Pause leaked background task") }
             session.stop()
@@ -542,6 +607,7 @@ final class LaneUITestAudioServer {
     private var deliveredRanges: [Range<Int>] = []
     private let audio: Data
     private let shortAudio: Data
+    private let longAudio: Data
     var url: String? { lock.lock(); defer { lock.unlock() }; return port.map { "http://127.0.0.1:\($0)/audio.wav" } }
     var yandexFixtureURL: URL? {
         lock.lock(); defer { lock.unlock() }
@@ -568,6 +634,13 @@ final class LaneUITestAudioServer {
         replaceWord(UInt32(short.count - 8), at: 4)
         replaceWord(UInt32(short.count - 44), at: 40)
         shortAudio = short
+        var long = Data(data.prefix(44))
+        for _ in 0..<4 { long.append(data.dropFirst(44)) }
+        for (offset, value) in [(4, UInt32(long.count - 8)), (40, UInt32(long.count - 44))] {
+            var little = value.littleEndian
+            withUnsafeBytes(of: &little) { long.replaceSubrange(offset..<(offset + 4), with: $0) }
+        }
+        longAudio = long
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         listener = try! NWListener(using: parameters)
@@ -601,7 +674,7 @@ final class LaneUITestAudioServer {
                 connection.send(content: Data(headers.utf8) + page, completion: .contentProcessed { _ in connection.cancel() })
                 return
             }
-            let payload = text.contains("/short.wav ") ? self.shortAudio : self.audio
+            let payload = text.contains("/short.wav ") ? self.shortAudio : text.contains("/long.wav ") ? self.longAudio : self.audio
             var start = 0, end = payload.count - 1
             let range = text.components(separatedBy: "\r\n").first { $0.lowercased().hasPrefix("range:") }
             if let range, let value = range.components(separatedBy: "bytes=").last {
@@ -986,7 +1059,7 @@ private final class LaneUITestURLProtocol: URLProtocol {
                     data = Data(#"{"message":"Transient stream failure"}"#.utf8)
                 } else {
                     guard let url = LaneUITestAudioServer.shared.url else { throw URLError(.cannotConnectToHost) }
-                    let selectedURL = id == "background-first" ? url.replacingOccurrences(of: "/audio.wav", with: "/short.wav") : url
+                    let selectedURL = id == "background-first" ? url.replacingOccurrences(of: "/audio.wav", with: "/short.wav") : id == "background-next" ? url.replacingOccurrences(of: "/audio.wav", with: "/long.wav") : url
                     if id.hasPrefix("background-") { delayResponse = true; responseDelay = 4 }
                     data = try JSONSerialization.data(withJSONObject: ["url": selectedURL, "trackId": id, "ttl": 90])
                 }

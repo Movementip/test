@@ -585,10 +585,20 @@ final class LaneSession: ObservableObject {
     private var nextStreamOperation = UUID()
     private var prefetchedPlaybackRequestID: UUID?
     private var progressiveMediaHosts: Set<String> = []
-    private var playbackBackgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var playbackBackgroundLease: LaneAudioBackgroundLease?
     private var playbackBackgroundRequestID: UUID?
+    private var audioLifecycleObservers: [NSObjectProtocol] = []
+    private var remoteCommandTargets: [(MPRemoteCommand, Any)] = []
+    private var audioInterrupted = false
+    private var interruptionResumeRequested = false
     #if DEBUG
-    var debugHasPlaybackBackgroundTask: Bool { playbackBackgroundTask != .invalid }
+    var debugHasPlaybackBackgroundTask: Bool { playbackBackgroundLease?.isActive == true }
+    func debugExpirePlaybackLease() {
+        playbackBackgroundLease?.expireForTesting { [weak self] generation in
+            self?.playbackTransitionExpired(generation: generation)
+        }
+    }
+    func debugBeginPlaybackLease() { beginPlaybackTransition(requestID: playbackRequestID) }
     #endif
     private var didConfigureAPIBase = false
     private var didPrepareRegionalHost = false
@@ -645,6 +655,13 @@ final class LaneSession: ObservableObject {
             trackStatsCache = cache
         }
         configureRemoteCommands()
+        configureAudioLifecycle()
+    }
+
+    deinit {
+        for observer in audioLifecycleObservers { NotificationCenter.default.removeObserver(observer) }
+        for (command, target) in remoteCommandTargets { command.removeTarget(target) }
+        playbackBackgroundLease?.end()
     }
 
     // MARK: Persistence
@@ -3586,31 +3603,113 @@ final class LaneSession: ObservableObject {
 
     private func endPlaybackTransition(requestID: UUID? = nil) {
         if let requestID, playbackBackgroundRequestID != requestID { return }
-        let identifier = playbackBackgroundTask
-        playbackBackgroundTask = .invalid
+        playbackBackgroundLease?.end()
+        playbackBackgroundLease = nil
         playbackBackgroundRequestID = nil
-        if identifier != .invalid { UIApplication.shared.endBackgroundTask(identifier) }
     }
 
     /// Audio background mode covers playing audio, not an arbitrary silent
     /// gap while /track/stream or the next range is being fetched. Request a
     /// bounded execution window before stopping the previous player.
     private func beginPlaybackTransition(requestID: UUID) {
+        // Repeated stall notifications must not renew/reset the same finite
+        // assertion or let an older expiration cancel its replacement.
+        if playbackBackgroundRequestID == requestID, playbackBackgroundLease?.isActive == true { return }
         endPlaybackTransition()
         playbackBackgroundRequestID = requestID
-        playbackBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Lane audio transition") { [weak self] in
+        let lease = LaneAudioBackgroundLease()
+        playbackBackgroundLease = lease
+        lease.begin { [weak self] generation in
             Task { @MainActor in
-                guard let self, self.playbackBackgroundRequestID == requestID else { return }
-                self.endPlaybackTransition(requestID: requestID)
-                guard self.playbackRequestID == requestID, self.isBuffering else { return }
-                self.streamResolveTask?.cancel()
-                self.playbackWatchdogTask?.cancel()
-                self.retirePlayer()
-                self.isBuffering = false
-                self.isPlaying = false
-                self.busy = false
-                self.playerError = "Audio loading took too long. Tap Play to retry. [BACKGROUND-TIMEOUT]"
+                self?.playbackTransitionExpired(generation: generation)
             }
+        }
+    }
+
+    private func playbackTransitionExpired(generation: UUID) {
+        guard playbackBackgroundLease?.generation == generation else { return }
+        playbackBackgroundLease = nil
+        playbackBackgroundRequestID = nil
+        recordAudioEvent("transition-expired")
+        // The lease has already been ended synchronously. It is not the
+        // lifetime of AVPlayer: keep ready/playing audio and buffered data.
+        if player?.currentItem?.status == .readyToPlay { return }
+        guard isBuffering else { return }
+        streamResolveTask?.cancel()
+        playbackWatchdogTask?.cancel()
+        retirePlayer()
+        isBuffering = false; isPlaying = false; busy = false
+        playerError = "Audio loading took too long. Tap Play to retry. [BACKGROUND-TIMEOUT]"
+    }
+
+    private func recordAudioEvent(_ event: String) {
+        LaneAudioDiagnostics.shared.record("\(event) app=\(UIApplication.shared.applicationState.rawValue) intent=\(playbackShouldPlay) playing=\(isPlaying) buffering=\(isBuffering) position=\(Int(playbackPosition)) buffer=\(Int(playbackBufferedDuration))")
+    }
+
+    private func configureAudioLifecycle() {
+        let center = NotificationCenter.default
+        for name in [AVAudioSession.interruptionNotification, AVAudioSession.routeChangeNotification,
+                     AVAudioSession.mediaServicesWereLostNotification, AVAudioSession.mediaServicesWereResetNotification,
+                     UIApplication.didEnterBackgroundNotification, UIApplication.didBecomeActiveNotification,
+                     UIApplication.didReceiveMemoryWarningNotification, UIApplication.willTerminateNotification] {
+            audioLifecycleObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                Task { @MainActor in self?.handleAudioLifecycle(notification) }
+            })
+        }
+        _ = LaneAudioDiagnostics.shared
+    }
+
+    private func activateAudioSession() throws {
+        let audio = AVAudioSession.sharedInstance()
+        try audio.setCategory(.playback, mode: .default, options: [])
+        try audio.setActive(true)
+    }
+
+    private func handleAudioLifecycle(_ notification: Notification) {
+        switch notification.name {
+        case AVAudioSession.interruptionNotification:
+            guard let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            if type == .began {
+                interruptionResumeRequested = playbackShouldPlay
+                audioInterrupted = true
+                player?.pause(); isPlaying = false; isBuffering = false
+                endPlaybackTransition(); updatePlaybackState(false)
+                recordAudioEvent("interruption-began")
+            } else {
+                let options = AVAudioSession.InterruptionOptions(rawValue: notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
+                let shouldResume = audioInterrupted && interruptionResumeRequested && playbackShouldPlay && options.contains(.shouldResume)
+                audioInterrupted = false; interruptionResumeRequested = false
+                recordAudioEvent("interruption-ended resume=\(shouldResume)")
+                if shouldResume { resume() }
+                else { playbackShouldPlay = false; updatePlaybackState(false) }
+            }
+        case AVAudioSession.routeChangeNotification:
+            let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
+            recordAudioEvent("route-change reason=\(reason)")
+            // Removing headphones must not unexpectedly play on the speaker.
+            if AVAudioSession.RouteChangeReason(rawValue: reason) == .oldDeviceUnavailable { pause() }
+        case AVAudioSession.mediaServicesWereLostNotification:
+            player?.pause(); isPlaying = false; isBuffering = false
+            endPlaybackTransition(); updatePlaybackState(false)
+            recordAudioEvent("media-services-lost")
+        case AVAudioSession.mediaServicesWereResetNotification:
+            // Apple's reset contract requires recreating audio objects and
+            // waiting for a user play action, not automatically taking audio.
+            pendingStartPosition = playbackPosition
+            retirePlayer(); playbackShouldPlay = false; isPlaying = false; isBuffering = false
+            streamResolveTask?.cancel(); endPlaybackTransition()
+            try? activateAudioSession()
+            try? AVAudioSession.sharedInstance().setActive(false)
+            updatePlaybackState(false); recordAudioEvent("media-services-reset")
+        case UIApplication.didBecomeActiveNotification:
+            recordAudioEvent("foreground")
+            if playbackShouldPlay, !audioInterrupted, player?.currentItem?.status == .readyToPlay,
+               player?.timeControlStatus != .playing { resume() }
+        case UIApplication.didEnterBackgroundNotification: recordAudioEvent("background")
+        case UIApplication.didReceiveMemoryWarningNotification: recordAudioEvent("memory-warning")
+        case UIApplication.willTerminateNotification: recordAudioEvent("will-terminate")
+        default: break
         }
     }
 
@@ -3930,10 +4029,10 @@ final class LaneSession: ObservableObject {
                     guard let self, let player, self.playbackRequestID == requestID, self.player === player else { return }
                     self.seekingInitialPosition = false
                     self.playbackPosition = bounded
-                    if self.playbackShouldPlay { player.play() }
+                    if self.playbackShouldPlay, !self.audioInterrupted { player.play() }
                 }
             }
-        } else if playbackShouldPlay { player.play() }
+        } else if playbackShouldPlay, !audioInterrupted { player.play() }
     }
 
     private func mediaHeadProbe(_ url: URL) async -> Int? {
@@ -4070,8 +4169,9 @@ final class LaneSession: ObservableObject {
         ) { [weak self, weak item] _ in
             Task { @MainActor in
                 guard let self, let item, self.playbackRequestID == requestID,
-                      self.player?.currentItem === item, self.playbackShouldPlay else { return }
+                      self.player?.currentItem === item, self.playbackShouldPlay, !self.audioInterrupted else { return }
                 self.isBuffering = true
+                self.recordAudioEvent("stalled")
                 self.beginPlaybackTransition(requestID: requestID)
                 // Do not replace the item or reset position on ordinary
                 // buffering. AVPlayer resumes when more data arrives.
@@ -4314,6 +4414,8 @@ final class LaneSession: ObservableObject {
 
                 switch player.timeControlStatus {
                 case .playing:
+                    guard !self.audioInterrupted else { player.pause(); return }
+                    if !self.isPlaying { self.recordAudioEvent("audio-started") }
                     self.isPlaying = true
                     self.isBuffering = false
                     self.endPlaybackTransition(requestID: requestID)
@@ -4326,7 +4428,7 @@ final class LaneSession: ObservableObject {
                 case .waitingToPlayAtSpecifiedRate:
                     self.isPlaying = false
                     self.isBuffering = true
-                    if self.playbackShouldPlay, self.playbackBackgroundTask == .invalid {
+                    if self.playbackShouldPlay, self.playbackBackgroundLease?.isActive != true, !self.audioInterrupted {
                         self.beginPlaybackTransition(requestID: requestID)
                     }
                 case .paused:
@@ -4362,7 +4464,7 @@ final class LaneSession: ObservableObject {
             }
         }
 
-        if playbackShouldPlay, pendingStartPosition == nil { newPlayer.playImmediately(atRate: 1) }
+        if playbackShouldPlay, !audioInterrupted, pendingStartPosition == nil { newPlayer.playImmediately(atRate: 1) }
 
         // AVPlayer can remain in waitingToPlayAtSpecifiedRate indefinitely for
         // some signed CDN URLs without ever transitioning to .failed. Android
@@ -4863,14 +4965,19 @@ final class LaneSession: ObservableObject {
 
     func pause() {
         playbackShouldPlay = false
+        interruptionResumeRequested = false
         player?.pause()
         isPlaying = false
         endPlaybackTransition()
         updatePlaybackState(false)
+        recordAudioEvent("pause")
     }
 
     func resume() {
         playbackShouldPlay = true
+        guard !audioInterrupted else { interruptionResumeRequested = true; return }
+        do { try activateAudioSession() }
+        catch { playerError = userFacingPlaybackError(error); recordAudioEvent("session-activation-failed"); return }
         guard !seekingInitialPosition else { return }
         if !playerError.isEmpty || player?.currentItem?.status == .failed {
             if let currentTrack {
@@ -4891,7 +4998,9 @@ final class LaneSession: ObservableObject {
             isBuffering = player.timeControlStatus != .playing
             if !isBuffering { endPlaybackTransition(requestID: playbackRequestID) }
         } else if let currentTrack {
+            let savedPosition = pendingStartPosition
             requestStream(for: currentTrack)
+            pendingStartPosition = savedPosition
         }
     }
 
@@ -4904,6 +5013,7 @@ final class LaneSession: ObservableObject {
     }
 
     func stop() {
+        interruptionResumeRequested = false
         endPlaybackTransition()
         cancelPreparedStream()
         busy = false
@@ -4984,36 +5094,49 @@ final class LaneSession: ObservableObject {
         var info: [String: Any] = [:]
         info[MPMediaItemPropertyTitle] = currentTrack?.title ?? "Lane"
         info[MPMediaItemPropertyArtist] = currentTrack?.subtitle ?? ""
-        info[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
+        info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
+        info[MPMediaItemPropertyPlaybackDuration] = playbackDuration
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = playbackPosition
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 
     private func updatePlaybackState(_ playing: Bool) {
         var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
         info[MPNowPlayingInfoPropertyPlaybackRate] = playing ? 1.0 : 0.0
+        info[MPMediaItemPropertyPlaybackDuration] = playbackDuration
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = playbackPosition
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 
     private func configureRemoteCommands() {
         let commands = MPRemoteCommandCenter.shared()
+        func register(_ command: MPRemoteCommand, handler: @escaping (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus) {
+            remoteCommandTargets.append((command, command.addTarget(handler: handler)))
+        }
 
-        commands.playCommand.addTarget { [weak self] _ in
+        register(commands.playCommand) { [weak self] _ in
             Task { @MainActor in self?.resume() }
             return .success
         }
 
-        commands.pauseCommand.addTarget { [weak self] _ in
+        register(commands.pauseCommand) { [weak self] _ in
             Task { @MainActor in self?.pause() }
             return .success
         }
 
-        commands.nextTrackCommand.addTarget { [weak self] _ in
+        register(commands.nextTrackCommand) { [weak self] _ in
             Task { @MainActor in self?.next() }
             return .success
         }
 
-        commands.previousTrackCommand.addTarget { [weak self] _ in
+        register(commands.previousTrackCommand) { [weak self] _ in
             Task { @MainActor in self?.previous() }
+            return .success
+        }
+        commands.changePlaybackPositionCommand.isEnabled = true
+        register(commands.changePlaybackPositionCommand) { [weak self] event in
+            guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            Task { @MainActor in self?.seek(to: event.positionTime) }
             return .success
         }
     }

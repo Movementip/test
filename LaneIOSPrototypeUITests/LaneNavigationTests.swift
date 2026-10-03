@@ -439,10 +439,21 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
         // No foreground activation during the slow resolution, real WAV
         // buffering, end notification, or the following in-flight resolution.
-        Thread.sleep(forTimeInterval: 16)
+        Thread.sleep(forTimeInterval: 40)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 2), "App terminated during background audio")
+        Thread.sleep(forTimeInterval: 40)
         app.activate()
         XCTAssertTrue(app.staticTexts["Background checks passed"].waitForExistence(timeout: 10), app.staticTexts["session.result"].label)
         screenshot("iPhone13-background-real-audio-next")
+    }
+
+    func testAudioInterruptionPauseMediaResetAndHeadphoneRemoval() {
+        app.terminate()
+        app.launchArguments = ["--lane-ui-test", "--lane-background-fixture"]
+        app.launch()
+        app.buttons["Run audio lifecycle checks"].tap()
+        XCTAssertTrue(app.staticTexts["Audio lifecycle checks passed"].waitForExistence(timeout: 50), app.staticTexts["session.result"].label)
+        screenshot("iPhone13-audio-interruptions-reset")
     }
 
     func testCommentAndReplyAuthorsOpenProfilesAndReturn() {

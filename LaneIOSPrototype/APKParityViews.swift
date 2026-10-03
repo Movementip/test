@@ -722,7 +722,7 @@ struct APKFavoritePlaylistCard: View {
             HStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Favorite tracks")
-                        .font(.system(size: 16, weight: .bold))
+                        .font(LaneTypography.title(16))
                     Text("\(trackCount) tracks")
                         .font(.system(size: 12))
                         .foregroundStyle(.white.opacity(0.70))
@@ -777,10 +777,10 @@ struct APKImportTracksCard: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Import tracks")
-                        .font(.system(size: 14, weight: .bold))
+                        .font(LaneTypography.benzin(14))
 
                     Text("Transfer your music to Lane")
-                        .font(.system(size: 10))
+                        .font(LaneTypography.manrope(10))
                         .foregroundStyle(.white.opacity(0.70))
 
                     HStack(spacing: 10) {
@@ -2574,7 +2574,8 @@ struct APKFullPlayerView: View {
                                     session.seek(to: seconds)
                                 } label: {
                                     Text(line.words.isEmpty ? "♪" : line.words)
-                                        .font(.system(size: active ? 21 : 17, weight: active ? .bold : .semibold))
+                                        .font(LaneTypography.manrope(24))
+                                        .fontWeight(active ? .bold : .medium)
                                         .foregroundStyle(active ? Color.white : Color.white.opacity(0.43))
                                         .multilineTextAlignment(.leading)
                                         .frame(maxWidth: .infinity, alignment: .leading)

@@ -4,6 +4,7 @@ import Network
 import Security
 import SwiftUI
 import UIKit
+import ImageIO
 
 /// Mirrors the Android client's fast-DNS idea for networks where the system
 /// resolver is filtered. Normal URLSession remains the primary transport; this
@@ -33,7 +34,7 @@ enum AndroidNetworkTransport {
         }
     }
 
-    static func data(for request: URLRequest, timeout: TimeInterval = 12) async throws -> Response {
+    static func data(for request: URLRequest, timeout: TimeInterval = 12, maximumResponseBytes: Int? = nil) async throws -> Response {
         try Task.checkCancellation()
         guard let url = request.url,
               url.scheme?.lowercased() == "https",
@@ -58,7 +59,8 @@ enum AndroidNetworkTransport {
                     request: request,
                     originalHost: host,
                     address: address,
-                    timeout: timeout
+                    timeout: timeout,
+                    maximumResponseBytes: maximumResponseBytes
                 )
             } catch {
                 try Task.checkCancellation()
@@ -187,6 +189,7 @@ private final class DirectHTTPSOperation {
     private let originalHost: String
     private let address: String
     private let timeout: TimeInterval
+    private let maximumResponseBytes: Int?
     private let queue = DispatchQueue(label: "lane.android-dns.transport", qos: .userInitiated)
     private let lock = NSLock()
 
@@ -195,24 +198,27 @@ private final class DirectHTTPSOperation {
     private var received = Data()
     private var finished = false
 
-    private init(request: URLRequest, originalHost: String, address: String, timeout: TimeInterval) {
+    private init(request: URLRequest, originalHost: String, address: String, timeout: TimeInterval, maximumResponseBytes: Int?) {
         self.request = request
         self.originalHost = originalHost
         self.address = address
         self.timeout = timeout
+        self.maximumResponseBytes = maximumResponseBytes
     }
 
     static func run(
         request: URLRequest,
         originalHost: String,
         address: String,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        maximumResponseBytes: Int? = nil
     ) async throws -> AndroidNetworkTransport.Response {
         let operation = DirectHTTPSOperation(
             request: request,
             originalHost: originalHost,
             address: address,
-            timeout: timeout
+            timeout: timeout,
+            maximumResponseBytes: maximumResponseBytes
         )
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
@@ -282,6 +288,12 @@ private final class DirectHTTPSOperation {
         connection?.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             if let data, !data.isEmpty {
+                // A CDN that ignores Range must not turn the streaming bridge
+                // into an unbounded in-memory whole-file download.
+                if let limit = self.maximumResponseBytes, data.count > limit - self.received.count {
+                    self.finish(.failure(URLError(.dataLengthExceedsMaximum)))
+                    return
+                }
                 self.received.append(data)
             }
             if let error {
@@ -470,6 +482,9 @@ private final class LaneImageMemoryCache {
 
     private init() {
         images.totalCostLimit = 64 * 1024 * 1024
+        NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: nil) { [weak self] _ in
+            self?.images.removeAllObjects()
+        }
     }
 
     func image(for key: String) -> UIImage? {
@@ -479,6 +494,24 @@ private final class LaneImageMemoryCache {
     func store(_ image: UIImage, for key: String) {
         let decodedBytes = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
         images.setObject(image, forKey: key as NSString, cost: decodedBytes)
+    }
+}
+
+/// Covers are displayed at iPhone resolution, not the server's original
+/// poster resolution. Decode on a worker queue and bound the decoded surface
+/// before inserting it in the cache (including the first frame of a GIF).
+private func laneDecodeArtwork(_ data: Data) async -> UIImage? {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global(qos: .utility).async {
+            guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+                  let frame = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 1280,
+                    kCGImageSourceShouldCacheImmediately: true
+                  ] as CFDictionary) else { continuation.resume(returning: nil); return }
+            continuation.resume(returning: UIImage(cgImage: frame))
+        }
     }
 }
 
@@ -555,7 +588,7 @@ final class LaneRemoteImageLoader: ObservableObject {
 
         if let diskData = await LaneImageDiskCache.shared.data(for: key),
            !Task.isCancelled,
-           let decoded = UIImage(data: diskData) {
+           let decoded = await laneDecodeArtwork(diskData), !Task.isCancelled {
             LaneImageMemoryCache.shared.store(decoded, for: key)
             image = decoded
             loadedValue = rawValue
@@ -565,7 +598,7 @@ final class LaneRemoteImageLoader: ObservableObject {
         guard !Task.isCancelled,
               let data = try? await AndroidNetworkTransport.imageData(from: url),
               !Task.isCancelled,
-              let decoded = UIImage(data: data) else { return }
+              let decoded = await laneDecodeArtwork(data), !Task.isCancelled else { return }
         LaneImageMemoryCache.shared.store(decoded, for: key)
         image = decoded
         loadedValue = rawValue

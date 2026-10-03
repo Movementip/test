@@ -4948,7 +4948,7 @@ struct ImportTracksScreen: View {
                 ArtworkView(url: playlist.playlistImageUrl, size: 64, radius: 12)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(playlist.playlistName ?? "Import preview")
-                        .font(.headline)
+                        .font(LaneTypography.manrope(20))
                     Text("\(previewDisplayCount) tracks in Lane preview")
                         .accessibilityIdentifier("import.count")
                         .font(.subheadline)
@@ -5443,6 +5443,13 @@ private struct DiagnosticsScreen: View {
 
     var body: some View {
         Form {
+            Section("Background audio diagnostics") {
+                Text("Stored only on this iPhone. System reports can arrive later; an empty report does not rule out an iOS termination.").font(.caption).foregroundStyle(.secondary)
+                Button("Copy audio diagnostic report") {
+                    UIPasteboard.general.string = LaneAudioDiagnostics.shared.report()
+                }
+                Text(LaneAudioDiagnostics.shared.report()).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+            }
             Section("Backend") {
                 Picker("Mode", selection: $session.backendMode) {
                     ForEach(LaneBackendMode.allCases) { mode in

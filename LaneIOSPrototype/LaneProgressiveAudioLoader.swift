@@ -16,7 +16,8 @@ final class LaneProgressiveAudioLoader: NSObject, AVAssetResourceLoaderDelegate 
     static let chunkSize = LaneAudioHTTPRange.chunkSize
 
     init(url: URL, fetch: @escaping Fetch = { request in
-        let result = try await AndroidNetworkTransport.data(for: request, timeout: 12)
+        let result = try await AndroidNetworkTransport.data(for: request, timeout: 12,
+            maximumResponseBytes: Int(LaneAudioHTTPRange.chunkSize) + 16_384)
         return (result.data, result.response)
     }) {
         remoteURL = url

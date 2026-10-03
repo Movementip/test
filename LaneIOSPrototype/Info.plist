@@ -36,5 +36,14 @@
 <key>UILaunchScreen</key><dict/>
 <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
 <key>UIBackgroundModes</key><array><string>audio</string></array>
+<key>UIAppFonts</key><array>
+<string>Fonts/inter_light.ttf</string><string>Fonts/benzin_regular.ttf</string>
+<string>Fonts/benzin_semibold.ttf</string><string>Fonts/manrope_medium.ttf</string>
+<string>Fonts/archivo.ttf</string><string>Fonts/benza.ttf</string>
+<string>Fonts/noto_serif_display.ttf</string><string>Fonts/feature_mono.ttf</string>
+<string>Fonts/radio_canada_medium.ttf</string><string>Fonts/death.otf</string>
+<string>Fonts/montserrat_extrabold.ttf</string><string>Fonts/roboto_medium_numbers.ttf</string>
+<string>Fonts/manrope_light.ttf</string><string>Fonts/inter_bold.ttf</string>
+</array>
 <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
 </dict></plist>

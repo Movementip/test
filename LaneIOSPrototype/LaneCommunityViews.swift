@@ -249,16 +249,17 @@ struct LaneMemorialScreen: View {
                             .accessibilityIdentifier("memorial.submit")
                     } else {
                         LaneMemorialCross().frame(width: 190, height: 190)
-                        Text(artist.name ?? "Artist").font(.system(size: 25, weight: .bold)).multilineTextAlignment(.center)
+                        Text(artist.name ?? "Artist").font(LaneTypography.memorial(25)).multilineTextAlignment(.center)
+                            .shadow(color: .white.opacity(0.45), radius: 10)
                         if let info = artist.custom?.ripInfo {
                             HStack(spacing: 6) {
                                 Text(communityDate(info.startDate), style: .date)
                                 Text("–")
                                 Text(communityDate(info.endDate), style: .date)
-                            }.font(.callout).foregroundStyle(.secondary)
+                            }.font(LaneTypography.light(16)).foregroundStyle(.secondary)
                             if let text = info.additionalText, !text.isEmpty { Text(text).font(.callout).multilineTextAlignment(.center) }
                         }
-                        Text("Eternal memory").foregroundStyle(.secondary)
+                        Text("Eternal memory").font(LaneTypography.light(16)).foregroundStyle(.secondary)
                         Button { composing = true; error = nil } label: { actionLabel("Leave a candle") }
                             .buttonStyle(.plain).disabled(session.isGuest || artist.id == nil)
                             .accessibilityIdentifier("memorial.compose")
