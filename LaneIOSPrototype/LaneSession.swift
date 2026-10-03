@@ -2885,6 +2885,7 @@ final class LaneSession: ObservableObject {
         var currentStage = "Adding \(clean.count) tracks to Lane…"
         playlistImportStages[playlistID] = currentStage
         var completed = 0
+        var selectedOrderApplied = false
 
         let imported: Int
         do {
@@ -2902,9 +2903,14 @@ final class LaneSession: ObservableObject {
                     self.playlistImportStages[playlistID] = stage
                     progress(completed, clean.count, stage)
                 },
+                selectedOrder: { ids, metadata in
+                    guard self.token == requestToken else { return }
+                    self.applyPlaylistDisplayOrder(ids, metadata: metadata, playlistID: playlistID, sort: sort, serverConfirmed: false)
+                    selectedOrderApplied = true
+                },
                 confirmedOrder: { ids, metadata in
                     guard self.token == requestToken else { return }
-                    self.applyConfirmedPlaylistOrder(ids, metadata: metadata, playlistID: playlistID, sort: sort)
+                    self.applyPlaylistDisplayOrder(ids, metadata: metadata, playlistID: playlistID, sort: sort, serverConfirmed: true)
                 },
                 progress: { processed, total, savedIDs, resolved in
                     guard self.token == requestToken else { return }
@@ -2917,6 +2923,11 @@ final class LaneSession: ObservableObject {
         } catch {
             if token == requestToken {
                 playlistImportErrors[playlistID] = error.localizedDescription
+                if selectedOrderApplied, let confirmation = error as? LaneImportConfirmationError,
+                   case let .order(saved, _) = confirmation,
+                   let preference = playlistOrderPreference(playlistID), !preference.isServerConfirmed {
+                    playlistImportErrors[playlistID] = "All \(saved) tracks are saved on Lane. Your selected order is saved on this iPhone. Lane has not confirmed this order for other devices yet. Retry the import to check synchronization; saved songs will not be added again."
+                }
                 playlistTrackCache.removeValue(forKey: playlistID)
                 playlistContentGenerations[playlistID] = UUID()
                 // An ordering failure must not hide tracks whose membership
@@ -2938,10 +2949,10 @@ final class LaneSession: ObservableObject {
         return imported
     }
 
-    /// Install only the order actually read back from Lane. Membership progress
-    /// alone must not leave the liked screen showing the server's prepend order.
-    private func applyConfirmedPlaylistOrder(_ ids: [String], metadata: [TrackData], playlistID: String, sort: LaneMusicImportSort) {
-        let preference = LanePlaylistOrderPreference(trackIDs: ids, sort: sort)
+    /// Membership has been read back in full before either callback. Selected
+    /// display order and confirmed server order are deliberately separate.
+    private func applyPlaylistDisplayOrder(_ ids: [String], metadata: [TrackData], playlistID: String, sort: LaneMusicImportSort, serverConfirmed: Bool) {
+        let preference = LanePlaylistOrderPreference(trackIDs: ids, sort: sort, serverConfirmed: serverConfirmed)
         if let data = try? JSONEncoder().encode(preference) {
             UserDefaults.standard.set(data, forKey: playlistOrderPreferenceKey(playlistID))
         }
@@ -2994,8 +3005,13 @@ final class LaneSession: ObservableObject {
         playlistOrderPreference(playlistID)?.sort.rawValue
     }
 
+    func playlistImportOrderIsServerConfirmed(_ playlistID: String) -> Bool {
+        playlistOrderPreference(playlistID)?.isServerConfirmed ?? false
+    }
+
     func useServerPlaylistOrder(_ playlistID: String) {
         UserDefaults.standard.removeObject(forKey: playlistOrderPreferenceKey(playlistID))
+        playlistImportErrors.removeValue(forKey: playlistID)
         playlistContentGenerations[playlistID] = UUID()
         playlistTrackCache.removeValue(forKey: playlistID)
         refreshLibrary()

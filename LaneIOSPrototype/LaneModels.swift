@@ -99,6 +99,31 @@ enum YandexPlaylistSource {
     }
 }
 
+/// Android opens Passport, returns to Collection and reads only the liked
+/// playlist anchor. Never extract passwords, cookies or an OAuth token.
+enum YandexAccountImportSource {
+    static let collectionURL = URL(string: "https://music.yandex.ru/collection")!
+    static let loginURL = URL(string: "https://passport.yandex.ru/auth/welcome?origin=music&retpath=https%3A%2F%2Fmusic.yandex.ru%2Fcollection&language=ru")!
+
+    static func likedPlaylistID(from href: String) -> String? {
+        guard href.count < 2048, let url = URL(string: href, relativeTo: collectionURL)?.absoluteURL,
+              url.scheme == "https", url.host?.lowercased() == "music.yandex.ru",
+              url.user == nil, url.password == nil, url.port == nil || url.port == 443 else { return nil }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        guard parts.count == 2, parts[0] == "playlists", parts[1].hasPrefix("lk.") else { return nil }
+        let id = parts[1]
+        let suffix = id.dropFirst(3)
+        guard !suffix.isEmpty, suffix.count <= 200,
+              suffix.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }) else { return nil }
+        return id
+    }
+
+    static func isCollectionOrigin(_ url: URL) -> Bool {
+        url.scheme == "https" && url.host?.lowercased() == "music.yandex.ru" &&
+            (url.path == "/collection" || url.path.hasPrefix("/collection/") || url.path.hasPrefix("/playlists/lk."))
+    }
+}
+
 struct LaneShareItem: Decodable {
     let id: String
 }
@@ -274,11 +299,14 @@ enum LaneMusicImportSort: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// A user's confirmed import order is a display preference, not membership.
+/// A user's selected import order is a display preference, not membership.
 /// Old regional snapshots must not reset it; removed songs are never restored.
 struct LanePlaylistOrderPreference: Codable {
     let trackIDs: [String]
     let sort: LaneMusicImportSort
+    // Missing means a 0.91 preference created after server confirmation.
+    var serverConfirmed: Bool? = nil
+    var isServerConfirmed: Bool { serverConfirmed ?? true }
 
     func orderedMemberIDs(_ membership: [String]) -> [String] {
         let current = LaneTrackBatching.unique(membership)

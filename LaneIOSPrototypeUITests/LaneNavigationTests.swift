@@ -265,6 +265,70 @@ final class LaneNavigationTests: XCTestCase {
         screenshot("iPhone13-oldest-order-after-stale-server-read")
     }
 
+    func testImportOrderSurvivesIgnoredServerReorderAndRelaunchWithoutClaimingSync() {
+        app.terminate()
+        app.launchArguments = ["--lane-ui-test", "--lane-import-fixture", "--lane-ignore-import-reorder-fixture"]
+        app.launch()
+        app.buttons["Open import fixture"].tap()
+        XCTAssertTrue(app.staticTexts["import.count"].waitForExistence(timeout: 10))
+        let start = app.buttons["import.start"]
+        scrollTo(start); start.tap()
+        let waiting = app.staticTexts["import.stage"]
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Confirming saved tracks on Lane…"), object: waiting)], timeout: 10), .completed)
+        app.buttons["Leave import fixture"].tap()
+        let checkOrder = app.buttons["Check unconfirmed order"]
+        scrollTo(checkOrder); checkOrder.tap()
+        XCTAssertTrue(app.staticTexts["Local order kept; server synchronization pending"].waitForExistence(timeout: 50), app.staticTexts["session.result"].label)
+        app.terminate()
+        app.launchArguments.append("--lane-preserve-import-order-fixture")
+        app.launch()
+        app.buttons["Open full app"].tap()
+        app.buttons["Library"].firstMatch.tap()
+        let liked = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Favorite tracks")).firstMatch
+        XCTAssertTrue(liked.waitForExistence(timeout: 15)); liked.tap()
+        let first = app.buttons["track.row.lane-4"]
+        let last = app.buttons["track.row.lane-1"]
+        XCTAssertTrue(first.waitForExistence(timeout: 15)); XCTAssertTrue(last.waitForExistence(timeout: 15))
+        XCTAssertLessThan(first.frame.minY, last.frame.minY)
+        app.buttons["playlist.actions"].tap()
+        XCTAssertTrue(app.staticTexts["Saved on this iPhone · server synchronization pending"].waitForExistence(timeout: 5))
+        screenshot("iPhone13-local-source-order-after-ignored-server-reorder-and-relaunch")
+    }
+
+    func testYandexAccountLoginFindsDelayedFavoriteAnchorWithoutManualLink() {
+        app.terminate()
+        app.launchArguments = ["--lane-ui-test", "--lane-yandex-account-fixture"]
+        app.launch()
+        app.buttons["Import music"].tap()
+        let yandex = app.buttons["import.platform.yandex"]
+        scrollTo(yandex); yandex.tap()
+        app.buttons["import.kind.liked"].tap()
+        let login = app.buttons["import.yandex.login"]
+        XCTAssertTrue(login.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.textFields.count, 0, "Account import must not ask for a playlist link")
+        login.tap()
+        let continueButton = app.buttons["yandex.continue"]
+        XCTAssertTrue(continueButton.waitForExistence(timeout: 10))
+        let signIn = app.webViews.buttons["Sign in fixture"]
+        XCTAssertTrue(signIn.waitForExistence(timeout: 10))
+        XCTAssertFalse(continueButton.isEnabled, "A foreign anchor/subframe must not identify the account playlist")
+        signIn.tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: continueButton)], timeout: 10), .completed)
+        screenshot("iPhone13-yandex-account-automatic-favorite-discovery")
+        app.buttons["yandex.close"].tap()
+        XCTAssertTrue(login.waitForExistence(timeout: 5), "Yandex sign-in must always have a working exit")
+        login.tap()
+        XCTAssertTrue(signIn.waitForExistence(timeout: 10))
+        XCTAssertFalse(continueButton.isEnabled, "A closed browser must not retain the previous account selection")
+        signIn.tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: continueButton)], timeout: 10), .completed)
+        continueButton.tap()
+        XCTAssertTrue(app.staticTexts["import.count"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["Account favorites"].exists)
+        XCTAssertFalse(app.buttons["yandex.close"].exists)
+        screenshot("iPhone13-yandex-account-preview-without-manual-link")
+    }
+
     func testLikedRowReplacesAnotherPlaylistQueueForNextAndPrevious() {
         app.terminate()
         app.launchArguments = ["--lane-ui-test", "--lane-queue-fixture"]

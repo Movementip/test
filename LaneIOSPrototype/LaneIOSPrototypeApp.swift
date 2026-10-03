@@ -14,7 +14,7 @@ struct LaneIOSPrototypeApp: App {
         if ProcessInfo.processInfo.arguments.contains("--lane-ui-test") {
             // Tests start with no display preferences, then deliberately create
             // a fresh client in the same test to verify persistence.
-            for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("lane.playlistOrder.") {
+            for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("lane.playlistOrder.") && !ProcessInfo.processInfo.arguments.contains("--lane-preserve-import-order-fixture") {
                 UserDefaults.standard.removeObject(forKey: key)
             }
             _ = LaneUITestAudioServer.shared
@@ -26,7 +26,7 @@ struct LaneIOSPrototypeApp: App {
             value.queue = [LaneUITestFixtures.track]
             value.currentIndex = 0
             value.currentTrack = LaneUITestFixtures.track
-            if ProcessInfo.processInfo.arguments.contains("--lane-import-fixture") {
+            if ProcessInfo.processInfo.arguments.contains("--lane-import-fixture") || ProcessInfo.processInfo.arguments.contains("--lane-yandex-account-fixture") {
                 LaneUITestURLProtocol.prepareImportFixture()
                 value.serverPlaylists = [LanePlaylist(playlistId: "lane_likes", playlistName: "Favorite tracks",
                     playlistTracksIds: ["lane-1", "lane-2", "lane-3", "lane-4"])]
@@ -126,6 +126,12 @@ private struct LaneUITestRoot: View {
                     Button("Open import fixture") { showImport = true }
                     Button("Check imported order") { Task { await checkImportedOrder() } }
                     Button("Check imported oldest order") { Task { await checkImportedOrder(oldest: true) } }
+                    if ProcessInfo.processInfo.arguments.contains("--lane-ignore-import-reorder-fixture") {
+                        Button("Check unconfirmed order") { Task { await checkImportedOrder(serverConfirmed: false) } }
+                    }
+                }
+                if ProcessInfo.processInfo.arguments.contains("--lane-yandex-account-fixture") {
+                    NavigationLink("Import music") { ImportTracksScreen() }
                 }
                 Button("Open shared album") { session.receiveShareURL(URL(string: "lane://share/fixture-album-share")!) }
                 Text(result).accessibilityIdentifier("session.result")
@@ -278,14 +284,20 @@ private struct LaneUITestRoot: View {
         }
     }
 
-    private func checkImportedOrder(oldest: Bool = false) async {
+    private func checkImportedOrder(oldest: Bool = false, serverConfirmed: Bool = true) async {
         do {
-            for _ in 0..<100 where session.importingPlaylistIDs.contains("lane_likes") {
+            for _ in 0..<400 where session.importingPlaylistIDs.contains("lane_likes") {
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
             let expected = oldest ? ["lane-1", "lane-2", "lane-3", "lane-4"] : ["lane-4", "lane-3", "lane-2", "lane-1"]
             guard session.likedTracks.compactMap(\.trackID) == expected else {
                 throw LaneAPIError.decoding("Visible liked tracks did not adopt confirmed source order")
+            }
+            guard session.playlistImportOrderIsServerConfirmed("lane_likes") == serverConfirmed else {
+                throw LaneAPIError.decoding("Local order must not be mistaken for confirmed server order")
+            }
+            if !serverConfirmed, session.playlistImportErrors["lane_likes"]?.contains("Your selected order is saved on this iPhone") != true {
+                throw LaneAPIError.decoding("Ignored ordering must show a truthful local/server status")
             }
             LaneUITestURLProtocol.simulateStaleImportOrderReads()
             await session.refreshAfterLogin()
@@ -304,11 +316,14 @@ private struct LaneUITestRoot: View {
             guard fresh.likedTracks.compactMap(\.trackID) == expected else {
                 throw LaneAPIError.decoding("New client did not read the saved source order")
             }
+            guard fresh.playlistImportOrderIsServerConfirmed("lane_likes") == serverConfirmed else {
+                throw LaneAPIError.decoding("New client lost the server synchronization status")
+            }
             fresh.token = "another-ui-fixture-account"
             guard fresh.playlistImportOrderTitle("lane_likes") == nil else {
                 throw LaneAPIError.decoding("Import order leaked into another account")
             }
-            result = "Background import order passed"
+            result = serverConfirmed ? "Background import order passed" : "Local order kept; server synchronization pending"
         } catch { result = "Background import order failed: \(error.localizedDescription)" }
     }
 
@@ -516,7 +531,7 @@ private struct LaneUITestRoot: View {
 
 /// Real, slow loopback HTTP audio: AVPlayer and URLSession perform actual
 /// range/download requests, not a mock playback-state assignment.
-private final class LaneUITestAudioServer {
+final class LaneUITestAudioServer {
     static let shared = LaneUITestAudioServer()
     private let queue = DispatchQueue(label: "lane.ui.audio.fixture")
     private let lock = NSLock()
@@ -528,6 +543,10 @@ private final class LaneUITestAudioServer {
     private let audio: Data
     private let shortAudio: Data
     var url: String? { lock.lock(); defer { lock.unlock() }; return port.map { "http://127.0.0.1:\($0)/audio.wav" } }
+    var yandexFixtureURL: URL? {
+        lock.lock(); defer { lock.unlock() }
+        return port.flatMap { URL(string: "http://127.0.0.1:\($0)/yandex-account-fixture") }
+    }
     var finishedFullResponse: Bool { lock.lock(); defer { lock.unlock() }; return complete }
 
     private init() {
@@ -574,6 +593,12 @@ private final class LaneUITestAudioServer {
             let data = accumulated + (chunk ?? Data())
             guard let text = String(data: data, encoding: .utf8), text.contains("\r\n\r\n") else {
                 if !ended { self.receive(connection, accumulated: data) } else { connection.cancel() }
+                return
+            }
+            if text.hasPrefix("GET /yandex-account-fixture ") {
+                let page = Data(LaneYandexFixturePage.html.utf8)
+                let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(page.count)\r\nConnection: close\r\n\r\n"
+                connection.send(content: Data(headers.utf8) + page, completion: .contentProcessed { _ in connection.cancel() })
                 return
             }
             let payload = text.contains("/short.wav ") ? self.shortAudio : self.audio
@@ -804,8 +829,13 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 let id = value?["playlistId"] as? String ?? ""
                 let ids = value?["newOrder"] as? [String] ?? []
                 guard Set(ids) == Set(Self.saved[id] ?? []) else { throw URLError(.badServerResponse) }
-                Self.saved[id] = ids
+                if !ProcessInfo.processInfo.arguments.contains("--lane-ignore-import-reorder-fixture") { Self.saved[id] = ids }
                 data = Data(#"{"ok":true}"#.utf8)
+            } else if path == "/user/import/preview" {
+                guard query.first(where: { $0.name == "platform" })?.value == "yandex",
+                      query.first(where: { $0.name == "yandexPlaylistId" })?.value == "lk.fixture-account",
+                      request.value(forHTTPHeaderField: "Cookie") == nil else { throw URLError(.badURL) }
+                data = try JSONSerialization.data(withJSONObject: ["playlistName": "Account favorites", "playlistTracksIds": ["source-1", "source-2", "source-3", "source-4"], "tracksCount": 4])
             } else if path == "/user/playlist/remove-track" {
                 let id = query.first { $0.name == "playlistId" }?.value ?? ""
                 let track = query.first { $0.name == "trackId" }?.value ?? ""

@@ -1756,6 +1756,7 @@ actor LaneAPI {
         orderReference: [YandexImportTrack] = [],
         shouldContinue: @escaping @MainActor () -> Bool = { true },
         stage: @escaping @MainActor (String) -> Void = { _ in },
+        selectedOrder: @escaping @MainActor ([String], [TrackData]) -> Void = { _, _ in },
         confirmedOrder: @escaping @MainActor ([String], [TrackData]) -> Void = { _, _ in },
         progress: @MainActor (_ processed: Int, _ total: Int, _ savedIDs: [String], _ tracks: [TrackData]) -> Void = { _, _, _, _ in }
     ) async throws -> Int {
@@ -1849,6 +1850,10 @@ actor LaneAPI {
             ? LaneImportOrdering.ordered(resolvedTracks, sort: sort, reference: orderReference).compactMap(\.songId)
             : (sort == .oldest ? Array(acceptedOrder.reversed()) : acceptedOrder)
         let newOrder = LaneTrackBatching.unique(ordered) + destinationIDs.filter { !accepted.contains($0) }
+        // Membership is complete and confirmed. Keep the user's display order
+        // even if Lane accepts /reorder but ignores it. This callback does NOT
+        // confirm server order; the read-back below remains mandatory.
+        await selectedOrder(newOrder, resolvedTracks)
         await stage("All \(accepted.count) saved · confirming playlist order…")
         do {
             if newOrder != destinationIDs {

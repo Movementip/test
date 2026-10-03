@@ -319,7 +319,7 @@ final class LaneMockURLProtocol: URLProtocol {
                 Self.staleOrder[id] = Self.playlists[id] ?? []
                 Self.staleOrderReads[id] = 5
             }
-                if id == "import-order-ignored" { return (200, Data(#"{"ok":true}"#.utf8)) }
+            if id == "import-order-ignored" { return (200, Data(#"{"ok":true}"#.utf8)) }
             try require(id != "import-incomplete", "Partial membership must never be submitted as a reorder permutation")
             Self.playlists[id] = ids
             return (200, Data(#"{"ok":true}"#.utf8))
@@ -788,12 +788,38 @@ struct LaneContractTestRunner {
         let preference = LanePlaylistOrderPreference(trackIDs: sourceOrder, sort: .original)
         let restoredPreference = try JSONDecoder().decode(LanePlaylistOrderPreference.self,
             from: JSONEncoder().encode(preference))
+        precondition(restoredPreference.isServerConfirmed, "Old confirmed preferences must retain their status")
         precondition(restoredPreference.orderedMemberIDs(Array(sourceOrder.reversed())) == sourceOrder)
         let membership = ["new-like"] + Array(sourceOrder.dropFirst().reversed())
         precondition(restoredPreference.orderedMemberIDs(membership) == ["new-like"] + Array(sourceOrder.dropFirst()))
         precondition(restoredPreference.orderedMemberIDs([]).isEmpty)
         let oldestPreference = LanePlaylistOrderPreference(trackIDs: Array(sourceOrder.reversed()), sort: .oldest)
         precondition(oldestPreference.orderedMemberIDs(sourceOrder) == Array(sourceOrder.reversed()))
+        let pendingPreference = LanePlaylistOrderPreference(trackIDs: sourceOrder, sort: .original, serverConfirmed: false)
+        let restoredPending = try JSONDecoder().decode(LanePlaylistOrderPreference.self, from: JSONEncoder().encode(pendingPreference))
+        precondition(!restoredPending.isServerConfirmed)
+        precondition(restoredPending.orderedMemberIDs(Array(sourceOrder.reversed())) == sourceOrder)
+
+        // Android's sign-in screen sends only the favorite playlist ID from
+        // a Collection anchor, never a password, cookie or provider token.
+        let accountID = "lk.93c5f910-a510-453b-b478-7d125512d824"
+        precondition(YandexAccountImportSource.likedPlaylistID(from: "/playlists/\(accountID)?ref_id=tracking#fragment") == accountID)
+        precondition(YandexAccountImportSource.likedPlaylistID(from: "https://music.yandex.ru/playlists/\(accountID)") == accountID)
+        precondition(YandexAccountImportSource.likedPlaylistID(from: "https://music.yandex.ru:443/playlists/\(accountID)") == accountID)
+        for href in ["https://music.yandex.ru.evil.test/playlists/\(accountID)",
+                     "https://music.yandex.ru@evil.test/playlists/\(accountID)",
+                     "https://user:password@music.yandex.ru/playlists/\(accountID)",
+                     "http://music.yandex.ru/playlists/\(accountID)",
+                     "https://music.yandex.ru:8443/playlists/\(accountID)",
+                     "https://passport.yandex.ru/playlists/\(accountID)",
+                     "/playlists/not-liked", "/playlists/lk.", "/playlists/lk.bad/extra",
+                     "/playlists/lk.%2Fbad", "/playlists/lk.неверно"] {
+            precondition(YandexAccountImportSource.likedPlaylistID(from: href) == nil, href)
+        }
+        precondition(YandexAccountImportSource.isCollectionOrigin(YandexAccountImportSource.collectionURL))
+        precondition(!YandexAccountImportSource.isCollectionOrigin(URL(string: "https://music.yandex.ru.evil.test/collection")!))
+        let loginQuery = URLComponents(url: YandexAccountImportSource.loginURL, resolvingAgainstBaseURL: false)!.queryItems!
+        precondition(loginQuery.first { $0.name == "retpath" }?.value == YandexAccountImportSource.collectionURL.absoluteString)
 
         // Stop at the failed middle batch; a new client can continue without
         // losing the first 15 or sending duplicate playlist writes.
@@ -819,7 +845,8 @@ struct LaneContractTestRunner {
         precondition(LaneImportOrdering.ordered(duplicateTitleTracks, sort: .original, reference: punctuationSource).first?.songId == "right-artist")
         do {
             _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-unmatched", sourceIDs: small,
-                orderReference: [YandexImportTrack(yandexID: "unknown", originalIndex: 0, title: "Unmatched metadata", artists: [], coverURL: nil)])
+                orderReference: [YandexImportTrack(yandexID: "unknown", originalIndex: 0, title: "Unmatched metadata", artists: [], coverURL: nil)],
+                selectedOrder: { _, _ in preconditionFailure("Unmatched metadata cannot create a guessed display preference") })
             preconditionFailure("No source matches must not be presented as confirmed source order")
         } catch let LaneImportConfirmationError.order(saved, detail) {
             precondition(saved == 31 && detail.contains("No guessed ordering"))
@@ -846,12 +873,20 @@ struct LaneContractTestRunner {
             // The first resolver/write callback cannot show unconfirmed IDs.
             if processed == 15 { precondition(saved.isEmpty, "A 2xx write must not display durable checkmarks") }
         })
+        var ignoredDisplayOrder: [String] = []
         do {
-            _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-order-ignored", sourceIDs: small)
+            _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-order-ignored", sourceIDs: sourceIDs,
+                sort: .oldest, orderReference: largeReference,
+                selectedOrder: { ids, _ in ignoredDisplayOrder = ids },
+                confirmedOrder: { _, _ in preconditionFailure("An ignored server reorder cannot report confirmation") })
             preconditionFailure("An ignored reorder must not claim the requested order is durable")
-        } catch let LaneImportConfirmationError.order(saved, _) { precondition(saved == 31) }
+        } catch let LaneImportConfirmationError.order(saved, _) { precondition(saved == 1151) }
+        precondition(ignoredDisplayOrder == Array(sourceOrder.reversed()))
+        precondition(LaneMockURLProtocol.savedIDs("import-order-ignored") != ignoredDisplayOrder)
+        precondition(Set(LaneMockURLProtocol.savedIDs("import-order-ignored")) == Set(ignoredDisplayOrder))
         do {
-            _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-incomplete", sourceIDs: small)
+            _ = try await api.importTrackBatches(token: "test-token", playlistId: "import-incomplete", sourceIDs: small,
+                selectedOrder: { _, _ in preconditionFailure("Incomplete membership cannot create a complete order preference") })
             preconditionFailure("Incomplete membership must not reorder away unrelated songs")
         } catch let LaneImportConfirmationError.order(saved, detail) {
             precondition(saved == 31 && detail.contains("incomplete"))
@@ -914,6 +949,7 @@ struct LaneContractTestRunner {
             "/user/import/preview"
         ]
         precondition(expectedPaths.allSatisfy(LaneMockURLProtocol.received))
+        print("Additional 0.92 contracts passed: Yandex account playlist-ID parsing/security boundaries, 1151-track ignored reorder keeps selected display order but never confirms server order, pending preference roundtrip, incomplete/unmatched source cannot create an unsafe preference.")
         print("Lane contract tests passed: APK-native cipher/signature, 1151 tracks in batches of 15, source order from 1394-entry reference, confirmed-order callback, persisted source/reverse display preference through reversed membership snapshots/new likes/removals, completed-import order repair without new resolver calls/writes, punctuation and collaborator matching, 429 fresh-signature retries, minimum 60-second deletion cooldown/cancellation, delayed membership/order readback, truthful saved-vs-order states, ordering-only resume without re-resolving/rewriting, durable source/reverse order, partial clear/retry, canonical albums, server likes, privacy, notifications, multipart uploads, ranges/effects, earned badges/server equip-removal, memorial pagination/count and non-replayed confirmed candle writes.")
     }
 }

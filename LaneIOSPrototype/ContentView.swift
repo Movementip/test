@@ -4261,6 +4261,7 @@ private struct FavoriteTracksScreen: View {
             }
             if let error = session.playlistImportErrors["lane_likes"] {
                 Text(error).foregroundStyle(lanePink)
+                    .accessibilityIdentifier("playlist.import.error")
             }
             if session.clearingPlaylistIDs.contains("lane_likes") {
                 ProgressView(session.playlistClearStages["lane_likes"] ?? "Removing \(clearCompleted)/\(clearTotal) tracks…")
@@ -4332,6 +4333,10 @@ private struct FavoriteTracksScreen: View {
                 Text("Liked tracks").font(.headline)
                 if let order = session.playlistImportOrderTitle("lane_likes") {
                     Text("Import order: \(order)").font(.caption).foregroundStyle(.secondary)
+                    if !session.playlistImportOrderIsServerConfirmed("lane_likes") {
+                        Text("Saved on this iPhone · server synchronization pending")
+                            .font(.caption2).foregroundStyle(lanePink)
+                    }
                     Button("Use server order") {
                         session.useServerPlaylistOrder("lane_likes")
                         showActions = false
@@ -4569,6 +4574,7 @@ struct ImportTracksScreen: View {
     @State private var importSort: LaneMusicImportSort = .original
     @State private var yandexMetadataTask: Task<[YandexImportTrack], Never>?
     @State private var previewRequestID = UUID()
+    @State private var showYandexLogin = false
 
     init() {}
 
@@ -4620,6 +4626,13 @@ struct ImportTracksScreen: View {
         .onAppear {
             if targetPlaylistID.isEmpty {
                 targetPlaylistID = session.serverPlaylists.first?.playlistId ?? ""
+            }
+        }
+        .fullScreenCover(isPresented: $showYandexLogin) {
+            LaneYandexAccountImportScreen { id in
+                sourceValue = id
+                showYandexLogin = false
+                requestPreview()
             }
         }
         // This unstructured task finishes its read-back/reorder even when the
@@ -4691,6 +4704,7 @@ struct ImportTracksScreen: View {
                         resetPreview()
                         step = .options
                     }
+                    .accessibilityIdentifier("import.platform.\(item.rawValue.lowercased())")
                 }
             }
             .padding(.top, 32)
@@ -4729,6 +4743,7 @@ struct ImportTracksScreen: View {
                         importKind = .liked
                         step = .input
                     }
+                    .accessibilityIdentifier("import.kind.liked")
 
                     APKImportOptionButton(
                         icon: "music.note.list",
@@ -4759,7 +4774,9 @@ struct ImportTracksScreen: View {
 
             Spacer().frame(height: 38)
 
-            if platform == .telegram {
+            if platform == .yandex, importKind == .liked {
+                yandexAccountControls
+            } else if platform == .telegram {
                 telegramImportControls
             } else {
                 VStack(spacing: 14) {
@@ -4816,11 +4833,22 @@ struct ImportTracksScreen: View {
             switch platform {
             case .spotify: return "Connect Spotify to import your favorite tracks"
             case .soundCloud: return "Enter the URL of your SoundCloud profile"
-            case .yandex: return "Enter the URL of your Yandex Music favorite playlist"
+            case .yandex: return "Sign in to Yandex Music to import your favorite tracks"
             case .telegram: return ""
             }
         }
         return "Enter the URL of the\n\(platform.displayName) playlist"
+    }
+
+    private var yandexAccountControls: some View {
+        VStack(spacing: 16) {
+            Text("Sign in on the official Yandex page. Lane will find your favorite playlist automatically; no link is needed.")
+                .font(.system(size: 14)).foregroundStyle(Color.white.opacity(0.65))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            APKPrimaryButton(title: loading ? "Loading preview…" : "Sign in to Yandex", loading: loading, enabled: !loading) {
+                showYandexLogin = true
+            }.accessibilityIdentifier("import.yandex.login")
+        }
     }
 
     private func tokenField(_ title: String, text: Binding<String>) -> some View {
@@ -5186,6 +5214,7 @@ struct ImportTracksScreen: View {
                 }
                 await acceptPreview(result)
             } catch {
+                guard previewRequestID == requestID else { return }
                 message = friendlyImportError(error)
             }
         }
@@ -5306,7 +5335,7 @@ struct ImportTracksScreen: View {
                 session.output = error is LaneImportConfirmationError ? error.localizedDescription : "Import error: \(error.localizedDescription)"
                 let detail = friendlyImportError(error)
                 if error is LaneImportConfirmationError {
-                    message = error.localizedDescription
+                    message = session.playlistImportErrors[destination] ?? error.localizedDescription
                 } else if importCompleted > 0 {
                     message = "Processed \(importCompleted) of \(importTotal) tracks. Tap again to continue. \(detail)"
                 } else {
