@@ -1951,6 +1951,11 @@ final class LaneSession: ObservableObject {
                         likedTracks.removeAll { $0.trackID == id }
                     }
                 }
+                // A partial regional response retains missing cached rows.
+                // Order the complete visible merge, not just the returned IDs,
+                // otherwise retained songs get incorrectly appended at the end.
+                likedTracks = LaneTrackBatching.ordered(likedTracks,
+                    sourceIDs: preferredPlaylistOrder(likedTracks.compactMap(\.trackID), playlistID: "lane_likes"))
 
                 if needsMigration, !favoriteMigrationInProgress, !legacyIDs.isEmpty {
                     favoriteMigrationInProgress = true

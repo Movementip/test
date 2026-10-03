@@ -292,6 +292,12 @@ private struct LaneUITestRoot: View {
             guard session.likedTracks.compactMap(\.trackID) == expected else {
                 throw LaneAPIError.decoding("Library refresh reset the selected import order")
             }
+            LaneUITestURLProtocol.simulateStaleImportOrderReads(partial: true)
+            await session.refreshAfterLogin()
+            guard session.likedTracks.compactMap(\.trackID) == expected else {
+                throw LaneAPIError.decoding("Partial membership moved the retained rows to the end")
+            }
+            LaneUITestURLProtocol.simulateStaleImportOrderReads()
             let fresh = LaneSession()
             fresh.backendMode = .custom; fresh.baseURL = "https://lane-ui.test"; fresh.token = "ui-fixture-token"
             await fresh.refreshAfterLogin()
@@ -621,10 +627,12 @@ private final class LaneUITestURLProtocol: URLProtocol {
     private static var importFixture = false
     private static var delayImportRead = false
     private static var staleImportOrderReads = false
+    private static var partialImportOrderReads = false
 
-    static func simulateStaleImportOrderReads() {
+    static func simulateStaleImportOrderReads(partial: Bool = false) {
         lock.lock(); defer { lock.unlock() }
         staleImportOrderReads = true
+        partialImportOrderReads = partial
     }
 
     static func prepareImportFixture() {
@@ -633,6 +641,7 @@ private final class LaneUITestURLProtocol: URLProtocol {
         importFixture = true
         delayImportRead = false
         staleImportOrderReads = false
+        partialImportOrderReads = false
     }
 
     static func prepareLikedFixture(rateLimited: Bool) {
@@ -787,8 +796,10 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 Self.saved[id] = LaneTrackBatching.unique((Self.saved[id] ?? []) + ids)
                 data = Data(#"{"ok":true}"#.utf8)
             } else if path == "/user/playlists" {
+                let likedIDs = Self.saved["lane_likes"] ?? []
                 data = try JSONSerialization.data(withJSONObject: [
-                    ["playlistId": "lane_likes", "playlistTracksIds": Self.saved["lane_likes"] ?? []],
+                    ["playlistId": "lane_likes", "playlistTracksIds": Self.partialImportOrderReads ? Array(likedIDs.suffix(2)) : likedIDs,
+                     "tracksCount": likedIDs.count],
                     ["playlistId": "fixture-playlist", "playlistName": "Fixture playlist", "playlistTracksIds": Self.saved["fixture-playlist"] ?? [], "tracksCount": 0, "creatorLid": "fixture-user"]
                 ])
             } else if path == "/playlist/reorder" {
@@ -816,7 +827,8 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 let parts = path.split(separator: "/")
                 let id = String(parts[1])
                 if parts.last == "tracks" {
-                    let ids = isRaceClient && Self.favoriteReadRace && id == "lane_likes" ? [] : (Self.saved[id] ?? [])
+                    var ids = isRaceClient && Self.favoriteReadRace && id == "lane_likes" ? [] : (Self.saved[id] ?? [])
+                    if Self.partialImportOrderReads, id == "lane_likes" { ids = Array(ids.suffix(2)) }
                     data = try JSONSerialization.data(withJSONObject: ["items": ids.reversed().map { ["songId": $0, "title": "Fixture track \($0.split(separator: "-").last!)", "platform": "spotify"] }, "totalItems": ids.count, "page": 1, "pageSize": 100, "totalPages": 1])
                 } else {
                     if Self.delayImportRead, id == "lane_likes" {
@@ -825,8 +837,10 @@ private final class LaneUITestURLProtocol: URLProtocol {
                         responseDelay = 6
                     }
                     var ids = Self.saved[id] ?? []
+                    let count = ids.count
+                    if Self.partialImportOrderReads, id == "lane_likes" { ids = Array(ids.suffix(2)) }
                     if Self.staleImportOrderReads, id == "lane_likes" { ids = Array(ids.reversed()) }
-                    data = try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": ids, "tracksCount": ids.count])
+                    data = try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": ids, "tracksCount": count])
                 }
             } else if path == "/account" {
                 if isRaceClient, Self.accountReadRace {

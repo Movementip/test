@@ -4336,6 +4336,7 @@ private struct FavoriteTracksScreen: View {
                         session.useServerPlaylistOrder("lane_likes")
                         showActions = false
                     }.accessibilityIdentifier("playlist.order.server")
+                        .disabled(session.importingPlaylistIDs.contains("lane_likes") || session.clearingPlaylistIDs.contains("lane_likes"))
                 }
                 Button(role: .destructive) {
                     clearAfterActions = true
