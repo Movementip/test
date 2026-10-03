@@ -625,7 +625,7 @@ private final class LaneUITestURLProtocol: URLProtocol {
     private static var rateLimitDeletion = false
     private static var deletionDeadline: Date?
     private static var importFixture = false
-    private static var delayImportRead = false
+    private static var importMembershipReadCount = 0
     private static var staleImportOrderReads = false
     private static var partialImportOrderReads = false
 
@@ -639,7 +639,7 @@ private final class LaneUITestURLProtocol: URLProtocol {
         lock.lock(); defer { lock.unlock() }
         saved["lane_likes"] = ["lane-1", "lane-2", "lane-3", "lane-4"]
         importFixture = true
-        delayImportRead = false
+        importMembershipReadCount = 0
         staleImportOrderReads = false
         partialImportOrderReads = false
     }
@@ -768,9 +768,6 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 }
                 let object = try JSONSerialization.jsonObject(with: body)
                 let ids = (object as? [String]) ?? (object as? [String: Any])?["trackIds"] as? [String] ?? []
-                if Self.importFixture, ids == ["source-1", "source-2", "source-3", "source-4"] {
-                    Self.delayImportRead = true
-                }
                 if isRaceClient, Self.favoriteReadRace, !Self.favoriteReadStarted, ids == ["lane-1"] {
                     Self.favoriteReadStarted = true
                     delayResponse = true
@@ -831,10 +828,15 @@ private final class LaneUITestURLProtocol: URLProtocol {
                     if Self.partialImportOrderReads, id == "lane_likes" { ids = Array(ids.suffix(2)) }
                     data = try JSONSerialization.data(withJSONObject: ["items": ids.reversed().map { ["songId": $0, "title": "Fixture track \($0.split(separator: "-").last!)", "platform": "spotify"] }, "totalItems": ids.count, "page": 1, "pageSize": 100, "totalPages": 1])
                 } else {
-                    if Self.delayImportRead, id == "lane_likes" {
-                        Self.delayImportRead = false
-                        delayResponse = true
-                        responseDelay = 6
+                    if Self.importFixture, id == "lane_likes" {
+                        Self.importMembershipReadCount += 1
+                        // Delay the read after processing, regardless of
+                        // whether canonical metadata came from the checkpoint.
+                        // The resolver is intentionally skipped on a repeat.
+                        if Self.importMembershipReadCount == 2 {
+                            delayResponse = true
+                            responseDelay = 6
+                        }
                     }
                     var ids = Self.saved[id] ?? []
                     let count = ids.count
