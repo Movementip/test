@@ -191,7 +191,9 @@ final class LaneNavigationTests: XCTestCase {
     func testAdaptiveDownloadIsRestoredAndPlaysWithHTTPServerStopped() {
         app.terminate(); app.launchArguments = ["--lane-ui-test", "--lane-hls-fixture"]; app.launch()
         app.buttons["Run adaptive offline checks"].tap()
-        XCTAssertTrue(app.staticTexts["Adaptive offline checks passed"].waitForExistence(timeout: 60), app.staticTexts["session.result"].label)
+        let result = app.staticTexts["session.result"]
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label BEGINSWITH %@", "Adaptive offline checks"), object: result)], timeout: 60), .completed)
+        XCTAssertEqual(result.label, "Adaptive offline checks passed")
         screenshot("iPhone13-adaptive-offline-server-stopped")
     }
 

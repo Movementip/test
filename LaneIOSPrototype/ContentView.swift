@@ -1322,7 +1322,7 @@ private struct MiniPlayerView: View {
 
         do {
             let data = try await AndroidNetworkTransport.imageData(from: url)
-            guard let image = UIImage(data: data),
+            guard let image = await laneDecodeArtwork(data, maximumPixels: 192),
                   let sampled = Self.averageColor(of: image) else {
                 cardColor = Color(uiColor: fallback)
                 return

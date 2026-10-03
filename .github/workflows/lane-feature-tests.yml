@@ -1,0 +1,38 @@
+name: Lane feature regressions
+on:
+  workflow_dispatch:
+jobs:
+  feature-tests:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test new native features on iPhone 13
+        run: |
+          set -euo pipefail
+          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; print(next(x["identifier"] for x in reversed(json.load(sys.stdin)["runtimes"]) if x.get("isAvailable") and "iOS" in x["name"]))')
+          UDID=$(xcrun simctl create "Lane features iPhone 13" com.apple.CoreSimulator.SimDeviceType.iPhone-13 "$RUNTIME")
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          mkdir -p Output
+          xcodebuild -project LaneIOSPrototype.xcodeproj -scheme LaneIOSPrototype -configuration Debug \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath /tmp/lane-feature-build \
+            -resultBundlePath Output/Lane-Features.xcresult -parallel-testing-enabled NO \
+            -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testAdaptiveDownloadIsRestoredAndPlaysWithHTTPServerStopped \
+            -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testPremiumPricingRetryAndConfirmedCancellation \
+            -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testMemorialRetryPaginationConfirmedCandleAndBack \
+            -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testImageCropCancelAndConfirmedJPEGUploadAndAnimatedGIF \
+            -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testAudioInterruptionPauseMediaResetAndHeadphoneRemoval \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test
+      - name: Export results
+        if: always()
+        run: |
+          if [ -d Output/Lane-Features.xcresult ]; then
+            xcrun xcresulttool export attachments --path Output/Lane-Features.xcresult --output-path Output/Attachments
+            xcrun xcresulttool get test-results summary --path Output/Lane-Features.xcresult > Output/Test-Summary.json
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Lane-feature-Test-Results
+          path: Output/

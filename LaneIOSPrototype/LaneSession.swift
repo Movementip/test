@@ -612,6 +612,9 @@ final class LaneSession: ObservableObject {
     #endif
 
     private var player: AVPlayer?
+    private var nowPlayingArtworkTask: Task<Void, Never>?
+    private var nowPlayingArtworkKey: String?
+    private var nowPlayingArtwork: MPMediaItemArtwork?
     private var offlineStoreObserver: NSObjectProtocol?
     private var playerItemStatusObserver: NSKeyValueObservation?
     private var playerLoadedTimeRangesObserver: NSKeyValueObservation?
@@ -719,6 +722,7 @@ final class LaneSession: ObservableObject {
     }
 
     deinit {
+        nowPlayingArtworkTask?.cancel()
         if let offlineStoreObserver { NotificationCenter.default.removeObserver(offlineStoreObserver) }
         equalizerTask?.cancel()
         for observer in audioLifecycleObservers { NotificationCenter.default.removeObserver(observer) }
@@ -5174,6 +5178,8 @@ final class LaneSession: ObservableObject {
     }
 
     func stop() {
+        nowPlayingArtworkTask?.cancel(); nowPlayingArtworkTask = nil
+        nowPlayingArtworkKey = nil; nowPlayingArtwork = nil
         interruptionResumeRequested = false
         endPlaybackTransition()
         cancelPreparedStream()
@@ -5252,12 +5258,30 @@ final class LaneSession: ObservableObject {
     }
 
     private func updateNowPlaying() {
+        let artworkKey = currentTrack.map { "\($0.trackID ?? $0.id)|\($0.coverURL ?? "")" }
+        if nowPlayingArtworkKey != artworkKey {
+            nowPlayingArtworkTask?.cancel(); nowPlayingArtworkTask = nil
+            nowPlayingArtworkKey = artworkKey; nowPlayingArtwork = nil
+            if let url = laneRoutedMediaURL(currentTrack?.coverURL) {
+                nowPlayingArtworkTask = Task { [weak self] in
+                    guard let data = try? await AndroidNetworkTransport.imageData(from: url), !Task.isCancelled,
+                          let image = await laneDecodeArtwork(data, maximumPixels: 640), !Task.isCancelled,
+                          let self, self.nowPlayingArtworkKey == artworkKey else { return }
+                    let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                    self.nowPlayingArtwork = artwork
+                    var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+                    info[MPMediaItemPropertyArtwork] = artwork
+                    MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+                }
+            }
+        }
         var info: [String: Any] = [:]
         info[MPMediaItemPropertyTitle] = currentTrack?.title ?? "Lane"
         info[MPMediaItemPropertyArtist] = currentTrack?.subtitle ?? ""
         info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
         info[MPMediaItemPropertyPlaybackDuration] = playbackDuration
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = playbackPosition
+        info[MPMediaItemPropertyArtwork] = nowPlayingArtwork
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 

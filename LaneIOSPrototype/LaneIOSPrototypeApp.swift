@@ -51,10 +51,10 @@ struct LaneIOSPrototypeApp: App {
             if ProcessInfo.processInfo.arguments.contains("--lane-ui-test") {
                 LaneUITestRoot().environmentObject(session)
             } else {
-                ContentView().environmentObject(session)
+                ContentView().environmentObject(session).font(LaneTypography.manrope(16))
             }
             #else
-            ContentView().environmentObject(session)
+            ContentView().environmentObject(session).font(LaneTypography.manrope(16))
             #endif
             }
             .modifier(LaneIncomingSharePresenter())
@@ -421,6 +421,14 @@ private struct LaneUITestRoot: View {
         let track = TrackCandidate(id: "hls-fixture", title: "Offline adaptive fixture", subtitle: "Generated tone", trackID: "hls-fixture")
         do {
             try session.removeDownload(track)
+            session.requestStream(for: track)
+            for _ in 0..<150 {
+                if session.isPlaying, session.playbackPosition > 0.2 { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard session.isPlaying, session.playbackPosition > 0.2 else { throw LaneAPIError.decoding("HLS fixture does not play online: \(session.playerError)") }
+            session.stop()
+            let streamRequests = LaneUITestURLProtocol.streamCount(for: "hls-fixture")
             try await session.debugDownloadTrack(track)
             guard let url = session.downloadedFileURL(for: track), url.pathExtension == "movpkg" else {
                 throw LaneAPIError.decoding("Adaptive audio was not saved as an offline package")
@@ -438,13 +446,17 @@ private struct LaneUITestRoot: View {
             }
             let audible = fresh.isPlaying && fresh.playbackPosition > 0.2
             fresh.stop()
-            guard audible, LaneUITestURLProtocol.streamCount(for: "hls-fixture") == 0 else {
+            guard audible, LaneUITestURLProtocol.streamCount(for: "hls-fixture") == streamRequests else {
                 throw LaneAPIError.decoding("Adaptive offline playback contacted the stopped server or produced no audio: \(fresh.playerError)")
             }
             try fresh.removeDownload(track)
             guard fresh.downloadedFileURL(for: track) == nil else { throw LaneAPIError.decoding("Adaptive package deletion failed") }
             result = "Adaptive offline checks passed"
-        } catch { result = "Adaptive offline checks failed: \(error.localizedDescription)" }
+        } catch {
+            let value = error as NSError
+            let underlying = value.userInfo[NSUnderlyingErrorKey] as? NSError
+            result = "Adaptive offline checks failed: \(error.localizedDescription) [\(value.domain) \(value.code); underlying \(underlying?.domain ?? "none") \(underlying?.code ?? 0)]"
+        }
     }
 
     private func checkPlaybackRecovery() async {
@@ -786,11 +798,13 @@ final class LaneUITestAudioServer {
                 connection.send(content: Data(headers.utf8) + page, completion: .contentProcessed { _ in connection.cancel() })
                 return
             }
-            if text.contains("/hls/playlist.m3u8 ") || text.contains("/hls/segment") {
+            if text.contains("/hls/playlist.m3u8 ") || text.contains("/hls/media.m3u8 ") || text.contains("/hls/segment") {
                 let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:3.018667,\nsegment1.aac\n#EXTINF:3.018667,\nsegment2.aac\n#EXT-X-ENDLIST\n"
                 let isPlaylist = text.contains("/hls/playlist.m3u8 ")
-                let payload = isPlaylist ? Data(playlist.utf8) : LaneHLSTestFixture.audio
-                let type = isPlaylist ? "application/vnd.apple.mpegurl" : "audio/aac"
+                let isMedia = text.contains("/hls/media.m3u8 ")
+                let master = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=80000,CODECS=\"mp4a.40.2\"\nmedia.m3u8\n"
+                let payload = isPlaylist ? Data(master.utf8) : isMedia ? Data(playlist.utf8) : LaneHLSTestFixture.audio
+                let type = isPlaylist || isMedia ? "application/vnd.apple.mpegurl" : "audio/aac"
                 let header = "HTTP/1.1 200 OK\r\nContent-Type: \(type)\r\nContent-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
                 connection.send(content: Data(header.utf8) + (text.hasPrefix("HEAD ") ? Data() : payload), completion: .contentProcessed { _ in connection.cancel() })
                 return
