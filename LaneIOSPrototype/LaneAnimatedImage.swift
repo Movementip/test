@@ -7,7 +7,7 @@ import ImageIO
 struct LaneAnimatedImage: UIViewRepresentable {
     let data: Data
     var contentMode: ContentMode = .fill
-    func makeUIView(context: Context) -> LaneGIFImageView { LaneGIFImageView() }
+    func makeUIView(context: Context) -> LaneGIFImageView { LaneGIFImageView(frame: .zero) }
     func updateUIView(_ view: LaneGIFImageView, context: Context) {
         view.contentMode = contentMode == .fill ? .scaleAspectFill : .scaleAspectFit
         view.setGIF(data)

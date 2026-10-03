@@ -59,6 +59,7 @@ struct LaneIOSPrototypeApp: App {
             .modifier(LaneIncomingSharePresenter())
             .environmentObject(session)
             .onOpenURL { url in session.receiveShareURL(url) }
+            .onAppear { session.setClientEventsActive(scenePhase == .active) }
             .onChange(of: scenePhase) { phase in session.setClientEventsActive(phase == .active) }
             .onChange(of: session.token) { _ in session.setClientEventsActive(scenePhase == .active) }
         }

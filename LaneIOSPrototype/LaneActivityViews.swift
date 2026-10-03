@@ -61,7 +61,7 @@ struct LaneFriendActivityScreen: View {
         loading = true
         defer { loading = false }
         do { _ = try await session.fetchFriendActivity(); error = nil }
-        catch is CancellationError {} catch { error = error.localizedDescription }
+        catch is CancellationError {} catch { self.error = error.localizedDescription }
     }
 }
 
@@ -120,7 +120,7 @@ struct LanePremiumScreen: View {
                 Task {
                     defer { cancelling = false }
                     do { try await session.cancelSubscriptionConfirmed(); cancelled = true }
-                    catch { error = error.localizedDescription }
+                    catch { self.error = error.localizedDescription }
                 }
             }
         } message: { Text("Your current paid period remains active. No purchase will be made.") }
@@ -134,6 +134,6 @@ struct LanePremiumScreen: View {
         loading = true; error = nil
         defer { loading = false }
         do { pricing = try await session.fetchPricing() }
-        catch is CancellationError {} catch { error = error.localizedDescription }
+        catch is CancellationError {} catch { self.error = error.localizedDescription }
     }
 }

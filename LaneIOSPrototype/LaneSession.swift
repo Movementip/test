@@ -1413,8 +1413,12 @@ final class LaneSession: ObservableObject {
     }
 
     func uploadProfileImage(_ data: Data, target: String, isGIF: Bool) async throws -> String {
+        let requestToken = token
         await configureAPI()
-        return try await LaneAPI.shared.uploadProfileImage(token: token, data: data, target: target, isGIF: isGIF)
+        guard token == requestToken, !Task.isCancelled else { throw CancellationError() }
+        let url = try await LaneAPI.shared.uploadProfileImage(token: requestToken, data: data, target: target, isGIF: isGIF)
+        guard token == requestToken, !Task.isCancelled else { throw CancellationError() }
+        return url
     }
 
     func loadPrivacySettings() async throws -> LanePrivacySettings {
@@ -4777,7 +4781,7 @@ final class LaneSession: ObservableObject {
                     }
                 }
 
-                if playbackShouldPlay, pendingStartPosition == nil { localPlayer.play() }
+                if playbackShouldPlay, !audioInterrupted, pendingStartPosition == nil { localPlayer.play() }
             } catch {
                 guard self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
@@ -4943,7 +4947,7 @@ final class LaneSession: ObservableObject {
             }
         }
 
-        if playbackShouldPlay, pendingStartPosition == nil { localPlayer.play() }
+        if playbackShouldPlay, !audioInterrupted, pendingStartPosition == nil { localPlayer.play() }
     }
 
     private enum LaneMediaSignature {
