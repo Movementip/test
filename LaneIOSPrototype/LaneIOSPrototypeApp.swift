@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import AVFoundation
+import ImageIO
 #if DEBUG
 import Network
 #endif
@@ -8,6 +9,7 @@ import Network
 @main
 struct LaneIOSPrototypeApp: App {
     @StateObject private var session: LaneSession
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         let value = LaneSession()
@@ -57,6 +59,8 @@ struct LaneIOSPrototypeApp: App {
             .modifier(LaneIncomingSharePresenter())
             .environmentObject(session)
             .onOpenURL { url in session.receiveShareURL(url) }
+            .onChange(of: scenePhase) { phase in session.setClientEventsActive(phase == .active) }
+            .onChange(of: session.token) { _ in session.setClientEventsActive(scenePhase == .active) }
         }
     }
 }
@@ -105,6 +109,13 @@ private struct LaneUITestRoot: View {
                     NavigationLink("Your badges") { LaneBadgeSelectionScreen() }
                     NavigationLink("Memorial artist") { APKArtistDetailScreen(seed: LaneUITestFixtures.memorialArtist) }
                     Button("Check badge on fresh client") { Task { await checkFreshBadge() } }
+                }
+                if ProcessInfo.processInfo.arguments.contains("--lane-activity-fixture") {
+                    NavigationLink("Friend activity") { LaneFriendActivityScreen() }
+                    NavigationLink("Lane Premium") { LanePremiumScreen() }
+                }
+                if ProcessInfo.processInfo.arguments.contains("--lane-image-fixture") {
+                    Button("Run GIF checks") { Task { await checkGIF() } }
                 }
                 NavigationLink("Recommended artist") { APKArtistDetailScreen(seed: LaneUITestFixtures.artist) }
                 NavigationLink("Recommended album") { APKAlbumDetailScreen(seed: LaneUITestFixtures.album) }
@@ -443,6 +454,33 @@ private struct LaneUITestRoot: View {
         } catch { result = "Recovery checks failed: \(error.localizedDescription)" }
     }
 
+    private func checkGIF() async {
+        do {
+            let data = try Data(contentsOf: Bundle.main.url(forResource: "amen", withExtension: "gif")!)
+            guard let preview = LaneImageCropping.preview(data),
+                  let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 1 else { throw LaneAPIError.emptyResponse }
+            let draft = LaneImageCropDraft(image: preview, original: data, target: "avatar")
+            let cropped = try await LaneImageCropping.render(draft, viewport: CGSize(width: 300, height: 300), zoom: 1, offset: .zero)
+            guard cropped.starts(with: Data("GIF8".utf8)), let output = CGImageSourceCreateWithData(cropped as CFData, nil),
+                  CGImageSourceGetCount(output) == CGImageSourceGetCount(source),
+                  CGImageSourceCreateImageAtIndex(output, 0, nil)?.width == 800 else { throw LaneAPIError.decoding("GIF crop dropped frames or dimensions") }
+            let view = LaneGIFImageView(frame: CGRect(x: 30, y: 150, width: 160, height: 160))
+            guard let window = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).flatMap(\.windows).first(where: \.isKeyWindow) else { throw LaneAPIError.emptyResponse }
+            view.setGIF(cropped); window.addSubview(view)
+            defer { view.stopAnimation(); view.removeFromSuperview() }
+            try await Task.sleep(nanoseconds: 1_500_000_000)
+            guard view.displayedFrames > 1, view.animationIsRunning else { throw LaneAPIError.decoding("GIF never animated") }
+            view.removeFromSuperview()
+            let stopped = view.displayedFrames
+            try await Task.sleep(nanoseconds: 300_000_000)
+            guard !view.animationIsRunning, view.displayedFrames == stopped else { throw LaneAPIError.decoding("Hidden GIF kept its display link alive") }
+            window.addSubview(view)
+            try await Task.sleep(nanoseconds: 500_000_000)
+            guard view.displayedFrames > stopped else { throw LaneAPIError.decoding("Visible GIF did not resume") }
+            result = "GIF checks passed"
+        } catch { result = "GIF checks failed: \(error.localizedDescription)" }
+    }
+
     private func checkAudioLifecycle() async {
         func waitForAudio() async throws {
             for _ in 0..<120 {
@@ -755,6 +793,9 @@ private final class LaneUITestURLProtocol: URLProtocol {
     private static var profileName = "Lane fixture"
     private static var profileFailedOnce = false
     private static var effectFailedOnce = false
+    private static var pricingFailedOnce = false
+    private static var activityFailedOnce = false
+    private static var autoRenewalActive = true
     private static var followingFriend = false
     private static var equippedBadgeID: String?
     private static var badgeFailedOnce = false
@@ -832,7 +873,28 @@ private final class LaneUITestURLProtocol: URLProtocol {
             let isRaceClient = request.value(forHTTPHeaderField: "Authorization") == "Bearer ui-fixture-race"
             Self.lock.lock()
             defer { Self.lock.unlock() }
-            if path == "/panorama" {
+            if path == "/payment/pricing" {
+                if !Self.pricingFailedOnce { Self.pricingFailedOnce = true; statusCode = 503; data = Data(#"{"message":"Retry pricing"}"#.utf8) }
+                else { data = Data(#"{"countryCode":"RU","monthly":{"amount":199,"periodName":"1 month","premiumCurrency":"RUB"},"yearly":{"amount":1499,"periodName":"1 year","premiumCurrency":"RUB"},"lifetime":{"amount":5999,"periodName":"Forever","premiumCurrency":"RUB"}}"#.utf8) }
+            } else if path == "/payment/cancel-subscription" {
+                guard request.httpMethod == "POST" else { throw URLError(.badURL) }
+                Self.autoRenewalActive = false
+                data = Data(#"{"status":"cancelled"}"#.utf8)
+            } else if path == "/user/friends/presence" {
+                if !Self.activityFailedOnce { Self.activityFailedOnce = true; statusCode = 503; data = Data(#"{"message":"Retry activity"}"#.utf8) }
+                else { data = Data(#"[{"laneId":"friend","displayedName":"Friend profile","userName":"friend","isOnline":true,"isPaused":false,"trackId":"lane-1","trackTitle":"Fixture track 1","trackArtist":"Lane","positionMs":1200}]"#.utf8) }
+            } else if path == "/user/presence" {
+                let value = try JSONSerialization.jsonObject(with: readBody()) as? [String: Any]
+                guard request.httpMethod == "POST", let value, Set(value.keys) == ["trackId", "positionMs", "isPaused"],
+                      value["positionMs"] as? Int64 ?? -1 >= 0 else { throw URLError(.badURL) }
+                data = Data(#"{"ok":true}"#.utf8)
+            } else if path == "/user/upload/photo" {
+                let body = readBody()
+                guard request.httpMethod == "POST", body.contains(Data("name=\"file\"".utf8)),
+                      let start = body.range(of: Data([0xff, 0xd8])), let end = body.range(of: Data([0xff, 0xd9])),
+                      let image = UIImage(data: body.subdata(in: start.lowerBound..<end.upperBound)), image.size == CGSize(width: 800, height: 800) else { throw URLError(.badServerResponse) }
+                data = Data(#"{"url":"https://lane-ui.test/cropped-avatar.jpg"}"#.utf8)
+            } else if path == "/panorama" {
                 contentType = "image/png"
                 data = UIGraphicsImageRenderer(size: CGSize(width: 2400, height: 600)).image { context in
                     UIColor.systemOrange.setFill()
@@ -955,7 +1017,8 @@ private final class LaneUITestURLProtocol: URLProtocol {
                 }
                 let privacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(Self.privacy))
                 data = try JSONSerialization.data(withJSONObject: ["laneId": "fixture-user", "displayedName": Self.profileName, "userPlaylists": ["lane_likes"], "privacySettings": privacy,
-                                                                 "premiumExpiresIn": Int64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000)])
+                                                                 "premiumExpiresIn": Int64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000),
+                                                                 "isAutoRenewalActive": ProcessInfo.processInfo.arguments.contains("--lane-activity-fixture") && Self.autoRenewalActive])
             } else if path == "/user/edit" {
                 if !Self.profileFailedOnce { Self.profileFailedOnce = true; statusCode = 503 }
                 else {

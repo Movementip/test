@@ -3097,6 +3097,16 @@ private struct ProfileScreen: View {
 
                             Divider().padding(.leading, 58)
 
+                            NavigationLink { LanePremiumScreen() } label: {
+                                profileMenuRow(icon: "sparkles", title: "Lane Premium", subtitle: "Plans and subscription")
+                            }.buttonStyle(.plain)
+                            Divider().padding(.leading, 58)
+
+                            NavigationLink { LaneFriendActivityScreen() } label: {
+                                profileMenuRow(icon: "person.2.wave.2", title: "Friend activity", subtitle: "What your friends are listening to")
+                            }.buttonStyle(.plain)
+                            Divider().padding(.leading, 58)
+
                             NavigationLink {
                                 ImportTracksScreen()
                             } label: {
@@ -3507,6 +3517,7 @@ struct EditProfileSheet: View {
     @State private var headerURL = ""
     @State private var avatarSelection: PhotosPickerItem?
     @State private var headerSelection: PhotosPickerItem?
+    @State private var imageCropDraft: LaneImageCropDraft?
     @State private var saving = false
     @State private var uploading = false
     @State private var errorMessage: String?
@@ -3530,6 +3541,18 @@ struct EditProfileSheet: View {
                         }
                     }
                     if uploading { ProgressView("Uploading image…") }
+                    #if DEBUG
+                    if ProcessInfo.processInfo.arguments.contains("--lane-image-fixture") {
+                        Button("Crop fixture avatar") {
+                            let image = UIGraphicsImageRenderer(size: CGSize(width: 1000, height: 600)).image { value in
+                                UIColor.systemBlue.setFill(); value.fill(CGRect(x: 0, y: 0, width: 500, height: 600))
+                                UIColor.systemRed.setFill(); value.fill(CGRect(x: 500, y: 0, width: 500, height: 600))
+                            }
+                            imageCropDraft = LaneImageCropDraft(image: image, original: image.pngData()!, target: "avatar")
+                        }
+                        Text(avatarURL).accessibilityIdentifier("profile.uploadedAvatar")
+                    }
+                    #endif
                 }
                 .disabled(saving || uploading)
                 Section("Profile") {
@@ -3595,6 +3618,11 @@ struct EditProfileSheet: View {
             .onChange(of: headerSelection) { selection in Task { await upload(selection, target: "header") } }
         }
         .interactiveDismissDisabled(saving || uploading)
+        .fullScreenCover(item: $imageCropDraft) { draft in
+            LaneImageCropScreen(draft: draft) { data, gif in
+                Task { await uploadCroppedImage(data, target: draft.target, isGIF: gif) }
+            }
+        }
     }
 
     private func upload(_ selection: PhotosPickerItem?, target: String) async {
@@ -3604,19 +3632,18 @@ struct EditProfileSheet: View {
         defer { uploading = false }
         do {
             guard let original = try await selection.loadTransferable(type: Data.self) else { throw LaneAPIError.emptyResponse }
-            let isGIF = original.starts(with: Data("GIF8".utf8))
-            let data: Data
-            if isGIF { data = original }
-            else {
-                guard let image = UIImage(data: original) else { throw LaneAPIError.decoding("Could not open this image.") }
-                let maximum: CGFloat = target == "avatar" ? 800 : 1800
-                let scale = min(1, maximum / max(image.size.width, image.size.height))
-                let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-                let format = UIGraphicsImageRendererFormat(); format.scale = 1
-                let rendered = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
-                guard let jpeg = rendered.jpegData(compressionQuality: 0.82) else { throw LaneAPIError.emptyResponse }
-                data = jpeg
-            }
+            guard original.count <= 32 * 1024 * 1024 else { throw LaneAPIError.decoding("Choose an image smaller than 32 MB.") }
+            let image = await Task.detached(priority: .userInitiated) { LaneImageCropping.preview(original) }.value
+            guard let image else { throw LaneAPIError.decoding("Could not open this image.") }
+            imageCropDraft = LaneImageCropDraft(image: image, original: original, target: target)
+            if target == "avatar" { avatarSelection = nil } else { headerSelection = nil }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    private func uploadCroppedImage(_ data: Data, target: String, isGIF: Bool) async {
+        uploading = true; errorMessage = nil
+        defer { uploading = false }
+        do {
             let url = try await session.uploadProfileImage(data, target: target, isGIF: isGIF)
             if target == "avatar" { avatarURL = url } else { headerURL = url }
         } catch { errorMessage = error.localizedDescription }

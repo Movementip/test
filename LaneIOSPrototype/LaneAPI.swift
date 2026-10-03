@@ -1954,6 +1954,28 @@ actor LaneAPI {
         try await request(path: "/user/friends/presence", token: token)
     }
 
+    func friendActivity(token: String) async throws -> [LaneFriendPresence] {
+        try await decoded([LaneFriendPresence].self, path: "/user/friends/presence", token: token)
+    }
+
+    func updatePresence(token: String, trackID: String?, positionMs: Int64, isPaused: Bool) async throws {
+        let result = try await request(path: "/user/presence", method: "POST", token: token,
+            json: ["trackId": trackID as Any? ?? NSNull(), "positionMs": max(0, positionMs), "isPaused": isPaused])
+        try result.requireSuccess()
+    }
+
+    func serverEvents(token: String) async throws -> [LaneServerEvent] {
+        try await decoded([LaneServerEvent].self, path: "/events", token: token)
+    }
+
+    func pricing(token: String) async throws -> LanePricing {
+        try await decoded(LanePricing.self, path: "/payment/pricing", token: token)
+    }
+
+    func cancelSubscription(token: String) async throws -> LaneSubscriptionCancellation {
+        try await decoded(LaneSubscriptionCancellation.self, path: "/payment/cancel-subscription", method: "POST", token: token)
+    }
+
     // MARK: Comments
     func comments(
         token: String,

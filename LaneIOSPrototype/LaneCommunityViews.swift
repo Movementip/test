@@ -181,31 +181,11 @@ struct LaneBadgeSelectionScreen: View {
 }
 
 // The same original animation used by Android's memorial screen, not an SF Symbol.
-private struct LaneMemorialCross: UIViewRepresentable {
-    func makeUIView(context: Context) -> UIImageView {
-        let view = UIImageView()
-        view.contentMode = .scaleAspectFit
-        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        if let url = Bundle.main.url(forResource: "amen", withExtension: "gif"),
-           let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
-            var frames: [UIImage] = []
-            var duration: Double = 0
-            for index in 0..<min(120, CGImageSourceGetCount(source)) {
-                guard let frame = CGImageSourceCreateThumbnailAtIndex(source, index, [
-                    kCGImageSourceCreateThumbnailFromImageAlways: true,
-                    kCGImageSourceThumbnailMaxPixelSize: 380
-                ] as CFDictionary) else { continue }
-                frames.append(UIImage(cgImage: frame))
-                let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]
-                let gif = props?[kCGImagePropertyGIFDictionary] as? [CFString: Any]
-                duration += max(0.02, gif?[kCGImagePropertyGIFUnclampedDelayTime] as? Double ?? gif?[kCGImagePropertyGIFDelayTime] as? Double ?? 0.1)
-            }
-            view.image = UIImage.animatedImage(with: frames, duration: duration)
-        }
-        return view
+private struct LaneMemorialCross: View {
+    private static let data = Bundle.main.url(forResource: "amen", withExtension: "gif").flatMap { try? Data(contentsOf: $0) }
+    var body: some View {
+        if let data = Self.data { LaneAnimatedImage(data: data, contentMode: .fit) }
     }
-    func updateUIView(_ uiView: UIImageView, context: Context) {}
 }
 
 struct LaneMemorialScreen: View {
@@ -224,6 +204,7 @@ struct LaneMemorialScreen: View {
     @State private var error: String?
     @State private var generation = UUID()
     @State private var accountIdentity: String?
+    @State private var memoryPage = 0
     @FocusState private var messageFocused: Bool
 
     var body: some View {
@@ -275,7 +256,33 @@ struct LaneMemorialScreen: View {
                     }
                     if !composing || ownCandle != nil {
                         Text("Candles from other users").font(.headline)
-                        ForEach(candles.filter { $0.id != ownCandle?.id }) { value in candle(value) }
+                        let memories = candles.filter { $0.id != ownCandle?.id }
+                        if !memories.isEmpty {
+                            VStack(spacing: 8) {
+                                TabView(selection: $memoryPage) {
+                                    ForEach(Array(memories.enumerated()), id: \.element.id) { index, value in
+                                        ScrollView { candle(value).padding(.vertical, 14) }
+                                            .frame(width: max(0, geometry.size.width - 36), height: 350)
+                                            .rotationEffect(.degrees(-90))
+                                            .frame(width: 350, height: max(0, geometry.size.width - 36))
+                                            .tag(index)
+                                    }
+                                }
+                                .tabViewStyle(.page(indexDisplayMode: .never))
+                                .frame(width: 350, height: max(0, geometry.size.width - 36))
+                                .rotationEffect(.degrees(90))
+                                .frame(width: max(0, geometry.size.width - 36), height: 350)
+                                .accessibilityIdentifier("memorial.pager")
+                                HStack {
+                                    Button("Previous memory") { withAnimation { memoryPage = max(0, memoryPage - 1) } }.disabled(memoryPage == 0)
+                                    Spacer()
+                                    Text("\(memoryPage + 1) / \(memories.count)").font(.caption).accessibilityIdentifier("memorial.page")
+                                    Spacer()
+                                    Button("Next memory") { withAnimation { memoryPage = min(memories.count - 1, memoryPage + 1) } }.disabled(memoryPage >= memories.count - 1)
+                                }.font(.caption)
+                                Text("Swipe up or down to browse memories").font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
                         if hasMore {
                             Button("Load more candles") { Task { await loadMore() } }
                                 .disabled(loading || saving).accessibilityIdentifier("memorial.more")
@@ -301,6 +308,8 @@ struct LaneMemorialScreen: View {
         .toolbar { ToolbarItemGroup(placement: .keyboard) {
             Spacer(); Button("Done") { messageFocused = false }
         } }
+        .onChange(of: candles.count) { _ in memoryPage = min(memoryPage, max(0, candles.filter { $0.id != ownCandle?.id }.count - 1)) }
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: ownCandle?.id)
         .task(id: session.token) {
             if accountIdentity != session.token {
                 accountIdentity = session.token

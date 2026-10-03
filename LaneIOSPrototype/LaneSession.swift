@@ -591,6 +591,10 @@ final class LaneSession: ObservableObject {
     private var remoteCommandTargets: [(MPRemoteCommand, Any)] = []
     private var audioInterrupted = false
     private var interruptionResumeRequested = false
+    @Published private(set) var friendActivity: [LaneFriendPresence] = []
+    private var presenceSyncTask: Task<Void, Never>?
+    private var clientEventsTask: Task<Void, Never>?
+    private var clientEventsGeneration = UUID()
     #if DEBUG
     var debugHasPlaybackBackgroundTask: Bool { playbackBackgroundLease?.isActive == true }
     func debugExpirePlaybackLease() {
@@ -747,6 +751,9 @@ final class LaneSession: ObservableObject {
 
     func clearAccount() {
         stop()
+        presenceSyncTask?.cancel()
+        setClientEventsActive(false)
+        friendActivity = []
         waveTask?.cancel()
         waveRequestID = UUID()
         wavePlaylist = nil
@@ -3659,6 +3666,91 @@ final class LaneSession: ObservableObject {
         _ = LaneAudioDiagnostics.shared
     }
 
+    func fetchFriendActivity() async throws -> [LaneFriendPresence] {
+        guard !isGuest else { return [] }
+        let identity = token
+        await configureAPI()
+        let result = try await LaneAPI.shared.friendActivity(token: identity)
+        guard token == identity, !Task.isCancelled else { throw CancellationError() }
+        friendActivity = result.filter { !$0.laneId.isEmpty }
+        return friendActivity
+    }
+
+    func fetchPricing() async throws -> LanePricing {
+        let identity = token
+        guard !identity.isEmpty else { throw LaneAPIError.decoding("Sign in to manage Lane Premium.") }
+        await configureAPI()
+        let result = try await LaneAPI.shared.pricing(token: identity)
+        guard token == identity, !Task.isCancelled else { throw CancellationError() }
+        return result
+    }
+
+    func cancelSubscriptionConfirmed() async throws {
+        let identity = token
+        guard !identity.isEmpty else { throw LaneAPIError.decoding("Sign in to manage Lane Premium.") }
+        await configureAPI()
+        _ = try await LaneAPI.shared.cancelSubscription(token: identity)
+        let value = try await LaneAPI.shared.account(token: identity, deviceLanguage: Locale.current.language.languageCode?.identifier ?? "en")
+        guard token == identity, !Task.isCancelled else { throw CancellationError() }
+        account = value
+        guard value.isAutoRenewalActive == false else { throw LaneAPIError.decoding("Lane accepted the request but has not confirmed cancellation yet. Refresh the subscription status.") }
+    }
+
+    private func schedulePresenceSync() {
+        presenceSyncTask?.cancel()
+        guard !isGuest, currentTrack?.trackID != nil else { return }
+        let identity = token
+        presenceSyncTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000)
+                guard let self, self.token == identity else { return }
+                await self.configureAPI()
+                try Task.checkCancellation()
+                guard self.token == identity else { return }
+                try await LaneAPI.shared.updatePresence(token: identity, trackID: self.currentTrack?.trackID,
+                    positionMs: Int64(max(0, self.playbackPosition) * 1000), isPaused: !self.playbackShouldPlay || self.audioInterrupted)
+            } catch { /* Social status must not fail or delay audio playback. */ }
+        }
+    }
+
+    func setClientEventsActive(_ active: Bool) {
+        clientEventsTask?.cancel(); clientEventsTask = nil
+        clientEventsGeneration = UUID()
+        guard active, !isGuest else { return }
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--lane-ui-test") { return }
+        #endif
+        let identity = token, operation = clientEventsGeneration
+        clientEventsTask = Task { [weak self] in
+            var backoff: UInt64 = 5
+            while !Task.isCancelled {
+                guard let self, self.token == identity, self.clientEventsGeneration == operation,
+                      UIApplication.shared.applicationState != .background else { return }
+                do {
+                    await self.configureAPI()
+                    let events = try await LaneAPI.shared.serverEvents(token: identity)
+                    guard self.token == identity, self.clientEventsGeneration == operation, !Task.isCancelled else { return }
+                    self.applyServerEvents(events)
+                    if events.contains(where: \.refreshesFriends) { _ = try? await self.fetchFriendActivity() }
+                    backoff = 5
+                } catch is CancellationError { return }
+                catch { backoff = min(60, backoff * 2) }
+                do { try await Task.sleep(nanoseconds: backoff * 1_000_000_000) } catch { return }
+            }
+        }
+    }
+
+    func applyServerEvents(_ events: [LaneServerEvent]) {
+        for event in events {
+            if event.type == "NEW_NOTIFICATION", let notification = event.notification,
+               !notifications.contains(where: { $0.id == notification.id }) {
+                notifications.insert(notification, at: 0)
+                if notification.read != true { unreadNotificationCount += 1 }
+            }
+        }
+        if events.contains(where: \.refreshesAccount) { refreshAccount() }
+    }
+
     private func activateAudioSession() throws {
         let audio = AVAudioSession.sharedInstance()
         try audio.setCategory(.playback, mode: .default, options: [])
@@ -5106,6 +5198,7 @@ final class LaneSession: ObservableObject {
         info[MPMediaItemPropertyPlaybackDuration] = playbackDuration
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = playbackPosition
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        schedulePresenceSync()
     }
 
     private func configureRemoteCommands() {

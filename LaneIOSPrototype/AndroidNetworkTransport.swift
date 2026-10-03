@@ -479,16 +479,25 @@ func laneRoutedMediaURL(_ rawValue: String?) -> URL? {
 private final class LaneImageMemoryCache {
     static let shared = LaneImageMemoryCache()
     private let images = NSCache<NSString, UIImage>()
+    private let gifs = NSCache<NSString, NSData>()
 
     private init() {
         images.totalCostLimit = 64 * 1024 * 1024
+        gifs.totalCostLimit = 16 * 1024 * 1024
         NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: nil) { [weak self] _ in
             self?.images.removeAllObjects()
+            self?.gifs.removeAllObjects()
         }
     }
 
     func image(for key: String) -> UIImage? {
         images.object(forKey: key as NSString)
+    }
+    func gif(for key: String) -> Data? { gifs.object(forKey: key as NSString).map { $0 as Data } }
+    func storeGIF(_ data: Data, for key: String) {
+        if data.starts(with: Data("GIF8".utf8)), data.count <= 8 * 1024 * 1024 {
+            gifs.setObject(data as NSData, forKey: key as NSString, cost: data.count)
+        }
     }
 
     func store(_ image: UIImage, for key: String) {
@@ -573,6 +582,7 @@ private actor LaneImageDiskCache {
 @MainActor
 final class LaneRemoteImageLoader: ObservableObject {
     @Published private(set) var image: UIImage?
+    @Published private(set) var gifData: Data?
     private(set) var loadedValue: String?
 
     func load(_ rawValue: String?) async {
@@ -580,16 +590,23 @@ final class LaneRemoteImageLoader: ObservableObject {
         let key = url.absoluteString
         if let cached = LaneImageMemoryCache.shared.image(for: key) {
             image = cached
+            gifData = LaneImageMemoryCache.shared.gif(for: key)
+            if gifData == nil, let data = await LaneImageDiskCache.shared.data(for: key), !Task.isCancelled {
+                LaneImageMemoryCache.shared.storeGIF(data, for: key)
+                gifData = LaneImageMemoryCache.shared.gif(for: key)
+            }
             loadedValue = rawValue
             return
         }
         guard rawValue != loadedValue else { return }
-        if image != nil { image = nil }
+        if image != nil { image = nil }; gifData = nil
 
         if let diskData = await LaneImageDiskCache.shared.data(for: key),
            !Task.isCancelled,
            let decoded = await laneDecodeArtwork(diskData), !Task.isCancelled {
             LaneImageMemoryCache.shared.store(decoded, for: key)
+            LaneImageMemoryCache.shared.storeGIF(diskData, for: key)
+            gifData = LaneImageMemoryCache.shared.gif(for: key)
             image = decoded
             loadedValue = rawValue
             return
@@ -600,6 +617,8 @@ final class LaneRemoteImageLoader: ObservableObject {
               !Task.isCancelled,
               let decoded = await laneDecodeArtwork(data), !Task.isCancelled else { return }
         LaneImageMemoryCache.shared.store(decoded, for: key)
+        LaneImageMemoryCache.shared.storeGIF(data, for: key)
+        gifData = LaneImageMemoryCache.shared.gif(for: key)
         image = decoded
         loadedValue = rawValue
         await LaneImageDiskCache.shared.store(data, for: key)
@@ -630,9 +649,12 @@ struct LaneResilientImage<Placeholder: View>: View {
             if let image = url.flatMap({ laneRoutedMediaURL($0)?.absoluteString })
                 .flatMap({ LaneImageMemoryCache.shared.image(for: $0) })
                 ?? (loader.loadedValue == url ? loader.image : nil) {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: contentMode)
+                if loader.loadedValue == url, let data = loader.gifData {
+                    LaneAnimatedImage(data: data, contentMode: contentMode)
+                        .aspectRatio(image.size.width / max(1, image.size.height), contentMode: contentMode)
+                } else {
+                    Image(uiImage: image).resizable().aspectRatio(contentMode: contentMode)
+                }
             } else {
                 placeholder()
             }

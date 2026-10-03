@@ -221,6 +221,21 @@ final class LaneMockURLProtocol: URLProtocol {
         }
 
         switch path {
+        case "/user/presence":
+            try require(request.httpMethod == "POST", "Presence must be POST")
+            let value = try object(body)
+            try require(Set(value.keys) == ["trackId", "positionMs", "isPaused"], "APK presence fields changed")
+            try require(value["positionMs"] as? Int == 1200 && value["isPaused"] as? Bool == false && value["trackId"] as? String == "track-1", "Presence payload mismatch")
+            return (200, Data(#"{"ok":true}"#.utf8))
+        case "/user/friends/presence":
+            return (200, Data(#"[{"laneId":"friend","userName":"friend","displayedName":"Friend","avatarUrl":null,"trackId":"track-1","trackTitle":"One","isOnline":true,"isPaused":false}]"#.utf8))
+        case "/events":
+            return (200, Data(#"[{"type":"FRIEND_ACTIVITY","laneId":"friend","trackId":"track-1","positionMs":1200,"isPaused":false},{"type":"FRIEND_ONLINE_STATUS","laneId":"friend","isOnline":true},{"type":"PREMIUM_ACTIVATED","expirationDate":1900000000000,"isPremium":true},{"type":"PROXY_REQUEST","url":"https://untrusted.invalid/"}]"#.utf8))
+        case "/payment/pricing":
+            return (200, Data(#"{"countryCode":"RU","monthly":{"amount":199,"periodName":"1 month","premiumCurrency":"RUB"},"yearly":{"amount":1499,"periodName":"1 year","premiumCurrency":"RUB"},"lifetime":{"amount":5999,"periodName":"Forever","premiumCurrency":"RUB"}}"#.utf8))
+        case "/payment/cancel-subscription":
+            try require(request.httpMethod == "POST", "Cancellation must be POST")
+            return (200, Data(#"{"status":"cancelled"}"#.utf8))
         case "/v1/share/get":
             try require(request.httpMethod == "GET" && request.value(forHTTPHeaderField: "Authorization") == nil,
                         "Public share resolution must never send the account bearer token")
@@ -939,6 +954,18 @@ struct LaneContractTestRunner {
         let retried = try await api.request(path: "/user/tracks", method: "POST", query: [.init(name: "transportProbe", value: "true")], json: ["trackIds": ["track-1"]], candidateBases: [URL(string: "https://lane.test")!])
         precondition(retried.status == 200)
         precondition(LaneMockURLProtocol.verifiedDirectRetry())
+
+        try await api.updatePresence(token: "test-token", trackID: "track-1", positionMs: 1200, isPaused: false)
+        let activity = try await api.friendActivity(token: "test-token")
+        precondition(activity.count == 1 && activity[0].trackId == "track-1" && activity[0].isOnline == true)
+        let events = try await api.serverEvents(token: "test-token")
+        precondition(events.filter(\.refreshesFriends).count == 2 && events.filter(\.refreshesAccount).count == 1)
+        precondition(!events.last!.refreshesFriends && !events.last!.refreshesAccount)
+        let prices = try await api.pricing(token: "test-token")
+        precondition(prices.monthly.amount == 199 && prices.lifetime.premiumCurrency == "RUB")
+        let cancellation = try await api.cancelSubscription(token: "test-token")
+        precondition(cancellation.status == "cancelled")
+        print("0.93 social/payment contracts passed: exact presence body, friend DTO defaults, known/unknown inert events, Lane pricing and mock-only cancellation.")
 
         let expectedPaths = [
             "/create-playlist",

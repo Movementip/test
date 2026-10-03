@@ -710,6 +710,55 @@ struct LaneDownloadedTrack: Codable {
 
 struct LaneImageUploadResponse: Decodable { let url: String }
 
+struct LaneFriendPresence: Decodable, Identifiable {
+    let laneId: String
+    let userName: String?
+    let displayedName: String?
+    let avatarUrl: String?
+    let trackId: String?
+    let trackTitle: String?
+    let trackArtist: String?
+    let coverUrl: String?
+    let positionMs: Int64?
+    let isPaused: Bool?
+    let isOnline: Bool?
+    let lastEventAt: Int64?
+    var id: String { laneId }
+}
+
+struct LanePricePlan: Decodable {
+    let amount: Double
+    let periodName: String
+    let premiumCurrency: String
+    var displayPrice: String {
+        let known = ["RUB", "USD", "EUR", "BYN", "KZT", "UAH"]
+        return known.contains(premiumCurrency)
+            ? amount.formatted(.currency(code: premiumCurrency))
+            : "\(amount.formatted()) \(premiumCurrency)"
+    }
+}
+struct LanePricing: Decodable {
+    let countryCode: String
+    let monthly: LanePricePlan
+    let lifetime: LanePricePlan
+    let yearly: LanePricePlan
+}
+struct LaneSubscriptionCancellation: Decodable { let status: String }
+
+/// Exact APK JSON discriminator. Unknown events are inert, in particular a
+/// server event never becomes an instruction to fetch arbitrary proxy URLs.
+struct LaneServerEvent: Decodable {
+    let type: String
+    let laneId: String?
+    let trackId: String?
+    let isPaused: Bool?
+    let positionMs: Int64?
+    let isOnline: Bool?
+    let notification: LaneNotification?
+    var refreshesFriends: Bool { ["FRIEND_ACTIVITY", "FRIEND_ONLINE_STATUS"].contains(type) }
+    var refreshesAccount: Bool { ["NEW_BADGE", "PREMIUM_ACTIVATED"].contains(type) }
+}
+
 enum LaneAudioHTTPRange {
     static let chunkSize: Int64 = 65_536
     static func parse(_ value: String) -> (start: Int64, end: Int64, total: Int64)? {

@@ -91,6 +91,8 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["First memory"].waitForExistence(timeout: 10))
         let more = app.buttons["memorial.more"]
         scrollTo(more); more.tap()
+        let nextMemory = app.buttons["Next memory"]
+        scrollTo(nextMemory); nextMemory.tap()
         XCTAssertTrue(app.staticTexts["Second memory"].waitForExistence(timeout: 10))
         XCTAssertFalse(more.exists, "No page 3 after the final page")
         screenshot("iPhone13-memorial-pagination")
@@ -454,6 +456,58 @@ final class LaneNavigationTests: XCTestCase {
         app.buttons["Run audio lifecycle checks"].tap()
         XCTAssertTrue(app.staticTexts["Audio lifecycle checks passed"].waitForExistence(timeout: 50), app.staticTexts["session.result"].label)
         screenshot("iPhone13-audio-interruptions-reset")
+    }
+
+    func testFriendActivityRetryProfileAndPlayback() {
+        app.terminate(); app.launchArguments = ["--lane-ui-test", "--lane-activity-fixture"]; app.launch()
+        app.buttons["Friend activity"].tap()
+        XCTAssertTrue(app.staticTexts["activity.error"].waitForExistence(timeout: 10))
+        app.buttons["activity.retry"].tap()
+        let profile = app.buttons["activity.profile.friend"]
+        XCTAssertTrue(profile.waitForExistence(timeout: 10))
+        profile.tap()
+        XCTAssertTrue(app.staticTexts["user.name"].waitForExistence(timeout: 10))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(profile.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Listening now"].exists)
+        app.buttons["activity.track.friend"].tap()
+        screenshot("iPhone13-friend-activity")
+    }
+
+    func testPremiumPricingRetryAndConfirmedCancellation() {
+        app.terminate(); app.launchArguments = ["--lane-ui-test", "--lane-activity-fixture"]; app.launch()
+        app.buttons["Lane Premium"].tap()
+        XCTAssertTrue(app.staticTexts["premium.error"].waitForExistence(timeout: 10))
+        app.buttons["premium.retry"].tap()
+        XCTAssertTrue(app.staticTexts["1 month"].waitForExistence(timeout: 10))
+        let cancel = app.buttons["premium.cancel"]
+        scrollTo(cancel); cancel.tap()
+        XCTAssertTrue(app.buttons["Cancel"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(cancel.exists, "Dismissing confirmation must not cancel the subscription")
+        cancel.tap()
+        app.buttons["Cancel auto-renewal"].lastMatch.tap()
+        XCTAssertTrue(app.staticTexts["premium.cancelled"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["premium.renewal"].label, "Auto-renewal is off")
+        XCTAssertFalse(cancel.exists)
+        screenshot("iPhone13-premium-server-confirmed-cancellation")
+    }
+
+    func testImageCropCancelAndConfirmedJPEGUploadAndAnimatedGIF() {
+        app.terminate(); app.launchArguments = ["--lane-ui-test", "--lane-image-fixture"]; app.launch()
+        app.buttons["Run GIF checks"].tap()
+        XCTAssertTrue(app.staticTexts["GIF checks passed"].waitForExistence(timeout: 40), app.staticTexts["session.result"].label)
+        app.buttons["Edit profile"].tap()
+        app.buttons["Crop fixture avatar"].tap()
+        XCTAssertTrue(app.buttons["crop.cancel"].waitForExistence(timeout: 5))
+        app.buttons["crop.cancel"].tap()
+        XCTAssertFalse(app.staticTexts["https://lane-ui.test/cropped-avatar.jpg"].exists)
+        app.buttons["Crop fixture avatar"].tap()
+        XCTAssertTrue(app.buttons["crop.save"].waitForExistence(timeout: 5))
+        screenshot("iPhone13-image-cropper")
+        app.buttons["crop.save"].tap()
+        XCTAssertTrue(app.staticTexts["https://lane-ui.test/cropped-avatar.jpg"].waitForExistence(timeout: 10))
+        screenshot("iPhone13-cropped-image-uploaded")
     }
 
     func testCommentAndReplyAuthorsOpenProfilesAndReturn() {
