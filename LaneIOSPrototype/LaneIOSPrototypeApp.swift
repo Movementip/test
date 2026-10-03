@@ -8,6 +8,7 @@ import Network
 
 @main
 struct LaneIOSPrototypeApp: App {
+    @UIApplicationDelegateAdaptor(LaneApplicationDelegate.self) private var appDelegate
     @StateObject private var session: LaneSession
     @Environment(\.scenePhase) private var scenePhase
 
@@ -128,7 +129,14 @@ private struct LaneUITestRoot: View {
                 Button("Run playback checks") { Task { await checkPlayback() } }
                 Button("Run range transport checks") { Task { await checkPlayback(direct: true) } }
                 Button("Run effects checks") { Task { await checkEffects() } }
+                if ProcessInfo.processInfo.arguments.contains("--lane-equalizer-fixture") {
+                    NavigationLink("Equalizer") { LaneEqualizerScreen() }
+                    Button("Run equalizer checks") { Task { await checkEqualizer() } }
+                }
                 Button("Run recovery checks") { Task { await checkPlaybackRecovery() } }
+                if ProcessInfo.processInfo.arguments.contains("--lane-hls-fixture") {
+                    Button("Run adaptive offline checks") { Task { await checkHLSOffline() } }
+                }
                 if ProcessInfo.processInfo.arguments.contains("--lane-background-fixture") {
                     Button("Run background checks") { Task { await checkBackgroundPlayback() } }
                     Button("Run audio lifecycle checks") { Task { await checkAudioLifecycle() } }
@@ -380,6 +388,63 @@ private struct LaneUITestRoot: View {
             session.stop()
             result = "Effects checks passed"
         } catch { result = "Effects checks failed: \(error.localizedDescription)" }
+    }
+
+    private func checkEqualizer() async {
+        defer { session.stop(); session.resetEqualizer(); session.setEqualizer(enabled: false) }
+        do {
+            try session.removeDownload(LaneUITestFixtures.track)
+            session.setEqualizer(enabled: true); session.setEqualizer(band: 3, value: 0.8)
+            session.requestStream(for: LaneUITestFixtures.track)
+            for _ in 0..<200 {
+                if session.isPlaying, session.playbackPosition > 0.2, session.debugEqualizerFrames > 0 { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard session.isPlaying, session.debugEqualizerFrames > 0, session.playerError.isEmpty else {
+                throw LaneAPIError.decoding("Equalizer never received real AVPlayer PCM: \(session.playerError)")
+            }
+            let fresh = LaneSession()
+            guard fresh.equalizerEnabled, abs(fresh.equalizerValues[3] - 0.8) < 0.001 else {
+                throw LaneAPIError.decoding("Equalizer preferences were not restored")
+            }
+            session.resetEqualizer(); session.setEqualizer(enabled: false)
+            let position = session.playbackPosition
+            try await Task.sleep(nanoseconds: 500_000_000)
+            guard session.isPlaying, session.playbackPosition > position, session.equalizerValues.allSatisfy({ $0 == 0.5 }) else {
+                throw LaneAPIError.decoding("Reset or bypass interrupted playback")
+            }
+            result = "Equalizer checks passed"
+        } catch { result = "Equalizer checks failed: \(error.localizedDescription)" }
+    }
+
+    private func checkHLSOffline() async {
+        let track = TrackCandidate(id: "hls-fixture", title: "Offline adaptive fixture", subtitle: "Generated tone", trackID: "hls-fixture")
+        do {
+            try session.removeDownload(track)
+            try await session.debugDownloadTrack(track)
+            guard let url = session.downloadedFileURL(for: track), url.pathExtension == "movpkg" else {
+                throw LaneAPIError.decoding("Adaptive audio was not saved as an offline package")
+            }
+            let fresh = LaneSession()
+            guard fresh.isDownloaded(track), fresh.downloadedTracks.contains(where: { $0.trackID == track.trackID }) else {
+                throw LaneAPIError.decoding("Adaptive download was not restored on a fresh client")
+            }
+            LaneUITestAudioServer.shared.stop()
+            try await Task.sleep(nanoseconds: 300_000_000)
+            fresh.requestStream(for: track)
+            for _ in 0..<150 {
+                if fresh.isPlaying, fresh.playbackPosition > 0.2 { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            let audible = fresh.isPlaying && fresh.playbackPosition > 0.2
+            fresh.stop()
+            guard audible, LaneUITestURLProtocol.streamCount(for: "hls-fixture") == 0 else {
+                throw LaneAPIError.decoding("Adaptive offline playback contacted the stopped server or produced no audio: \(fresh.playerError)")
+            }
+            try fresh.removeDownload(track)
+            guard fresh.downloadedFileURL(for: track) == nil else { throw LaneAPIError.decoding("Adaptive package deletion failed") }
+            result = "Adaptive offline checks passed"
+        } catch { result = "Adaptive offline checks failed: \(error.localizedDescription)" }
     }
 
     private func checkPlaybackRecovery() async {
@@ -711,6 +776,15 @@ final class LaneUITestAudioServer {
                 let page = Data(LaneYandexFixturePage.html.utf8)
                 let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(page.count)\r\nConnection: close\r\n\r\n"
                 connection.send(content: Data(headers.utf8) + page, completion: .contentProcessed { _ in connection.cancel() })
+                return
+            }
+            if text.contains("/hls/playlist.m3u8 ") || text.contains("/hls/segment") {
+                let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:3.018667,\nsegment1.aac\n#EXTINF:3.018667,\nsegment2.aac\n#EXT-X-ENDLIST\n"
+                let isPlaylist = text.contains("/hls/playlist.m3u8 ")
+                let payload = isPlaylist ? Data(playlist.utf8) : LaneHLSTestFixture.audio
+                let type = isPlaylist ? "application/vnd.apple.mpegurl" : "audio/aac"
+                let header = "HTTP/1.1 200 OK\r\nContent-Type: \(type)\r\nContent-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
+                connection.send(content: Data(header.utf8) + (text.hasPrefix("HEAD ") ? Data() : payload), completion: .contentProcessed { _ in connection.cancel() })
                 return
             }
             let payload = text.contains("/short.wav ") ? self.shortAudio : text.contains("/long.wav ") ? self.longAudio : self.audio
@@ -1123,7 +1197,7 @@ private final class LaneUITestURLProtocol: URLProtocol {
                     data = Data(#"{"message":"Transient stream failure"}"#.utf8)
                 } else {
                     guard let url = LaneUITestAudioServer.shared.url else { throw URLError(.cannotConnectToHost) }
-                    let selectedURL = id == "background-first" ? url.replacingOccurrences(of: "/audio.wav", with: "/short.wav") : id == "background-next" ? url.replacingOccurrences(of: "/audio.wav", with: "/long.wav") : url
+                    let selectedURL = id == "hls-fixture" ? url.replacingOccurrences(of: "/audio.wav", with: "/hls/playlist.m3u8") : id == "background-first" ? url.replacingOccurrences(of: "/audio.wav", with: "/short.wav") : id == "background-next" ? url.replacingOccurrences(of: "/audio.wav", with: "/long.wav") : url
                     if id.hasPrefix("background-") { delayResponse = true; responseDelay = 4 }
                     data = try JSONSerialization.data(withJSONObject: ["url": selectedURL, "trackId": id, "ttl": 90])
                 }

@@ -8,6 +8,7 @@ final class LaneNavigationTests: XCTestCase {
         app = XCUIApplication()
         app.launchArguments = ["--lane-ui-test"]
         app.launch()
+        XCTAssertTrue(app.buttons["Recommended album"].waitForExistence(timeout: 20))
     }
 
     private func screenshot(_ name: String) {
@@ -165,6 +166,23 @@ final class LaneNavigationTests: XCTestCase {
         start.press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)))
         screenshot("iPhone13-native-swipe-back")
         XCTAssertTrue(app.buttons["Recommended artist"].waitForExistence(timeout: 5), app.staticTexts["gesture.report"].label)
+    }
+
+    func testEqualizerProcessesRealAudioAndRestoresNeutralWithoutStopping() {
+        app.terminate(); app.launchArguments = ["--lane-ui-test", "--lane-equalizer-fixture"]; app.launch()
+        app.buttons["Run equalizer checks"].tap()
+        XCTAssertTrue(app.staticTexts["Equalizer checks passed"].waitForExistence(timeout: 30), app.staticTexts["session.result"].label)
+        app.buttons["Equalizer"].tap()
+        XCTAssertTrue(app.switches["equalizer.enabled"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.sliders["equalizer.band.0"].exists)
+        screenshot("iPhone13-six-band-equalizer")
+    }
+
+    func testAdaptiveDownloadIsRestoredAndPlaysWithHTTPServerStopped() {
+        app.terminate(); app.launchArguments = ["--lane-ui-test", "--lane-hls-fixture"]; app.launch()
+        app.buttons["Run adaptive offline checks"].tap()
+        XCTAssertTrue(app.staticTexts["Adaptive offline checks passed"].waitForExistence(timeout: 60), app.staticTexts["session.result"].label)
+        screenshot("iPhone13-adaptive-offline-server-stopped")
     }
 
     func testPlayerArtistCanCloseBackToPlayer() {

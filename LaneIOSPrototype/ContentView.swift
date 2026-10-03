@@ -3097,6 +3097,11 @@ private struct ProfileScreen: View {
 
                             Divider().padding(.leading, 58)
 
+                            NavigationLink { LaneEqualizerScreen() } label: {
+                                profileMenuRow(icon: "slider.vertical.3", title: "Equalizer", subtitle: "Six audio bands")
+                            }.buttonStyle(.plain)
+                            Divider().padding(.leading, 58)
+
                             NavigationLink { LanePremiumScreen() } label: {
                                 profileMenuRow(icon: "sparkles", title: "Lane Premium", subtitle: "Plans and subscription")
                             }.buttonStyle(.plain)

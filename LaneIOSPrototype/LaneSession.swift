@@ -559,8 +559,60 @@ final class LaneSession: ObservableObject {
     @Published var lyricsError = ""
     @Published var shuffleEnabled = false
     @Published var repeatMode = 0 // 0 = off, 1 = all, 2 = one
+    @Published private(set) var equalizerEnabled = UserDefaults.standard.bool(forKey: "lane.equalizer.enabled")
+    @Published private(set) var equalizerValues: [Double] = {
+        let values = UserDefaults.standard.array(forKey: "lane.equalizer.values") as? [Double]
+        return values?.count == 6 ? values!.map { min(1, max(0, $0.isFinite ? $0 : 0.5)) } : Array(repeating: 0.5, count: 6)
+    }()
+    @Published private(set) var equalizerStatus = "Equalizer is off"
+    private var equalizerProcessor: LaneEqualizerProcessor?
+    private var equalizerTask: Task<Void, Never>?
+
+    func setEqualizer(enabled: Bool) {
+        equalizerEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "lane.equalizer.enabled")
+        equalizerProcessor?.configure(values: equalizerValues, enabled: enabled)
+        if enabled, equalizerProcessor == nil, let item = player?.currentItem { attachEqualizer(to: item) }
+        refreshEqualizerStatus()
+    }
+    func setEqualizer(band: Int, value: Double) {
+        guard equalizerValues.indices.contains(band) else { return }
+        equalizerValues[band] = min(1, max(0, value.isFinite ? value : 0.5))
+        UserDefaults.standard.set(equalizerValues, forKey: "lane.equalizer.values")
+        equalizerProcessor?.configure(values: equalizerValues, enabled: equalizerEnabled)
+    }
+    func resetEqualizer() {
+        equalizerValues = Array(repeating: 0.5, count: 6)
+        UserDefaults.standard.set(equalizerValues, forKey: "lane.equalizer.values")
+        equalizerProcessor?.configure(values: equalizerValues, enabled: equalizerEnabled)
+    }
+    func refreshEqualizerStatus() {
+        if !equalizerEnabled { equalizerStatus = "Equalizer is off" }
+        else if let processor = equalizerProcessor, processor.processedFrames > 0, processor.supportsFormat { equalizerStatus = "Equalizer is processing audio" }
+        else { equalizerStatus = "Waiting for compatible audio. If this adaptive stream does not support iOS filters, it plays unchanged." }
+    }
+    private func attachEqualizer(to item: AVPlayerItem) {
+        equalizerTask?.cancel(); equalizerProcessor = nil
+        guard equalizerEnabled else { return }
+        let processor = LaneEqualizerProcessor()
+        processor.configure(values: equalizerValues, enabled: true)
+        equalizerTask = Task { [weak self, weak item] in
+            guard let item else { return }
+            do {
+                let mix = try await processor.audioMix(for: item.asset)
+                guard let self, self.player?.currentItem === item, !Task.isCancelled, let mix else { return }
+                processor.configure(values: self.equalizerValues, enabled: self.equalizerEnabled)
+                self.equalizerProcessor = processor; item.audioMix = mix
+                self.refreshEqualizerStatus()
+            } catch { self?.refreshEqualizerStatus() }
+        }
+    }
+    #if DEBUG
+    var debugEqualizerFrames: Int64 { equalizerProcessor?.processedFrames ?? 0 }
+    #endif
 
     private var player: AVPlayer?
+    private var offlineStoreObserver: NSObjectProtocol?
     private var playerItemStatusObserver: NSKeyValueObservation?
     private var playerLoadedTimeRangesObserver: NSKeyValueObservation?
     private var playerTimeControlObserver: NSKeyValueObservation?
@@ -660,9 +712,15 @@ final class LaneSession: ObservableObject {
         }
         configureRemoteCommands()
         configureAudioLifecycle()
+        refreshHLSDownloads()
+        offlineStoreObserver = NotificationCenter.default.addObserver(forName: LaneHLSOfflineStore.changed, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.refreshHLSDownloads() }
+        }
     }
 
     deinit {
+        if let offlineStoreObserver { NotificationCenter.default.removeObserver(offlineStoreObserver) }
+        equalizerTask?.cancel()
         for observer in audioLifecycleObservers { NotificationCenter.default.removeObserver(observer) }
         for (command, target) in remoteCommandTargets { command.removeTarget(target) }
         playbackBackgroundLease?.end()
@@ -4206,6 +4264,7 @@ final class LaneSession: ObservableObject {
     }
 
     private func teardownPlayerObservers() {
+        equalizerTask?.cancel(); equalizerTask = nil; equalizerProcessor = nil
         progressiveAudioLoader?.cancelAll()
         progressiveAudioLoader = nil
         if let playbackEndObserver {
@@ -4398,6 +4457,7 @@ final class LaneSession: ObservableObject {
         // could delay the first audible frame for several seconds on LTE.
         newPlayer.automaticallyWaitsToMinimizeStalling = false
         player = newPlayer
+        attachEqualizer(to: item)
         observePlaybackEnd(of: item, requestID: requestID, track: track)
         observeLoadedTimeRanges(of: item, requestID: requestID, track: track)
 
@@ -4727,6 +4787,7 @@ final class LaneSession: ObservableObject {
                 let localPlayer = AVPlayer(playerItem: item)
                 localPlayer.automaticallyWaitsToMinimizeStalling = false
                 player = localPlayer
+                attachEqualizer(to: item)
                 observePlaybackEnd(of: item, requestID: requestID, track: track)
                 observeLoadedTimeRanges(of: item, requestID: requestID, track: track)
 
@@ -4879,6 +4940,7 @@ final class LaneSession: ObservableObject {
         let localPlayer = AVPlayer(playerItem: item)
         localPlayer.automaticallyWaitsToMinimizeStalling = false
         player = localPlayer
+        attachEqualizer(to: item)
         observePlaybackEnd(of: item, requestID: requestID, track: track)
         observeLoadedTimeRanges(of: item, requestID: requestID, track: track)
 
@@ -5604,6 +5666,12 @@ final class LaneSession: ObservableObject {
 
     // MARK: Downloads
 
+    #if DEBUG
+    func debugDownloadTrack(_ track: TrackCandidate) async throws {
+        await configureAPI(); try await persistDownloadedTrack(track)
+    }
+    #endif
+
     func downloadTrack(_ track: TrackCandidate) {
         guard track.trackID != nil else { return }
 
@@ -5662,12 +5730,18 @@ final class LaneSession: ObservableObject {
 
     private func persistDownloadedTrack(_ track: TrackCandidate) async throws {
         guard let trackID = track.trackID else { throw LaneAPIError.invalidURL }
+        let requestToken = token
         let downloadQuality = selectedPlaybackQuality()
         let stream = try await LaneAPI.shared.downloadURL(
-            token: token, trackId: trackID, quality: downloadQuality
+            token: requestToken, trackId: trackID, quality: downloadQuality
         )
+        guard token == requestToken, !Task.isCancelled else { throw CancellationError() }
         guard let remoteURL = normalizedStreamURL(stream.url) else {
             throw LaneAPIError.invalidURL
+        }
+        if remoteURL.pathExtension.lowercased() == "m3u8" {
+            _ = try await LaneHLSOfflineStore.shared.download(track: track, remote: remoteURL, quality: downloadQuality)
+            refreshHLSDownloads(); return
         }
 
         // Use the same route selection and DNS/TLS fallback as playback.
@@ -5683,7 +5757,8 @@ final class LaneSession: ObservableObject {
         }
         let signature = Self.mediaSignature(at: temporary)
         if case .hls = signature {
-            throw LaneAPIError.decoding("This stream needs an adaptive offline download. A playlist URL alone cannot be saved as audio.")
+            _ = try await LaneHLSOfflineStore.shared.download(track: track, remote: remoteURL, quality: downloadQuality)
+            refreshHLSDownloads(); return
         }
         let directory = downloadsDirectory
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -5707,6 +5782,7 @@ final class LaneSession: ObservableObject {
     }
 
     func downloadedFileURL(for track: TrackCandidate) -> URL? {
+        if let id = track.trackID, let url = LaneHLSOfflineStore.shared.fileURL(for: id) { return url }
         guard let id = track.trackID, downloadedTrackIDs.contains(id) else { return nil }
         if let record = downloadedTrackRecords[id],
            record.fileName == URL(fileURLWithPath: record.fileName).lastPathComponent {
@@ -5720,7 +5796,7 @@ final class LaneSession: ObservableObject {
     }
 
     var downloadedTracks: [TrackCandidate] {
-        let candidates = downloadedTrackRecords.values.map(\.track) + history + Array(resolvedTrackCache.values) + Array(localTrackStore.values)
+        let candidates = LaneHLSOfflineStore.shared.tracks + downloadedTrackRecords.values.map(\.track) + history + Array(resolvedTrackCache.values) + Array(localTrackStore.values)
         var seen = Set<String>()
         return candidates.filter { downloadedFileURL(for: $0) != nil && seen.insert($0.trackID ?? $0.id).inserted }
             .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
@@ -5728,6 +5804,7 @@ final class LaneSession: ObservableObject {
 
     func removeDownload(_ track: TrackCandidate) throws {
         guard let id = track.trackID else { return }
+        try LaneHLSOfflineStore.shared.remove(id)
         if let url = downloadedFileURL(for: track) { try FileManager.default.removeItem(at: url) }
         downloadedTrackRecords.removeValue(forKey: id)
         downloadedTrackIDs.remove(id)
@@ -5739,6 +5816,13 @@ final class LaneSession: ObservableObject {
 
     func isDownloaded(_ track: TrackCandidate) -> Bool {
         downloadedFileURL(for: track) != nil
+    }
+
+    private func refreshHLSDownloads() {
+        for track in LaneHLSOfflineStore.shared.tracks {
+            if let id = track.trackID { downloadedTrackIDs.insert(id) }
+            rememberResolvedTracks([track])
+        }
     }
 
     // MARK: Local storage

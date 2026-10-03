@@ -39,6 +39,11 @@ jobs:
           done
           swift -e 'import Foundation; import ImageIO; for url in try FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: "LaneAssets"), includingPropertiesForKeys: nil).filter({ $0.pathExtension == "png" }) { guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else { fatalError("Undecodable APK artwork: \(url.lastPathComponent)") } }'
 
+          # Wait for the first simulator boot (SpringBoard/accessibility), not
+          # just process creation. Never retry a failed application assertion.
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+
           xcodebuild -project LaneIOSPrototype.xcodeproj -scheme LaneIOSPrototype \
             -configuration Debug -destination "platform=iOS Simulator,id=$UDID" \
             -derivedDataPath /tmp/lane-simulator-build \
@@ -76,6 +81,11 @@ jobs:
             Tools/LaneContractTests.swift \
             -o /tmp/lane-contract-tests -lz
           /tmp/lane-contract-tests
+
+      - name: Equalizer PCM tests
+        run: |
+          swiftc -parse-as-library -swift-version 5 LaneIOSPrototype/LaneEqualizer.swift Tools/LaneEqualizerTests.swift -o /tmp/lane-equalizer-tests
+          /tmp/lane-equalizer-tests
 
       - name: Build unsigned app
         run: |
