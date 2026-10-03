@@ -3831,6 +3831,7 @@ final class LaneSession: ObservableObject {
                 endPlaybackTransition(); updatePlaybackState(false)
                 recordAudioEvent("interruption-began")
             } else {
+                guard audioInterrupted else { recordAudioEvent("interruption-ended-without-begin"); return }
                 let options = AVAudioSession.InterruptionOptions(rawValue: notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
                 let shouldResume = audioInterrupted && interruptionResumeRequested && playbackShouldPlay && options.contains(.shouldResume)
                 audioInterrupted = false; interruptionResumeRequested = false
@@ -3853,7 +3854,7 @@ final class LaneSession: ObservableObject {
             pendingStartPosition = playbackPosition
             retirePlayer(); playbackShouldPlay = false; isPlaying = false; isBuffering = false
             streamResolveTask?.cancel(); endPlaybackTransition()
-            try? activateAudioSession()
+            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
             try? AVAudioSession.sharedInstance().setActive(false)
             updatePlaybackState(false); recordAudioEvent("media-services-reset")
         case UIApplication.didBecomeActiveNotification:
@@ -4714,7 +4715,9 @@ final class LaneSession: ObservableObject {
             // without VPN even though the API itself is reachable. Reuse the
             // Android-style direct TLS transport (DoH/IP + original SNI/Host)
             // for the exact same selected-quality stream URL.
-            let direct = try await AndroidNetworkTransport.data(for: request, timeout: 60)
+            // This is the last full-file fallback, not the range streaming
+            // path. Never let an ignored Range/huge response exhaust RAM.
+            let direct = try await AndroidNetworkTransport.data(for: request, timeout: 60, maximumResponseBytes: 48 * 1024 * 1024)
             let temporaryURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("lane_direct_\(UUID().uuidString)")
             try direct.data.write(to: temporaryURL, options: .atomic)

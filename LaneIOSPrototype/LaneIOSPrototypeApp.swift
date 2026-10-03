@@ -522,6 +522,14 @@ private struct LaneUITestRoot: View {
 
     private func checkGIF() async {
         do {
+            let format = UIGraphicsImageRendererFormat(); format.scale = 1
+            let poster = UIGraphicsImageRenderer(size: CGSize(width: 3000, height: 300), format: format).image { context in
+                UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 3000, height: 300))
+            }
+            guard let data = poster.pngData(), let thumbnail = await laneDecodeArtwork(data, maximumPixels: 192),
+                  thumbnail.cgImage?.width == 192, (thumbnail.cgImage?.height ?? 3000) <= 192 else {
+                throw LaneAPIError.decoding("Small artwork was not downsampled to its view size")
+            }
             let data = try Data(contentsOf: Bundle.main.url(forResource: "amen", withExtension: "gif")!)
             guard let preview = LaneImageCropping.preview(data),
                   let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 1 else { throw LaneAPIError.emptyResponse }

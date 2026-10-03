@@ -7,10 +7,11 @@ import ImageIO
 struct LaneAnimatedImage: UIViewRepresentable {
     let data: Data
     var contentMode: ContentMode = .fill
+    var maximumPixels = 1280
     func makeUIView(context: Context) -> LaneGIFImageView { LaneGIFImageView(frame: .zero) }
     func updateUIView(_ view: LaneGIFImageView, context: Context) {
         view.contentMode = contentMode == .fill ? .scaleAspectFill : .scaleAspectFit
-        view.setGIF(data)
+        view.setGIF(data, maximumPixels: maximumPixels)
     }
     static func dismantleUIView(_ view: LaneGIFImageView, coordinator: ()) { view.stopAnimation() }
 }
@@ -20,6 +21,7 @@ final class LaneGIFImageView: UIImageView {
     private var compressed: Data?
     private var source: CGImageSource?
     private var count = 0
+    private var maximumPixels = 1280
     private var generation = UUID()
     private var pending: (image: UIImage, delay: TimeInterval, index: Int)?
     private var decoding = false
@@ -44,8 +46,10 @@ final class LaneGIFImageView: UIImageView {
     override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: UIView.noIntrinsicMetric) }
     override func didMoveToWindow() { super.didMoveToWindow(); updateAnimationState() }
 
-    func setGIF(_ data: Data) {
-        guard compressed != data else { return }
+    func setGIF(_ data: Data, maximumPixels: Int = 1280) {
+        let pixels = min(1280, max(128, maximumPixels))
+        guard compressed != data || self.maximumPixels != pixels else { return }
+        self.maximumPixels = pixels
         generation = UUID(); compressed = data; pending = nil; decoding = false; due = 0
         source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary)
         count = source.map(CGImageSourceGetCount) ?? 0
@@ -77,12 +81,13 @@ final class LaneGIFImageView: UIImageView {
         guard !decoding, let source else { return }
         decoding = true
         let operation = generation
+        let pixels = maximumPixels
         decodeQueue.async { [weak self] in
             autoreleasepool {
                 let frame = CGImageSourceCreateThumbnailAtIndex(source, index, [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
                     kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceThumbnailMaxPixelSize: 1280,
+                    kCGImageSourceThumbnailMaxPixelSize: pixels,
                     kCGImageSourceShouldCacheImmediately: true
                 ] as CFDictionary)
                 let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]

@@ -24,6 +24,8 @@ struct LaneEQDelay {
         let output = filter.b0 * input + z1
         z1 = filter.b1 * input - filter.a1 * output + z2
         z2 = filter.b2 * input - filter.a2 * output
+        // Avoid expensive denormal arithmetic on a long silent tail.
+        if abs(z1) < 1e-24 { z1 = 0 }; if abs(z2) < 1e-24 { z2 = 0 }
         return output
     }
 }

@@ -99,7 +99,7 @@ struct LanePremiumScreen: View {
                 Button("Try again") { Task { await load() } }.accessibilityIdentifier("premium.retry")
             }
             Section("Subscription") {
-                Text(session.account?.isAutoRenewalActive == true ? "Auto-renewal is on" : "Auto-renewal is off")
+                Text(session.account?.isAutoRenewalActive.map { $0 ? "Auto-renewal is on" : "Auto-renewal is off" } ?? "Auto-renewal status is not available")
                     .accessibilityIdentifier("premium.renewal")
                 if session.account?.isAutoRenewalActive == true {
                     Button(cancelling ? "Cancelling…" : "Cancel auto-renewal", role: .destructive) { confirmCancellation = true }

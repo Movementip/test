@@ -509,14 +509,14 @@ private final class LaneImageMemoryCache {
 /// Covers are displayed at iPhone resolution, not the server's original
 /// poster resolution. Decode on a worker queue and bound the decoded surface
 /// before inserting it in the cache (including the first frame of a GIF).
-private func laneDecodeArtwork(_ data: Data) async -> UIImage? {
+func laneDecodeArtwork(_ data: Data, maximumPixels: Int = 1280) async -> UIImage? {
     await withCheckedContinuation { continuation in
         DispatchQueue.global(qos: .utility).async {
             guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
                   let frame = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
                     kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceThumbnailMaxPixelSize: 1280,
+                    kCGImageSourceThumbnailMaxPixelSize: min(1280, max(128, maximumPixels)),
                     kCGImageSourceShouldCacheImmediately: true
                   ] as CFDictionary) else { continuation.resume(returning: nil); return }
             continuation.resume(returning: UIImage(cgImage: frame))
@@ -584,43 +584,50 @@ final class LaneRemoteImageLoader: ObservableObject {
     @Published private(set) var image: UIImage?
     @Published private(set) var gifData: Data?
     private(set) var loadedValue: String?
+    private var loadedPixels: Int?
 
-    func load(_ rawValue: String?) async {
+    func load(_ rawValue: String?, maximumPixels: Int = 1280) async {
         guard let url = laneRoutedMediaURL(rawValue) else { return }
         let key = url.absoluteString
-        if let cached = LaneImageMemoryCache.shared.image(for: key) {
+        let imageKey = "\(key)#pixels=\(maximumPixels)"
+        if let cached = LaneImageMemoryCache.shared.image(for: imageKey) {
+            guard !Task.isCancelled else { return }
             image = cached
             gifData = LaneImageMemoryCache.shared.gif(for: key)
             if gifData == nil, let data = await LaneImageDiskCache.shared.data(for: key), !Task.isCancelled {
                 LaneImageMemoryCache.shared.storeGIF(data, for: key)
                 gifData = LaneImageMemoryCache.shared.gif(for: key)
             }
+            guard !Task.isCancelled else { return }
             loadedValue = rawValue
+            loadedPixels = maximumPixels
             return
         }
-        guard rawValue != loadedValue else { return }
+        guard rawValue != loadedValue || maximumPixels != loadedPixels else { return }
         if image != nil { image = nil }; gifData = nil
 
         if let diskData = await LaneImageDiskCache.shared.data(for: key),
            !Task.isCancelled,
-           let decoded = await laneDecodeArtwork(diskData), !Task.isCancelled {
-            LaneImageMemoryCache.shared.store(decoded, for: key)
+           let decoded = await laneDecodeArtwork(diskData, maximumPixels: maximumPixels), !Task.isCancelled {
+            LaneImageMemoryCache.shared.store(decoded, for: imageKey)
             LaneImageMemoryCache.shared.storeGIF(diskData, for: key)
             gifData = LaneImageMemoryCache.shared.gif(for: key)
             image = decoded
             loadedValue = rawValue
+            loadedPixels = maximumPixels
             return
         }
 
         guard !Task.isCancelled,
               let data = try? await AndroidNetworkTransport.imageData(from: url),
               !Task.isCancelled,
-              let decoded = await laneDecodeArtwork(data), !Task.isCancelled else { return }
-        LaneImageMemoryCache.shared.store(decoded, for: key)
+              let decoded = await laneDecodeArtwork(data, maximumPixels: maximumPixels), !Task.isCancelled else { return }
+        LaneImageMemoryCache.shared.store(decoded, for: imageKey)
         LaneImageMemoryCache.shared.storeGIF(data, for: key)
         gifData = LaneImageMemoryCache.shared.gif(for: key)
         image = decoded
         loadedValue = rawValue
+        loadedPixels = maximumPixels
         await LaneImageDiskCache.shared.store(data, for: key)
     }
 }
@@ -633,6 +640,7 @@ struct LaneResilientImage<Placeholder: View>: View {
     private let placeholder: () -> Placeholder
 
     @StateObject private var loader = LaneRemoteImageLoader()
+    @State private var maximumPixels = 1280
 
     init(
         url: String?,
@@ -647,10 +655,10 @@ struct LaneResilientImage<Placeholder: View>: View {
     var body: some View {
         Group {
             if let image = url.flatMap({ laneRoutedMediaURL($0)?.absoluteString })
-                .flatMap({ LaneImageMemoryCache.shared.image(for: $0) })
+                .flatMap({ LaneImageMemoryCache.shared.image(for: "\($0)#pixels=\(maximumPixels)") })
                 ?? (loader.loadedValue == url ? loader.image : nil) {
                 if loader.loadedValue == url, let data = loader.gifData {
-                    LaneAnimatedImage(data: data, contentMode: contentMode)
+                    LaneAnimatedImage(data: data, contentMode: contentMode, maximumPixels: maximumPixels)
                         .aspectRatio(image.size.width / max(1, image.size.height), contentMode: contentMode)
                 } else {
                     Image(uiImage: image).resizable().aspectRatio(contentMode: contentMode)
@@ -659,8 +667,16 @@ struct LaneResilientImage<Placeholder: View>: View {
                 placeholder()
             }
         }
-        .task(id: url) {
-            await loader.load(url)
+        .background(GeometryReader { proxy in
+            Color.clear.onAppear { updateResolution(proxy.size) }.onChange(of: proxy.size) { updateResolution($0) }
+        })
+        .task(id: "\(url ?? "")|\(maximumPixels)") {
+            await loader.load(url, maximumPixels: maximumPixels)
         }
+    }
+    private func updateResolution(_ size: CGSize) {
+        let pixels = max(size.width, size.height) * UIScreen.main.scale
+        guard pixels.isFinite, pixels > 0 else { return }
+        maximumPixels = [192, 384, 768, 1280].first(where: { CGFloat($0) >= pixels }) ?? 1280
     }
 }
