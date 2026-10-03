@@ -2233,6 +2233,9 @@ struct APKTrackEffectsSheet: View {
                 Text("Speed Up and Slowed are included in Lane Premium.")
                     .font(.callout).foregroundStyle(.secondary)
             }
+            NavigationLink { LaneEqualizerScreen() } label: {
+                Label("Equalizer", systemImage: "slider.vertical.3").font(LaneTypography.manrope(16))
+            }.accessibilityIdentifier("effects.equalizer")
             Spacer(minLength: 0)
         }
         .padding(24)
@@ -2333,7 +2336,7 @@ struct APKFullPlayerView: View {
                             HStack(alignment: .center, spacing: 12) {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(track.title)
-                                        .font(.system(size: 21, weight: .bold))
+                                        .font(LaneTypography.benzin(20))
                                         .lineLimit(1)
 
                                     Button {
@@ -2351,7 +2354,7 @@ struct APKFullPlayerView: View {
                                             }
 
                                             Text(track.subtitle)
-                                                .font(.system(size: 15))
+                                                .font(LaneTypography.manrope(15))
                                                 .foregroundStyle(.secondary)
                                                 .lineLimit(1)
 
@@ -2453,8 +2456,8 @@ struct APKFullPlayerView: View {
                 .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showEffects) {
-            APKTrackEffectsSheet().environmentObject(session)
-                .presentationDetents([.medium])
+            NavigationStack { APKTrackEffectsSheet().environmentObject(session) }
+                .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $showTrackActions) {

@@ -92,6 +92,12 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["First memory"].waitForExistence(timeout: 10))
         let more = app.buttons["memorial.more"]
         scrollTo(more); more.tap()
+        let pager = app.descendants(matching: .any).matching(identifier: "memorial.pager").firstMatch
+        scrollTo(pager)
+        pager.swipeUp()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "2 / 2"), object: app.staticTexts["memorial.page"])], timeout: 10), .completed)
+        let previousMemory = app.buttons["Previous memory"]
+        scrollTo(previousMemory); previousMemory.tap()
         let nextMemory = app.buttons["Next memory"]
         scrollTo(nextMemory); nextMemory.tap()
         XCTAssertTrue(app.staticTexts["Second memory"].waitForExistence(timeout: 10))
@@ -114,6 +120,7 @@ final class LaneNavigationTests: XCTestCase {
         submit.tap()
         XCTAssertTrue(app.staticTexts["memorial.confirmed"].waitForExistence(timeout: 10))
         XCTAssertEqual(app.staticTexts["memorial.count"].label, "3 candles")
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "#3"), object: app.staticTexts["memorial.confirmationNumber"])], timeout: 5), .completed)
         XCTAssertTrue(app.images["memorial.candle.candle-own"].exists, "Original candle must render, not a blank spacer")
         screenshot("iPhone13-memorial-confirmed-candle")
         let author = app.buttons["memorial.author.candle-own"]

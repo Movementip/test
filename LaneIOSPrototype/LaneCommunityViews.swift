@@ -205,6 +205,7 @@ struct LaneMemorialScreen: View {
     @State private var generation = UUID()
     @State private var accountIdentity: String?
     @State private var memoryPage = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var messageFocused: Bool
 
     var body: some View {
@@ -214,7 +215,9 @@ struct LaneMemorialScreen: View {
                     if let ownCandle {
                         Text("You honored the memory").font(.title2.bold())
                             .accessibilityIdentifier("memorial.confirmed")
-                        candle(ownCandle)
+                        if let count {
+                            LaneCandleConfirmationNumber(number: count, identity: ownCandle.id)
+                        }
                     } else if composing {
                         APKBundleImage(name: "candle").frame(height: 120)
                         TextField("Leave a message", text: $message, axis: .vertical)
@@ -256,22 +259,24 @@ struct LaneMemorialScreen: View {
                     }
                     if !composing || ownCandle != nil {
                         Text("Candles from other users").font(.headline)
-                        let memories = candles.filter { $0.id != ownCandle?.id }
+                        let memories = (ownCandle.map { [$0] } ?? []) + candles.filter { $0.id != ownCandle?.id }
+                        let pageHeight = max(350, min(600, geometry.size.height - 150))
                         if !memories.isEmpty {
                             VStack(spacing: 8) {
                                 TabView(selection: $memoryPage) {
                                     ForEach(Array(memories.enumerated()), id: \.element.id) { index, value in
-                                        ScrollView { candle(value).padding(.vertical, 14) }
-                                            .frame(width: max(0, geometry.size.width - 36), height: 350)
+                                        candle(value).padding(.vertical, 14)
+                                            .frame(width: max(0, geometry.size.width - 36), height: pageHeight)
                                             .rotationEffect(.degrees(-90))
-                                            .frame(width: 350, height: max(0, geometry.size.width - 36))
+                                            .frame(width: pageHeight, height: max(0, geometry.size.width - 36))
                                             .tag(index)
                                     }
                                 }
                                 .tabViewStyle(.page(indexDisplayMode: .never))
-                                .frame(width: 350, height: max(0, geometry.size.width - 36))
+                                .frame(width: pageHeight, height: max(0, geometry.size.width - 36))
                                 .rotationEffect(.degrees(90))
-                                .frame(width: max(0, geometry.size.width - 36), height: 350)
+                                .frame(width: max(0, geometry.size.width - 36), height: pageHeight)
+                                .clipped()
                                 .accessibilityIdentifier("memorial.pager")
                                 HStack {
                                     Button("Previous memory") { withAnimation { memoryPage = max(0, memoryPage - 1) } }.disabled(memoryPage == 0)
@@ -308,8 +313,9 @@ struct LaneMemorialScreen: View {
         .toolbar { ToolbarItemGroup(placement: .keyboard) {
             Spacer(); Button("Done") { messageFocused = false }
         } }
-        .onChange(of: candles.count) { _ in memoryPage = min(memoryPage, max(0, candles.filter { $0.id != ownCandle?.id }.count - 1)) }
-        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: ownCandle?.id)
+        .onChange(of: candles.count) { _ in memoryPage = min(memoryPage, max(0, candles.count - 1)) }
+        .onChange(of: ownCandle?.id) { _ in memoryPage = 0 }
+        .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.8), value: ownCandle?.id)
         .task(id: session.token) {
             if accountIdentity != session.token {
                 accountIdentity = session.token
@@ -333,7 +339,7 @@ struct LaneMemorialScreen: View {
         VStack(spacing: 14) {
             APKBundleImage(name: "candle").frame(height: 100)
                 .accessibilityLabel("Candle").accessibilityIdentifier("memorial.candle.\(value.id)")
-            Text(value.text).multilineTextAlignment(.center).font(.title3)
+            Text(value.text).multilineTextAlignment(.center).font(LaneTypography.manrope(17))
             if let user = value.author, let id = user.laneId, !id.isEmpty {
                 NavigationLink { LaneUserProfileScreen(laneID: id) } label: {
                     HStack(spacing: 8) {
@@ -416,5 +422,31 @@ struct LaneMemorialScreen: View {
                 self.error = error.localizedDescription
             }
         }
+    }
+}
+
+private struct LaneCandleConfirmationNumber: View {
+    let number: Int64
+    let identity: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var displayed = 0.0
+    var body: some View {
+        Text("").modifier(LaneCandleCounter(value: displayed))
+            .task(id: identity) {
+                displayed = 0
+                await Task.yield()
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 2)) { displayed = Double(number) }
+            }
+            .onChange(of: number) { value in withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) { displayed = Double(value) } }
+    }
+}
+private struct LaneCandleCounter: AnimatableModifier {
+    var value: Double
+    var animatableData: Double { get { value } set { value = newValue } }
+    func body(content: Content) -> some View {
+        Text("#\(max(0, Int(value.rounded())).formatted())")
+            .font(LaneTypography.manrope(40)).monospacedDigit()
+            .shadow(color: .white.opacity(0.35), radius: 10)
+            .accessibilityIdentifier("memorial.confirmationNumber")
     }
 }
