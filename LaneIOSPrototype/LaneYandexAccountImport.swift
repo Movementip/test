@@ -81,6 +81,9 @@ private final class LaneYandexAccountBrowser: NSObject, ObservableObject, WKNavi
 
     override init() {
         let configuration = WKWebViewConfiguration()
+        // APK requests the desktop collection so its favorite-playlist anchor
+        // is available. Use WebKit's supported preference, not a spoofed UA.
+        configuration.defaultWebpagePreferences.preferredContentMode = .desktop
         #if DEBUG
         fixture = ProcessInfo.processInfo.arguments.contains("--lane-yandex-account-fixture")
         if fixture {
