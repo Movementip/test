@@ -266,12 +266,28 @@ struct YandexImportTrack: Identifiable, Hashable, Sendable {
     var artistText: String { artists.joined(separator: ", ") }
 }
 
-enum LaneMusicImportSort: String, CaseIterable, Identifiable {
+enum LaneMusicImportSort: String, Codable, CaseIterable, Identifiable {
     case original = "Source order"
     case oldest = "Oldest first"
     case title = "Title A–Z"
     case artist = "Artist A–Z"
     var id: String { rawValue }
+}
+
+/// A user's confirmed import order is a display preference, not membership.
+/// Old regional snapshots must not reset it; removed songs are never restored.
+struct LanePlaylistOrderPreference: Codable {
+    let trackIDs: [String]
+    let sort: LaneMusicImportSort
+
+    func orderedMemberIDs(_ membership: [String]) -> [String] {
+        let current = LaneTrackBatching.unique(membership)
+        let members = Set(current)
+        let preferred = LaneTrackBatching.unique(trackIDs)
+        let known = Set(preferred)
+        // Newly liked/added songs retain their server order at the front.
+        return current.filter { !known.contains($0) } + preferred.filter { members.contains($0) }
+    }
 }
 
 enum LaneImportOrdering {

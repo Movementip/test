@@ -3511,6 +3511,7 @@ struct EditProfileSheet: View {
     @State private var uploading = false
     @State private var errorMessage: String?
     @State private var loadedInitialProfile = false
+    @FocusState private var profileFieldFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -3532,10 +3533,12 @@ struct EditProfileSheet: View {
                 }
                 .disabled(saving || uploading)
                 Section("Profile") {
-                    TextField("Name", text: $name).accessibilityIdentifier("profile.name")
+                    TextField("Name", text: $name).accessibilityIdentifier("profile.name").focused($profileFieldFocused)
                     TextField("Username", text: $username)
                         .textInputAutocapitalization(.never)
+                        .focused($profileFieldFocused)
                     TextField("About me", text: $statusText, axis: .vertical)
+                        .focused($profileFieldFocused)
                 }
                 .disabled(saving || uploading)
                 Section("Current badge") {
@@ -3550,8 +3553,13 @@ struct EditProfileSheet: View {
                 }.disabled(saving || uploading)
                 if let errorMessage { Text(errorMessage).foregroundStyle(lanePink) }
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Edit Profile")
             .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { profileFieldFocused = false }
+                }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                         .disabled(saving || uploading)
@@ -4322,6 +4330,13 @@ private struct FavoriteTracksScreen: View {
         }) {
             VStack(spacing: 18) {
                 Text("Liked tracks").font(.headline)
+                if let order = session.playlistImportOrderTitle("lane_likes") {
+                    Text("Import order: \(order)").font(.caption).foregroundStyle(.secondary)
+                    Button("Use server order") {
+                        session.useServerPlaylistOrder("lane_likes")
+                        showActions = false
+                    }.accessibilityIdentifier("playlist.order.server")
+                }
                 Button(role: .destructive) {
                     clearAfterActions = true
                     showActions = false
@@ -4336,7 +4351,7 @@ private struct FavoriteTracksScreen: View {
             .padding(20)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(laneBackground)
-            .presentationDetents([.height(210)])
+            .presentationDetents([.height(session.playlistImportOrderTitle("lane_likes") == nil ? 210 : 290)])
             .presentationDragIndicator(.visible)
         }
         .alert("Удалить все лайкнутые треки?", isPresented: $confirmClear) {

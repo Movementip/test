@@ -66,11 +66,14 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(name.waitForExistence(timeout: 5))
         let initial = name.value as? String ?? ""
         name.tap(); name.typeText(" draft")
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5))
+        app.buttons["Done"].tap()
         app.swipeUp()
         let badgeEditor = app.buttons["profile.badges"]
         scrollTo(badgeEditor); badgeEditor.tap()
         XCTAssertTrue(app.buttons["badge.back"].waitForExistence(timeout: 10))
         app.buttons["badge.back"].tap()
+        for _ in 0..<4 where !name.isHittable { app.swipeDown() }
         XCTAssertEqual(name.value as? String, initial + " draft", "Navigating to badges must retain unsaved profile edits")
     }
 
@@ -234,6 +237,32 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(last.waitForExistence(timeout: 15))
         XCTAssertLessThan(first.frame.minY, last.frame.minY)
         screenshot("iPhone13-source-order-after-leaving-import")
+    }
+
+    func testImportOldestMenuOrderSurvivesReversedLibraryReadAndFreshClient() {
+        app.terminate()
+        app.launchArguments = ["--lane-ui-test", "--lane-import-fixture"]
+        app.launch()
+        app.buttons["Open import fixture"].tap()
+        XCTAssertTrue(app.staticTexts["import.count"].waitForExistence(timeout: 10))
+        app.buttons["import.order"].tap()
+        app.buttons["Oldest first"].tap()
+        let start = app.buttons["import.start"]
+        scrollTo(start); start.tap()
+        let waiting = app.staticTexts["import.stage"]
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Confirming saved tracks on Lane…"), object: waiting)], timeout: 10), .completed)
+        app.buttons["Leave import fixture"].tap()
+        app.buttons["Check imported oldest order"].tap()
+        XCTAssertTrue(app.staticTexts["Background import order passed"].waitForExistence(timeout: 20), app.staticTexts["session.result"].label)
+        app.buttons["Open full app"].tap()
+        app.buttons["Library"].firstMatch.tap()
+        let liked = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Favorite tracks")).firstMatch
+        XCTAssertTrue(liked.waitForExistence(timeout: 15)); liked.tap()
+        let first = app.buttons["track.row.lane-1"]
+        let last = app.buttons["track.row.lane-4"]
+        XCTAssertTrue(first.waitForExistence(timeout: 15)); XCTAssertTrue(last.waitForExistence(timeout: 15))
+        XCTAssertLessThan(first.frame.minY, last.frame.minY)
+        screenshot("iPhone13-oldest-order-after-stale-server-read")
     }
 
     func testLikedRowReplacesAnotherPlaylistQueueForNextAndPrevious() {

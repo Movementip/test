@@ -34,6 +34,7 @@ jobs:
           for asset in LaneAssets/*.png LaneAssets/amen.gif; do
             cmp "$asset" "$APP_BUNDLE/${asset##*/}"
           done
+          swift -e 'import Foundation; import ImageIO; for url in try FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: "LaneAssets"), includingPropertiesForKeys: nil).filter({ $0.pathExtension == "png" }) { guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else { fatalError("Undecodable APK artwork: \(url.lastPathComponent)") } }'
 
           xcodebuild -project LaneIOSPrototype.xcodeproj -scheme LaneIOSPrototype \
             -configuration Debug -destination "platform=iOS Simulator,id=$UDID" \

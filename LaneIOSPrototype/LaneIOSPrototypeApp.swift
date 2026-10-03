@@ -12,6 +12,11 @@ struct LaneIOSPrototypeApp: App {
         let value = LaneSession()
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--lane-ui-test") {
+            // Tests start with no display preferences, then deliberately create
+            // a fresh client in the same test to verify persistence.
+            for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("lane.playlistOrder.") {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
             _ = LaneUITestAudioServer.shared
             URLProtocol.registerClass(LaneUITestURLProtocol.self)
             value.backendMode = .custom
@@ -120,6 +125,7 @@ private struct LaneUITestRoot: View {
                 if ProcessInfo.processInfo.arguments.contains("--lane-import-fixture") {
                     Button("Open import fixture") { showImport = true }
                     Button("Check imported order") { Task { await checkImportedOrder() } }
+                    Button("Check imported oldest order") { Task { await checkImportedOrder(oldest: true) } }
                 }
                 Button("Open shared album") { session.receiveShareURL(URL(string: "lane://share/fixture-album-share")!) }
                 Text(result).accessibilityIdentifier("session.result")
@@ -178,13 +184,10 @@ private struct LaneUITestRoot: View {
     private func checkSession() async {
         do {
             let originals = Bundle.main.urls(forResourcesWithExtension: "png", subdirectory: nil) ?? []
-            guard originals.count >= 38,
-                  ["lane", "verified", "ic_yandex_music", "candle", "cover_liked_tracks_dark", "lane_1_4_favourite_tracks_dark_theme__2"].allSatisfy({ name in
-                    Bundle.main.url(forResource: name, withExtension: "png")
-                        .flatMap { UIImage(contentsOfFile: $0.path) } != nil
-                  }),
+            let undecodable = originals.filter { UIImage(contentsOfFile: $0.path) == nil }.map(\.lastPathComponent)
+            guard originals.count >= 38, undecodable.isEmpty,
                   Bundle.main.url(forResource: "amen", withExtension: "gif") != nil else {
-                throw LaneAPIError.decoding("Original APK artwork is missing from the simulator app")
+                throw LaneAPIError.decoding("APK artwork check: \(originals.count) PNGs; cannot decode \(undecodable.joined(separator: ", "))")
             }
             let preview = LanePlaylist(playlistTracksIds: (0..<1151).map { "source-\($0)" })
             let firstPage = try await session.tracksForImportPreview(preview)
@@ -275,20 +278,29 @@ private struct LaneUITestRoot: View {
         }
     }
 
-    private func checkImportedOrder() async {
+    private func checkImportedOrder(oldest: Bool = false) async {
         do {
             for _ in 0..<100 where session.importingPlaylistIDs.contains("lane_likes") {
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
-            let expected = ["lane-4", "lane-3", "lane-2", "lane-1"]
+            let expected = oldest ? ["lane-1", "lane-2", "lane-3", "lane-4"] : ["lane-4", "lane-3", "lane-2", "lane-1"]
             guard session.likedTracks.compactMap(\.trackID) == expected else {
                 throw LaneAPIError.decoding("Visible liked tracks did not adopt confirmed source order")
+            }
+            LaneUITestURLProtocol.simulateStaleImportOrderReads()
+            await session.refreshAfterLogin()
+            guard session.likedTracks.compactMap(\.trackID) == expected else {
+                throw LaneAPIError.decoding("Library refresh reset the selected import order")
             }
             let fresh = LaneSession()
             fresh.backendMode = .custom; fresh.baseURL = "https://lane-ui.test"; fresh.token = "ui-fixture-token"
             await fresh.refreshAfterLogin()
             guard fresh.likedTracks.compactMap(\.trackID) == expected else {
                 throw LaneAPIError.decoding("New client did not read the saved source order")
+            }
+            fresh.token = "another-ui-fixture-account"
+            guard fresh.playlistImportOrderTitle("lane_likes") == nil else {
+                throw LaneAPIError.decoding("Import order leaked into another account")
             }
             result = "Background import order passed"
         } catch { result = "Background import order failed: \(error.localizedDescription)" }
@@ -608,12 +620,19 @@ private final class LaneUITestURLProtocol: URLProtocol {
     private static var deletionDeadline: Date?
     private static var importFixture = false
     private static var delayImportRead = false
+    private static var staleImportOrderReads = false
+
+    static func simulateStaleImportOrderReads() {
+        lock.lock(); defer { lock.unlock() }
+        staleImportOrderReads = true
+    }
 
     static func prepareImportFixture() {
         lock.lock(); defer { lock.unlock() }
         saved["lane_likes"] = ["lane-1", "lane-2", "lane-3", "lane-4"]
         importFixture = true
         delayImportRead = false
+        staleImportOrderReads = false
     }
 
     static func prepareLikedFixture(rateLimited: Bool) {
@@ -805,7 +824,9 @@ private final class LaneUITestURLProtocol: URLProtocol {
                         delayResponse = true
                         responseDelay = 6
                     }
-                    data = try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": Self.saved[id] ?? [], "tracksCount": (Self.saved[id] ?? []).count])
+                    var ids = Self.saved[id] ?? []
+                    if Self.staleImportOrderReads, id == "lane_likes" { ids = Array(ids.reversed()) }
+                    data = try JSONSerialization.data(withJSONObject: ["playlistId": id, "playlistTracksIds": ids, "tracksCount": ids.count])
                 }
             } else if path == "/account" {
                 if isRaceClient, Self.accountReadRace {

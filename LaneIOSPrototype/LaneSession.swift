@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import MediaPlayer
 import UIKit
+import CryptoKit
 
 private struct YandexPlaylistEnvelope: Decodable {
     let result: YandexPlaylistPayload
@@ -1867,7 +1868,7 @@ final class LaneSession: ObservableObject {
             )
             let likedIDs: [String]? = expectedLikedCount > likedIDsBuffer.count && likedIDsBuffer.isEmpty
                 ? nil
-                : (didReadLikedState ? likedIDsBuffer : nil)
+                : (didReadLikedState ? preferredPlaylistOrder(likedIDsBuffer, playlistID: "lane_likes") : nil)
 
             if let likedIDs {
                 let serverIDs = Set(likedIDs)
@@ -2013,7 +2014,8 @@ final class LaneSession: ObservableObject {
 
         let cached = playlistTrackCache[id]
         if let cached, !cached.isEmpty {
-            completion(cached)
+            completion(LaneTrackBatching.ordered(cached,
+                sourceIDs: preferredPlaylistOrder(cached.compactMap(\.trackID), playlistID: id)))
         }
 
         Task { @MainActor in
@@ -2040,7 +2042,8 @@ final class LaneSession: ObservableObject {
                 guard token == requestToken, playlistContentGenerations[id] == loadGeneration,
                       !clearingPlaylistIDs.contains(id) else { return }
                 let loaded = LaneTrackBatching.ordered(pageItems.map { TrackCandidate($0, refID: id) },
-                                                       sourceIDs: detail?.playlistTracksIds ?? [])
+                    sourceIDs: preferredPlaylistOrder(
+                        LaneTrackBatching.unique((detail?.playlistTracksIds ?? []) + pageItems.compactMap(\.songId)), playlistID: id))
                 rememberPlaylistTracks(loaded, playlistID: id)
                 completion(loaded)
                 return
@@ -2062,7 +2065,9 @@ final class LaneSession: ObservableObject {
                 .compactMap { $0 }
                 .first { !$0.isEmpty }
             if let embedded {
-                let loaded = embedded.map { TrackCandidate($0, refID: id) }
+                let members = LaneTrackBatching.unique((details?.playlistTracksIds ?? []) + embedded.compactMap(\.songId))
+                let loaded = LaneTrackBatching.ordered(embedded.map { TrackCandidate($0, refID: id) },
+                    sourceIDs: preferredPlaylistOrder(members, playlistID: id))
                 rememberPlaylistTracks(loaded, playlistID: id)
                 completion(loaded)
                 return
@@ -2070,9 +2075,10 @@ final class LaneSession: ObservableObject {
 
             // Match Android's offline/server fallback: resolve the playlist's
             // IDs through the read-only POST /user/tracks in resilient pages.
-            let ids = [details?.playlistTracksIds, libraryCopy?.playlistTracksIds, playlist.playlistTracksIds]
+            let sourceIDs = [details?.playlistTracksIds, libraryCopy?.playlistTracksIds, playlist.playlistTracksIds]
                 .compactMap { $0 }
                 .first { !$0.isEmpty } ?? []
+            let ids = preferredPlaylistOrder(sourceIDs, playlistID: id)
             guard !ids.isEmpty else {
                 // A regional page may report zero while the detail metadata
                 // knows this playlist has tracks. Keep the existing cache and
@@ -2425,6 +2431,7 @@ final class LaneSession: ObservableObject {
             )
             status = result.status
             try result.requireSuccess()
+            UserDefaults.standard.removeObject(forKey: playlistOrderPreferenceKey(playlistID))
             output = "Playlist order updated."
         } catch {
             if let previous {
@@ -2469,6 +2476,7 @@ final class LaneSession: ObservableObject {
             libraryLoadGeneration = UUID()
             playlistContentGenerations[id] = UUID()
             playlistTrackCache[id] = []
+            UserDefaults.standard.removeObject(forKey: playlistOrderPreferenceKey(id))
             if let data = try? JSONEncoder().encode(playlistTrackCache) {
                 UserDefaults.standard.set(data, forKey: "lane.cachedPlaylistTracks")
             }
@@ -2891,7 +2899,7 @@ final class LaneSession: ObservableObject {
                 },
                 confirmedOrder: { ids, metadata in
                     guard self.token == requestToken else { return }
-                    self.applyConfirmedPlaylistOrder(ids, metadata: metadata, playlistID: playlistID)
+                    self.applyConfirmedPlaylistOrder(ids, metadata: metadata, playlistID: playlistID, sort: sort)
                 },
                 progress: { processed, total, savedIDs, resolved in
                     guard self.token == requestToken else { return }
@@ -2927,7 +2935,11 @@ final class LaneSession: ObservableObject {
 
     /// Install only the order actually read back from Lane. Membership progress
     /// alone must not leave the liked screen showing the server's prepend order.
-    private func applyConfirmedPlaylistOrder(_ ids: [String], metadata: [TrackData], playlistID: String) {
+    private func applyConfirmedPlaylistOrder(_ ids: [String], metadata: [TrackData], playlistID: String, sort: LaneMusicImportSort) {
+        let preference = LanePlaylistOrderPreference(trackIDs: ids, sort: sort)
+        if let data = try? JSONEncoder().encode(preference) {
+            UserDefaults.standard.set(data, forKey: playlistOrderPreferenceKey(playlistID))
+        }
         libraryLoadGeneration = UUID()
         playlistContentGenerations[playlistID] = UUID()
         let candidates = metadata.map { TrackCandidate($0, refID: playlistID) } +
@@ -2954,6 +2966,34 @@ final class LaneSession: ObservableObject {
             restorePendingFavoriteTracks()
             persistFavoriteState()
         }
+    }
+
+    private func playlistOrderPreferenceKey(_ playlistID: String) -> String {
+        // Never persist a bearer token in a preferences key. The account scope
+        // is derived on every read, including direct token changes in fixtures.
+        let scope = SHA256.hash(data: Data((token + "|" + playlistID).utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        return "lane.playlistOrder." + scope
+    }
+
+    private func playlistOrderPreference(_ playlistID: String) -> LanePlaylistOrderPreference? {
+        guard !isGuest, let data = UserDefaults.standard.data(forKey: playlistOrderPreferenceKey(playlistID)) else { return nil }
+        return try? JSONDecoder().decode(LanePlaylistOrderPreference.self, from: data)
+    }
+
+    private func preferredPlaylistOrder(_ membership: [String], playlistID: String) -> [String] {
+        playlistOrderPreference(playlistID)?.orderedMemberIDs(membership) ?? membership
+    }
+
+    func playlistImportOrderTitle(_ playlistID: String) -> String? {
+        playlistOrderPreference(playlistID)?.sort.rawValue
+    }
+
+    func useServerPlaylistOrder(_ playlistID: String) {
+        UserDefaults.standard.removeObject(forKey: playlistOrderPreferenceKey(playlistID))
+        playlistContentGenerations[playlistID] = UUID()
+        playlistTrackCache.removeValue(forKey: playlistID)
+        refreshLibrary()
     }
 
     // MARK: Social

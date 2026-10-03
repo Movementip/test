@@ -781,6 +781,20 @@ struct LaneContractTestRunner {
             sort: .oldest, orderReference: largeReference)
         precondition(LaneMockURLProtocol.savedIDs("import-large") == Array(sourceOrder.reversed()))
 
+        // The server's later regional/page snapshot may have the opposite
+        // order even after the final reorder was confirmed. The persisted
+        // display preference must keep all 1,151 rows stable without reviving
+        // removed songs, dropping new likes, or depending on cached metadata.
+        let preference = LanePlaylistOrderPreference(trackIDs: sourceOrder, sort: .original)
+        let restoredPreference = try JSONDecoder().decode(LanePlaylistOrderPreference.self,
+            from: JSONEncoder().encode(preference))
+        precondition(restoredPreference.orderedMemberIDs(Array(sourceOrder.reversed())) == sourceOrder)
+        let membership = ["new-like"] + Array(sourceOrder.dropFirst().reversed())
+        precondition(restoredPreference.orderedMemberIDs(membership) == ["new-like"] + Array(sourceOrder.dropFirst()))
+        precondition(restoredPreference.orderedMemberIDs([]).isEmpty)
+        let oldestPreference = LanePlaylistOrderPreference(trackIDs: Array(sourceOrder.reversed()), sort: .oldest)
+        precondition(oldestPreference.orderedMemberIDs(sourceOrder) == Array(sourceOrder.reversed()))
+
         // Stop at the failed middle batch; a new client can continue without
         // losing the first 15 or sending duplicate playlist writes.
         do {
@@ -900,6 +914,6 @@ struct LaneContractTestRunner {
             "/user/import/preview"
         ]
         precondition(expectedPaths.allSatisfy(LaneMockURLProtocol.received))
-        print("Lane contract tests passed: APK-native cipher/signature, 1151 tracks in batches of 15, source order from 1394-entry reference, confirmed-order callback, completed-import order repair without new resolver calls/writes, punctuation and collaborator matching, 429 fresh-signature retries, minimum 60-second deletion cooldown/cancellation, delayed membership/order readback, truthful saved-vs-order states, ordering-only resume without re-resolving/rewriting, durable source/reverse order, partial clear/retry, canonical albums, server likes, privacy, notifications, multipart uploads, ranges/effects.")
+        print("Lane contract tests passed: APK-native cipher/signature, 1151 tracks in batches of 15, source order from 1394-entry reference, confirmed-order callback, persisted source/reverse display preference through reversed membership snapshots/new likes/removals, completed-import order repair without new resolver calls/writes, punctuation and collaborator matching, 429 fresh-signature retries, minimum 60-second deletion cooldown/cancellation, delayed membership/order readback, truthful saved-vs-order states, ordering-only resume without re-resolving/rewriting, durable source/reverse order, partial clear/retry, canonical albums, server likes, privacy, notifications, multipart uploads, ranges/effects, earned badges/server equip-removal, memorial pagination/count and non-replayed confirmed candle writes.")
     }
 }
