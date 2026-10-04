@@ -2,6 +2,30 @@ import Foundation
 import UIKit
 import MetricKit
 
+#if DEBUG
+/// Native-clock test probe, independent of SwiftUI/main-actor polling. A late
+/// UI snapshot must not be mistaken for the time audio actually started.
+final class LaneAudioStartProbe {
+    static let queue = DispatchQueue(label: "lane.audio.start-probe", qos: .userInitiated)
+    private let lock = NSLock()
+    private var generation: UUID?
+    private var firstProgress: TimeInterval?
+    func reset(_ generation: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        self.generation = generation; firstProgress = nil
+    }
+    func record(_ generation: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        guard self.generation == generation, firstProgress == nil else { return }
+        firstProgress = ProcessInfo.processInfo.systemUptime
+    }
+    func time(for generation: UUID) -> TimeInterval? {
+        lock.lock(); defer { lock.unlock() }
+        return self.generation == generation ? firstProgress : nil
+    }
+}
+#endif
+
 /// End the assertion inside the expiration callback, before hopping to the
 /// main actor. A queued actor task is too late if the system watchdog fires.
 final class LaneAudioBackgroundLease {

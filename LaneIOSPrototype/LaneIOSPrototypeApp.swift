@@ -683,7 +683,7 @@ private struct LaneUITestRoot: View {
         do {
             session.debugUseProgressiveTransport = direct
             try session.removeDownload(LaneUITestFixtures.track)
-            let started = Date()
+            let started = ProcessInfo.processInfo.systemUptime
             session.requestStream(for: LaneUITestFixtures.track)
             for _ in 0..<150 {
                 if session.isPlaying && session.playbackPosition > 0.1 { break }
@@ -696,11 +696,14 @@ private struct LaneUITestRoot: View {
             guard session.playbackBufferedDuration > 0, session.playbackDuration > 0 else {
                 throw LaneAPIError.decoding("Player did not publish loaded timeline ranges: position=\(session.playbackPosition), buffer=\(session.playbackBufferedDuration), duration=\(session.playbackDuration), \(session.debugAudioState)")
             }
-            let startup = Date().timeIntervalSince(started)
-            guard startup < 8 else {
-                throw LaneAPIError.decoding("Loopback audio startup exceeded 8 seconds: \(startup), \(session.debugAudioState), position=\(session.playbackPosition), buffer=\(session.playbackBufferedDuration), completeFile=\(LaneUITestAudioServer.shared.finishedFullResponse)")
+            guard let nativeProgressAt = session.debugFirstPlaybackProgressAt else {
+                throw LaneAPIError.decoding("Native player did not report the first 0.1 seconds of actual media progress")
             }
-            print("LANE_STREAM_START transport=\(direct ? "range" : "native") seconds=\(Date().timeIntervalSince(started)); completeFile=false")
+            let startup = nativeProgressAt - started
+            guard startup < 8 else {
+                throw LaneAPIError.decoding("Native loopback audio startup exceeded 8 seconds: \(startup), \(session.debugAudioState), position=\(session.playbackPosition), buffer=\(session.playbackBufferedDuration), completeFile=\(LaneUITestAudioServer.shared.finishedFullResponse)")
+            }
+            print("LANE_STREAM_START transport=\(direct ? "range" : "native") native-first-progress-seconds=\(startup); UI-observation-seconds=\(ProcessInfo.processInfo.systemUptime - started); completeFile=false")
             session.pause()
             session.downloadTrack(LaneUITestFixtures.track)
             for _ in 0..<150 {

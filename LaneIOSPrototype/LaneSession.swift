@@ -634,6 +634,9 @@ final class LaneSession: ObservableObject {
     private var progressiveAudioLoader: LaneProgressiveAudioLoader?
     #if DEBUG
     var debugUseProgressiveTransport = false
+    private let debugStartupProbe = LaneAudioStartProbe()
+    private var debugStartupObserver: Any?
+    var debugFirstPlaybackProgressAt: TimeInterval? { debugStartupProbe.time(for: playbackRequestID) }
     #endif
     private var playbackRequestID = UUID()
     private var streamResolveTask: Task<Void, Never>?
@@ -3943,6 +3946,9 @@ final class LaneSession: ObservableObject {
         let requestID = UUID()
         playbackRequestID = requestID
         beginPlaybackTransition(requestID: requestID)
+        #if DEBUG
+        debugStartupProbe.reset(requestID)
+        #endif
         effectRequestID = UUID()
         trackEffectIsLoading = false
         trackEffectError = ""
@@ -4366,6 +4372,10 @@ final class LaneSession: ObservableObject {
             player.removeTimeObserver(periodicTimeObserver)
         }
         periodicTimeObserver = nil
+        #if DEBUG
+        if let debugStartupObserver, let player { player.removeTimeObserver(debugStartupObserver) }
+        debugStartupObserver = nil
+        #endif
     }
 
     private func retirePlayer() {
@@ -4530,6 +4540,19 @@ final class LaneSession: ObservableObject {
         // could delay the first audible frame for several seconds on LTE.
         newPlayer.automaticallyWaitsToMinimizeStalling = false
         player = newPlayer
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--lane-ui-test") {
+            let probe = debugStartupProbe
+            debugStartupObserver = newPlayer.addBoundaryTimeObserver(
+                forTimes: [NSValue(time: CMTime(seconds: 0.1, preferredTimescale: 600))],
+                queue: LaneAudioStartProbe.queue
+            ) { [weak newPlayer] in
+                guard let newPlayer, newPlayer.currentItem?.status == .readyToPlay,
+                      newPlayer.rate > 0, newPlayer.currentTime().seconds >= 0.05 else { return }
+                probe.record(requestID)
+            }
+        }
+        #endif
         attachEqualizer(to: item)
         observePlaybackEnd(of: item, requestID: requestID, track: track)
         observeLoadedTimeRanges(of: item, requestID: requestID, track: track)
@@ -4675,7 +4698,7 @@ final class LaneSession: ObservableObject {
             forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
             queue: .main
         ) { [weak self, weak newPlayer] time in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 guard let self,
                       let newPlayer, self.player === newPlayer,
                       self.playbackRequestID == requestID,
@@ -4911,7 +4934,7 @@ final class LaneSession: ObservableObject {
                     forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
                     queue: .main
                 ) { [weak self, weak localPlayer] time in
-                    Task { @MainActor in
+                    MainActor.assumeIsolated {
                         guard let self, let localPlayer, self.player === localPlayer,
                               self.playbackRequestID == requestID, self.currentTrack?.id == track.id else { return }
                         self.updatePlaybackClock(time, player: localPlayer, requestID: requestID)
@@ -5077,7 +5100,7 @@ final class LaneSession: ObservableObject {
             forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
             queue: .main
         ) { [weak self, weak localPlayer] time in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 guard let self, let localPlayer, self.player === localPlayer, self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
                 self.updatePlaybackClock(time, player: localPlayer, requestID: requestID)
