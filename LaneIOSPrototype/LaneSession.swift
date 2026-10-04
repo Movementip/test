@@ -4250,6 +4250,13 @@ final class LaneSession: ObservableObject {
         guard player?.currentItem === item else { return }
         let duration = item.duration.seconds
         if duration.isFinite, duration > 0 { playbackDuration = duration }
+        if let asset = item.asset as? AVURLAsset, asset.url.isFileURL,
+           duration.isFinite, duration > 0 {
+            // A completed local file/package is already on disk. AVPlayer's
+            // loadedTimeRanges describes its decoder, not download progress.
+            playbackBufferedDuration = duration
+            return
+        }
         let bufferedEnd = item.loadedTimeRanges
             .map(\.timeRangeValue)
             .map { CMTimeGetSeconds(CMTimeRangeGetEnd($0)) }
