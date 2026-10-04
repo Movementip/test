@@ -3,6 +3,11 @@ import AVFoundation
 
 @main struct LaneEqualizerTests {
     static func main() {
+        precondition(LaneEqualizerPresets.all.count == 14)
+        precondition(Set(LaneEqualizerPresets.all.map(\.name)).count == 14)
+        precondition(LaneEqualizerProcessor.frequencies == [60, 150, 400, 1000, 2400, 15000])
+        precondition(LaneEqualizerPresets.all.allSatisfy { $0.values.count == 6 && $0.values.allSatisfy { (0...1).contains($0) } })
+        precondition(LaneEqualizerPresets.all.first(where: { $0.name == "Bass Boost" })?.values == [0.85, 0.7, 0.5, 0.45, 0.5, 0.5])
         func rendered(values: [Double], enabled: Bool, frequency: Double) -> [Float] {
             let processor = LaneEqualizerProcessor()
             processor.configure(values: values, enabled: enabled)

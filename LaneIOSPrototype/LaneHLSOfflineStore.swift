@@ -37,6 +37,14 @@ enum LaneHLSTestFixture {
     private var pendingVerifications = 0
     private var eventsFinished = false
     private var backgroundCompletion: (() -> Void)?
+    #if DEBUG || LANE_HLS_NATIVE_TEST
+    private(set) var debugStage = "created"
+    #endif
+    private func trace(_ stage: String) {
+        #if DEBUG || LANE_HLS_NATIVE_TEST
+        debugStage = stage
+        #endif
+    }
     private lazy var downloads: AVAssetDownloadURLSession = {
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.identifier)
         configuration.isDiscretionary = false
@@ -76,21 +84,26 @@ enum LaneHLSTestFixture {
         let id = track.trackID ?? track.id
         if let task = inFlight[id] { return try await task.value }
         let task = Task { @MainActor in
+            trace("loading-playable")
             let asset = AVURLAsset(url: remote)
             guard try await asset.load(.isPlayable) else {
                 throw LaneAPIError.decoding("This adaptive stream is not playable.")
             }
             // Load the selection before handing the asset to the native
             // background service, as in Apple's current HLS persistence sample.
-            _ = try await asset.load(.preferredMediaSelection)
+            trace("loading-media-selection")
+            let selection = try await asset.load(.preferredMediaSelection)
             try Task.checkCancellation()
             let configuration = AVAssetDownloadConfiguration(asset: asset, title: track.title)
+            configuration.primaryContentConfiguration.mediaSelections = [selection]
+            trace("creating-native-task")
             let task = downloads.makeAssetDownloadTask(downloadConfiguration: configuration)
             let description = Description(id: UUID(), track: track, quality: quality)
             task.taskDescription = String(data: try JSONEncoder().encode(description), encoding: .utf8)
             return try await withTaskCancellationHandler(operation: {
                 try await withCheckedThrowingContinuation { continuation in
                     jobs[task.taskIdentifier] = Job(description: description, task: task, continuation: continuation)
+                    trace("native-resume")
                     task.resume()
                 }
             }, onCancel: { task.cancel() })
@@ -113,10 +126,12 @@ enum LaneHLSTestFixture {
         locations[assetDownloadTask.taskIdentifier] = location
     }
     func urlSession(_ session: URLSession, assetDownloadTask: AVAssetDownloadTask, willDownloadTo location: URL) {
+        trace("native-destination")
         // A destination is not proof of completion; validation is done below.
         locations[assetDownloadTask.taskIdentifier] = location
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        trace(error.map { "native-completion \(($0 as NSError).domain) \(($0 as NSError).code)" } ?? "native-completion success")
         let job = jobs.removeValue(forKey: task.taskIdentifier)
         let location = locations.removeValue(forKey: task.taskIdentifier)
         let restored = task.taskDescription.flatMap { $0.data(using: .utf8) }.flatMap { try? JSONDecoder().decode(Description.self, from: $0) }

@@ -2201,6 +2201,7 @@ struct APKTrackEffectsSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
                 Text("Effects").font(.title2.bold())
@@ -2233,16 +2234,14 @@ struct APKTrackEffectsSheet: View {
                 Text("Speed Up and Slowed are included in Lane Premium.")
                     .font(.callout).foregroundStyle(.secondary)
             }
-            NavigationLink { LaneEqualizerScreen() } label: {
-                Label("Equalizer", systemImage: "slider.vertical.3").font(LaneTypography.manrope(16))
-            }.accessibilityIdentifier("effects.equalizer")
-            Spacer(minLength: 0)
+            LaneEqualizerControls().padding(.top, 28)
         }
         .padding(24)
         .padding(.top, 12)
         .background(apkBackground.ignoresSafeArea())
         .tint(apkPink)
         .preferredColorScheme(.dark)
+        }
     }
 }
 

@@ -581,6 +581,12 @@ final class LaneSession: ObservableObject {
         UserDefaults.standard.set(equalizerValues, forKey: "lane.equalizer.values")
         equalizerProcessor?.configure(values: equalizerValues, enabled: equalizerEnabled)
     }
+    func applyEqualizerPreset(_ preset: LaneEqualizerPresets.Preset) {
+        guard LaneEqualizerPresets.all.contains(where: { $0.name == preset.name && $0.values == preset.values }) else { return }
+        equalizerValues = preset.values
+        UserDefaults.standard.set(equalizerValues, forKey: "lane.equalizer.values")
+        setEqualizer(enabled: preset.name != "Default")
+    }
     func resetEqualizer() {
         equalizerValues = Array(repeating: 0.5, count: 6)
         UserDefaults.standard.set(equalizerValues, forKey: "lane.equalizer.values")
@@ -652,6 +658,9 @@ final class LaneSession: ObservableObject {
     private var clientEventsGeneration = UUID()
     #if DEBUG
     var debugHasPlaybackBackgroundTask: Bool { playbackBackgroundLease?.isActive == true }
+    var debugAudioState: String {
+        "intent=\(playbackShouldPlay), interrupted=\(audioInterrupted), nativeState=\(player?.timeControlStatus.rawValue ?? -1), rate=\(player?.rate ?? -1), itemState=\(player?.currentItem?.status.rawValue ?? -1), duration=\(player?.currentItem?.duration.seconds ?? -1)"
+    }
     func debugExpirePlaybackLease() {
         playbackBackgroundLease?.expireForTesting { [weak self] generation in
             self?.playbackTransitionExpired(generation: generation)
@@ -4371,6 +4380,7 @@ final class LaneSession: ObservableObject {
     }
 
     private func advanceAfterPlaybackEnd() {
+        recordAudioEvent("track-ended")
         if repeatMode == 2, let currentTrack {
             requestStream(for: currentTrack)
             return
@@ -4378,6 +4388,7 @@ final class LaneSession: ObservableObject {
 
         let nextIndex = (currentIndex ?? -1) + 1
         if queue.isEmpty || (nextIndex >= queue.count && repeatMode != 1) {
+            playbackShouldPlay = false
             isPlaying = false
             isBuffering = false
             endPlaybackTransition()
@@ -4593,6 +4604,7 @@ final class LaneSession: ObservableObject {
                         self.beginPlaybackTransition(requestID: requestID)
                     }
                 case .paused:
+                    self.recordAudioEvent("native-paused")
                     self.isPlaying = false
                 @unknown default:
                     self.isPlaying = false
@@ -5159,7 +5171,10 @@ final class LaneSession: ObservableObject {
         }
         if let player {
             beginPlaybackTransition(requestID: playbackRequestID)
-            player.play()
+            // The initial startup already uses this policy. Resume buffered
+            // audio promptly too, instead of waiting to refill the entire
+            // 20-second forward buffer after a call or user pause.
+            player.playImmediately(atRate: 1)
             isBuffering = player.timeControlStatus != .playing
             if !isBuffering { endPlaybackTransition(requestID: playbackRequestID) }
         } else if let currentTrack {

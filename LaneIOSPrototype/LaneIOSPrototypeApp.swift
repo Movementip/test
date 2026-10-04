@@ -457,7 +457,7 @@ private struct LaneUITestRoot: View {
         } catch {
             let value = error as NSError
             let underlying = value.userInfo[NSUnderlyingErrorKey] as? NSError
-            result = "Adaptive offline checks failed: \(error.localizedDescription) [\(value.domain) \(value.code); underlying \(underlying?.domain ?? "none") \(underlying?.code ?? 0); HLS HTTP before=\(beforeDownload) after=\(LaneUITestAudioServer.shared.hlsRequestCount)]"
+            result = "Adaptive offline checks failed: \(error.localizedDescription) [\(value.domain) \(value.code); underlying \(underlying?.domain ?? "none") \(underlying?.code ?? 0); HLS HTTP before=\(beforeDownload) after=\(LaneUITestAudioServer.shared.hlsRequestCount); stage=\(LaneHLSOfflineStore.shared.debugStage)]"
         }
     }
 
@@ -575,7 +575,7 @@ private struct LaneUITestRoot: View {
                 if session.isPlaying && session.playbackPosition > 0.1 { return }
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
-            throw LaneAPIError.decoding("Audio did not recover at \(stage): playing=\(session.isPlaying), buffering=\(session.isBuffering), position=\(session.playbackPosition), error=\(session.playerError), \(session.output). \(LaneAudioDiagnostics.shared.report())")
+            throw LaneAPIError.decoding("Audio did not recover at \(stage): playing=\(session.isPlaying), buffering=\(session.isBuffering), position=\(session.playbackPosition), \(session.debugAudioState), error=\(session.playerError), \(session.output). \(LaneAudioDiagnostics.shared.report())")
         }
         func interruption(_ type: AVAudioSession.InterruptionType) {
             NotificationCenter.default.post(name: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(), userInfo: [

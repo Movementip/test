@@ -25,7 +25,13 @@ jobs:
             -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testMemorialRetryPaginationConfirmedCandleAndBack \
             -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testImageCropCancelAndConfirmedJPEGUploadAndAnimatedGIF \
             -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testAudioInterruptionPauseMediaResetAndHeadphoneRemoval \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test
+            -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testEqualizerProcessesRealAudioAndRestoresNeutralWithoutStopping \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="-" test
+      - name: Native download diagnostics
+        if: failure()
+        run: |
+          mkdir -p Output
+          xcrun simctl spawn booted log show --last 10m --style compact --predicate 'eventMessage CONTAINS "com.lane.ios" OR process == "nsurlsessiond"' > Output/Lane-NativeDownload.log || true
       - name: Export results
         if: always()
         run: |

@@ -30,8 +30,30 @@ struct LaneEQDelay {
     }
 }
 
+/// Labels and normalized preset gains from APK TrackEffectsSheetContentKt.
+enum LaneEqualizerPresets {
+    struct Preset: Identifiable { let name: String; let values: [Double]; var id: String { name } }
+    static let all: [Preset] = [
+        Preset(name: "Default", values: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
+        Preset(name: "Bass Boost", values: [0.85, 0.7, 0.5, 0.45, 0.5, 0.5]),
+        Preset(name: "Treble Boost", values: [0.5, 0.5, 0.5, 0.55, 0.7, 0.85]),
+        Preset(name: "Vocal Boost", values: [0.4, 0.4, 0.5, 0.7, 0.75, 0.55]),
+        Preset(name: "Pop", values: [0.4, 0.5, 0.65, 0.65, 0.55, 0.45]),
+        Preset(name: "Rock", values: [0.75, 0.65, 0.45, 0.55, 0.65, 0.75]),
+        Preset(name: "Electronic", values: [0.8, 0.65, 0.45, 0.5, 0.65, 0.75]),
+        Preset(name: "Hip-Hop", values: [0.85, 0.7, 0.45, 0.5, 0.6, 0.7]),
+        Preset(name: "R&B", values: [0.7, 0.6, 0.55, 0.6, 0.65, 0.6]),
+        Preset(name: "Jazz", values: [0.6, 0.6, 0.55, 0.5, 0.6, 0.65]),
+        Preset(name: "Classical", values: [0.6, 0.5, 0.5, 0.5, 0.55, 0.65]),
+        Preset(name: "Acoustic", values: [0.6, 0.55, 0.5, 0.6, 0.65, 0.6]),
+        Preset(name: "Lounge", values: [0.6, 0.55, 0.5, 0.5, 0.45, 0.4]),
+        Preset(name: "Spoken Word", values: [0.3, 0.4, 0.6, 0.7, 0.65, 0.4])
+    ]
+    static let labels = ["60 Hz", "150 Hz", "400 Hz", "1 kHz", "2.4 kHz", "15 kHz"]
+}
+
 final class LaneEqualizerProcessor {
-    static let frequencies: [Double] = [60, 150, 400, 1000, 4000, 12000]
+    static let frequencies: [Double] = [60, 150, 400, 1000, 2400, 15000]
     private let lock = NSLock()
     private var requested = [Double](repeating: 0.5, count: 6)
     private var enabled = false, dirty = true
@@ -127,29 +149,120 @@ import SwiftUI
 struct LaneEqualizerScreen: View {
     @EnvironmentObject private var session: LaneSession
     var body: some View {
-        Form {
+        ScrollView {
+            LaneEqualizerControls().padding(24)
+        }.background(Color.black.ignoresSafeArea())
+            .navigationTitle("Equalizer").navigationBarTitleDisplayMode(.inline)
+            .tint(Color(red: 1, green: 0.51, blue: 0.52)).preferredColorScheme(.dark).laneIOSBackSwipe()
+    }
+}
+
+struct LaneEqualizerControls: View {
+    @EnvironmentObject private var session: LaneSession
+    @State private var fineAdjustment = false
+    private let accent = Color(red: 1, green: 0.51, blue: 0.52)
+    private var selectedPreset: String {
+        LaneEqualizerPresets.all.first(where: { $0.values == session.equalizerValues })?.name ?? "Custom"
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
             Toggle("Equalizer", isOn: Binding(get: { session.equalizerEnabled }, set: { session.setEqualizer(enabled: $0) }))
+                .font(LaneTypography.manrope(22))
                 .accessibilityIdentifier("equalizer.enabled")
-            ForEach(0..<6, id: \.self) { band in
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text(band < 4 ? "\(Int(LaneEqualizerProcessor.frequencies[band])) Hz" : "\(Int(LaneEqualizerProcessor.frequencies[band] / 1000)) kHz")
-                        Spacer(); Text(String(format: "%+.1f dB", (session.equalizerValues[band] - 0.5) * 30)).monospacedDigit()
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    if selectedPreset == "Custom" { chip("Custom", selected: true, action: {}) }
+                    ForEach(LaneEqualizerPresets.all) { preset in
+                        chip(preset.name, selected: selectedPreset == preset.name) { session.applyEqualizerPreset(preset) }
                     }
-                    Slider(value: Binding(get: { session.equalizerValues[band] }, set: { session.setEqualizer(band: band, value: $0) }), in: 0...1)
-                        .disabled(!session.equalizerEnabled).accessibilityIdentifier("equalizer.band.\(band)")
                 }
             }
+            LaneEqualizerCurve().frame(height: 172)
+            HStack {
+                ForEach(LaneEqualizerPresets.labels, id: \.self) { label in
+                    Text(label).font(LaneTypography.manrope(11)).foregroundStyle(.secondary)
+                    if label != LaneEqualizerPresets.labels.last { Spacer(minLength: 0) }
+                }
+            }.padding(.top, -12)
+            DisclosureGroup("Fine adjustment", isExpanded: $fineAdjustment) {
+                ForEach(0..<6, id: \.self) { band in
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text(LaneEqualizerPresets.labels[band]); Spacer()
+                            Text(String(format: "%+.1f dB", (session.equalizerValues[band] - 0.5) * 30)).monospacedDigit()
+                        }
+                        Slider(value: Binding(get: { session.equalizerValues[band] }, set: { session.setEqualizer(band: band, value: $0) }), in: 0...1)
+                            .disabled(!session.equalizerEnabled).accessibilityIdentifier("equalizer.band.\(band)")
+                    }.padding(.top, 10)
+                }
+            }.accessibilityIdentifier("equalizer.fineAdjustment")
             Button("Reset equalizer") { session.resetEqualizer() }.accessibilityIdentifier("equalizer.reset")
             Text(session.equalizerStatus).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("equalizer.status")
             Text("Six bands, neutral at 0 dB. Positive gain reserves headroom to avoid clipping. Some adaptive streams do not support iOS audio filters; they continue playing without the equalizer.").font(.caption).foregroundStyle(.secondary)
-        }.navigationTitle("Equalizer").navigationBarTitleDisplayMode(.inline).preferredColorScheme(.dark).laneIOSBackSwipe()
+        }.font(LaneTypography.manrope(16)).tint(accent)
             .task {
                 while !Task.isCancelled {
                     session.refreshEqualizerStatus()
                     do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
                 }
             }
+    }
+    private func chip(_ name: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(name).font(LaneTypography.manrope(13))
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                .foregroundStyle(selected ? Color.black : Color.white)
+                .background(selected ? accent : Color.white.opacity(0.1), in: Capsule())
+        }.buttonStyle(.plain).accessibilityIdentifier("equalizer.preset.\(name)")
+            .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+private struct LaneEqualizerCurve: View {
+    @EnvironmentObject private var session: LaneSession
+    @State private var draggedBand: Int?
+    private let accent = Color(red: 1, green: 0.51, blue: 0.52)
+    var body: some View {
+        GeometryReader { geometry in
+            let width = max(1, geometry.size.width - 12), height = max(1, geometry.size.height - 12)
+            let points = session.equalizerValues.enumerated().map { index, value in
+                CGPoint(x: 6 + width * Double(index) / 5, y: 6 + height * (1 - value))
+            }
+            ZStack {
+                Canvas { context, size in
+                    for point in points {
+                        var grid = Path(); grid.move(to: CGPoint(x: point.x, y: 0)); grid.addLine(to: CGPoint(x: point.x, y: size.height))
+                        context.stroke(grid, with: .color(.white.opacity(0.05)), lineWidth: 2)
+                    }
+                    var curve = Path(); curve.addLines(points)
+                    var fill = curve; fill.addLine(to: CGPoint(x: points[5].x, y: size.height))
+                    fill.addLine(to: CGPoint(x: points[0].x, y: size.height)); fill.closeSubpath()
+                    context.fill(fill, with: .linearGradient(Gradient(colors: [accent.opacity(0.3), accent.opacity(0)]),
+                        startPoint: CGPoint(x: 0, y: points.map(\.y).min() ?? 0), endPoint: CGPoint(x: 0, y: size.height)))
+                    context.stroke(curve, with: .color(accent), style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+                }.accessibilityHidden(true)
+                ForEach(0..<6, id: \.self) { band in
+                    Circle().fill(accent).frame(width: 12, height: 12).position(points[band])
+                        .accessibilityLabel(LaneEqualizerPresets.labels[band])
+                        .accessibilityValue(String(format: "%+.1f dB", (session.equalizerValues[band] - 0.5) * 30))
+                        .accessibilityAdjustableAction { direction in
+                            let delta: Double
+                            switch direction { case .increment: delta = 0.05; case .decrement: delta = -0.05; @unknown default: return }
+                            update(band, value: session.equalizerValues[band] + delta)
+                        }
+                }
+            }.contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
+                    let band = draggedBand ?? min(5, max(0, Int(((gesture.startLocation.x - 6) / width * 5).rounded())))
+                    draggedBand = band
+                    update(band, value: 1 - (gesture.location.y - 6) / height)
+                }.onEnded { _ in draggedBand = nil })
+                .accessibilityElement(children: .contain).accessibilityIdentifier("equalizer.curve")
+        }
+    }
+    private func update(_ band: Int, value: Double) {
+        if !session.equalizerEnabled { session.setEqualizer(enabled: true) }
+        session.setEqualizer(band: band, value: value)
     }
 }
 #endif
