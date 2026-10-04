@@ -603,9 +603,18 @@ private struct LaneUITestRoot: View {
             guard !session.isPlaying else { throw LaneAPIError.decoding("Ignored user pause during interruption") }
             session.resume(); try await waitForAudio("manual resume after interruption")
             let position = session.playbackPosition
+            NotificationCenter.default.post(name: AVAudioSession.mediaServicesWereLostNotification, object: nil)
+            try await Task.sleep(nanoseconds: 200_000_000)
+            session.resume()
+            try await Task.sleep(nanoseconds: 200_000_000)
+            guard !session.isPlaying else { throw LaneAPIError.decoding("Play resumed invalid media services") }
+            interruption(.began)
             NotificationCenter.default.post(name: AVAudioSession.mediaServicesWereResetNotification, object: nil)
             try await Task.sleep(nanoseconds: 300_000_000)
             guard !session.isPlaying else { throw LaneAPIError.decoding("Media reset resumed without user action") }
+            interruption(.ended)
+            try await Task.sleep(nanoseconds: 200_000_000)
+            guard !session.isPlaying else { throw LaneAPIError.decoding("Old interruption resumed reset audio objects") }
             session.resume(); try await waitForAudio("media reset resume")
             guard session.playbackPosition >= position else { throw LaneAPIError.decoding("Media reset lost position") }
             NotificationCenter.default.post(name: AVAudioSession.routeChangeNotification, object: nil,
