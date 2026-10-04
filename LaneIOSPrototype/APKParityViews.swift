@@ -707,47 +707,53 @@ struct APKFavoritePlaylistCard: View {
     let trackCount: Int
 
     var body: some View {
-        ZStack {
-            APKBundleImage(name: "lane_1_4_favourite_tracks_dark_theme__2", contentMode: .fill)
-                .opacity(0.95)
-
-            if Bundle.main.url(forResource: "lane_1_4_favourite_tracks_dark_theme__2", withExtension: "png") == nil {
-                LinearGradient(
-                    colors: [Color(red: 0.17, green: 0.11, blue: 0.13), Color(red: 0.08, green: 0.08, blue: 0.08)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Favorite tracks")
+                    .font(LaneTypography.title(16))
+                    .accessibilityIdentifier("library.favorite.title")
+                Text("\(trackCount) tracks")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.70))
+                    .accessibilityIdentifier("library.favorite.count")
             }
 
-            HStack(spacing: 16) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Favorite tracks")
-                        .font(LaneTypography.title(16))
-                    Text("\(trackCount) tracks")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.70))
-                }
+            Spacer()
 
-                Spacer()
-
-                ZStack {
-                    APKBundleImage(name: "cover_liked_tracks_dark", contentMode: .fill)
-                    if Bundle.main.url(forResource: "cover_liked_tracks_dark", withExtension: "png") == nil {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(apkPink.opacity(0.18))
-                        Image(systemName: "heart.fill")
-                            .font(.system(size: 30))
-                            .foregroundStyle(apkPink)
-                    }
+            ZStack {
+                APKBundleImage(name: "cover_liked_tracks_dark", contentMode: .fill)
+                if Bundle.main.url(forResource: "cover_liked_tracks_dark", withExtension: "png") == nil {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(apkPink.opacity(0.18))
+                    Image(systemName: "heart.fill")
+                        .font(.system(size: 30))
+                        .foregroundStyle(apkPink)
                 }
-                .frame(width: 86, height: 86)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .shadow(color: .black.opacity(0.35), radius: 20)
             }
-            .padding(16)
+            .frame(width: 86, height: 86)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .shadow(color: .black.opacity(0.35), radius: 20)
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 7)
         .frame(maxWidth: .infinity)
         .frame(height: 100)
+        .background {
+            // Aspect-fill artwork must not participate in the card's layout.
+            // Its wide intrinsic ratio otherwise enlarges the foreground and
+            // clips the title/count beyond the iPhone's left edge.
+            GeometryReader { geometry in
+                ZStack {
+                    LinearGradient(
+                        colors: [Color(red: 0.17, green: 0.11, blue: 0.13), Color(red: 0.08, green: 0.08, blue: 0.08)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    )
+                    APKBundleImage(name: "lane_1_4_favourite_tracks_dark_theme__2", contentMode: .fill)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .opacity(0.95)
+                }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
+            }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)

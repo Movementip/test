@@ -1091,6 +1091,8 @@ private struct LibraryScreen: View {
                 APKFavoritePlaylistCard(trackCount: session.favorites.count)
             }
             .buttonStyle(.plain)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Favorite tracks, \(session.favorites.count) tracks")
         }
 
         ForEach(libraryEntries.filter { $0.matches(filter) }) { entry in
@@ -4607,6 +4609,7 @@ struct ImportTracksScreen: View {
     @State private var yandexMetadataTask: Task<[YandexImportTrack], Never>?
     @State private var previewRequestID = UUID()
     @State private var showYandexLogin = false
+    @State private var yandexLoginPresentationID = UUID()
 
     init() {}
 
@@ -4666,6 +4669,7 @@ struct ImportTracksScreen: View {
                 showYandexLogin = false
                 requestPreview()
             }
+            .id(yandexLoginPresentationID)
         }
         // This unstructured task finishes its read-back/reorder even when the
         // user returns to Library. Leaving a screen is not a cancellation of
@@ -4878,6 +4882,7 @@ struct ImportTracksScreen: View {
                 .font(.system(size: 14)).foregroundStyle(Color.white.opacity(0.65))
                 .frame(maxWidth: .infinity, alignment: .leading)
             APKPrimaryButton(title: loading ? "Loading preview…" : "Sign in to Yandex", loading: loading, enabled: !loading) {
+                yandexLoginPresentationID = UUID()
                 showYandexLogin = true
             }.accessibilityIdentifier("import.yandex.login")
         }

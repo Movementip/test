@@ -720,6 +720,12 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(playlist.waitForExistence(timeout: 15))
         XCTAssertTrue(playlist.label.contains("2 tracks"), playlist.label)
         let window = app.windows.firstMatch.frame
+        for identifier in ["library.favorite.title", "library.favorite.count"] {
+            let text = app.staticTexts[identifier]
+            XCTAssertTrue(text.waitForExistence(timeout: 5), "Favorite title/count must remain independently accessible")
+            XCTAssertGreaterThanOrEqual(text.frame.minX, window.minX + 16, "Favorite text is cropped at the left edge")
+            XCTAssertLessThanOrEqual(text.frame.maxX, window.maxX - 16, "Favorite text exceeds the card width")
+        }
         XCTAssertLessThanOrEqual(window.maxY - library.frame.maxY, 35, "Only the home-indicator safe area belongs below the tab buttons")
         playlist.tap()
         XCTAssertTrue(app.buttons["Play"].waitForExistence(timeout: 10))

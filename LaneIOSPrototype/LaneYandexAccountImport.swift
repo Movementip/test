@@ -59,6 +59,7 @@ struct LaneYandexAccountImportScreen: View {
         } message: {
             Text("This removes Yandex website data from Lane's browser. Your Lane account and imported songs stay unchanged.")
         }
+        .onAppear { browser.start() }
         .onDisappear { browser.close() }
     }
 }
@@ -80,6 +81,7 @@ private final class LaneYandexAccountBrowser: NSObject, ObservableObject, WKNavi
     @Published var error: String?
     let webView: WKWebView
     private var closed = false
+    private var started = false
     private let messageName = "laneYandexPlaylist"
     private let fixture: Bool
 
@@ -108,6 +110,14 @@ private final class LaneYandexAccountBrowser: NSObject, ObservableObject, WKNavi
         webView.isOpaque = false
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
+    }
+
+    /// Start only after SwiftUI presents this browser. View construction can
+    /// precede attachment or be discarded; it must not start a hidden WebKit
+    /// navigation whose callbacks race with a previous window's dismissal.
+    func start() {
+        guard !closed, !started else { return }
+        started = true
         loadLogin()
     }
 
