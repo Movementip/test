@@ -29,6 +29,7 @@ jobs:
             -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testImageCropCancelAndConfirmedJPEGUploadAndAnimatedGIF \
             -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testAudioInterruptionPauseMediaResetAndHeadphoneRemoval \
             -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testEqualizerProcessesRealAudioAndRestoresNeutralWithoutStopping \
+            -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testRangeBridgeStartsBeforeWholeFileAndOfflinePlayback \
             CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="-" test-without-building
       - name: Native download diagnostics
         if: failure()

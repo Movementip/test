@@ -62,13 +62,17 @@ final class LaneProgressiveAudioLoader: NSObject, AVAssetResourceLoaderDelegate 
         var finished = false
         while !finished {
             try Task.checkCancellation()
-            let state: (offset: Int64, end: Int64?, total: Int64?, type: String?) = await onQueue {
+            let state: (offset: Int64, end: Int64?, total: Int64?, type: String?, informationOnly: Bool) = await onQueue {
                 let data = loading.dataRequest
                 let offset = max(data?.currentOffset ?? 0, data?.requestedOffset ?? 0)
                 let end = data.flatMap { $0.requestsAllDataToEndOfResource ? nil : $0.requestedOffset + Int64($0.requestedLength) }
-                return (offset, end, self.contentLength, self.contentType)
+                return (offset, end, self.contentLength, self.contentType, data == nil)
             }
-            let remaining = state.end.map { max(1, $0 - state.offset) } ?? Self.chunkSize
+            // AVFoundation can request only length/type information, without
+            // asking for audio bytes. A 64-byte range supplies Content-Range
+            // and the container signature; fetching 64 KiB here needlessly
+            // delays startup on a throttled carrier/proxy connection.
+            let remaining = state.informationOnly ? 64 : state.end.map { max(1, $0 - state.offset) } ?? Self.chunkSize
             let count = min(remaining, Self.chunkSize, state.total.map { $0 - state.offset } ?? Self.chunkSize)
             if count <= 0 {
                 await onQueue { if !loading.isCancelled { loading.finishLoading() } }

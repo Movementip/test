@@ -696,7 +696,10 @@ private struct LaneUITestRoot: View {
             guard session.playbackBufferedDuration > 0, session.playbackDuration > 0 else {
                 throw LaneAPIError.decoding("Player did not publish loaded timeline ranges")
             }
-            guard Date().timeIntervalSince(started) < 8 else { throw LaneAPIError.decoding("Loopback audio startup exceeded 8 seconds") }
+            let startup = Date().timeIntervalSince(started)
+            guard startup < 8 else {
+                throw LaneAPIError.decoding("Loopback audio startup exceeded 8 seconds: \(startup), \(session.debugAudioState), position=\(session.playbackPosition), buffer=\(session.playbackBufferedDuration), completeFile=\(LaneUITestAudioServer.shared.finishedFullResponse)")
+            }
             print("LANE_STREAM_START transport=\(direct ? "range" : "native") seconds=\(Date().timeIntervalSince(started)); completeFile=false")
             session.pause()
             session.downloadTrack(LaneUITestFixtures.track)
