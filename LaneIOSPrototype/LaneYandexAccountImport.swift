@@ -29,7 +29,11 @@ struct LaneYandexAccountImportScreen: View {
                 Button { browser.reload() } label: { Image(systemName: "arrow.clockwise") }
                     .accessibilityLabel("Reload Yandex page")
             }.font(.subheadline).padding(.horizontal, 16).padding(.bottom, 10)
-            if browser.loading { ProgressView().frame(maxWidth: .infinity).padding(4) }
+            if browser.loading {
+                ProgressView().frame(maxWidth: .infinity).padding(4)
+                    .accessibilityLabel("Yandex page loading")
+                    .accessibilityIdentifier("yandex.loading")
+            }
             if let error = browser.error {
                 Text(error).font(.caption).foregroundStyle(.pink).padding(12)
                     .accessibilityIdentifier("yandex.error")

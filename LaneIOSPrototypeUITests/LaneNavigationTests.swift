@@ -348,19 +348,21 @@ final class LaneNavigationTests: XCTestCase {
         login.tap()
         let continueButton = app.buttons["yandex.continue"]
         XCTAssertTrue(continueButton.waitForExistence(timeout: 10))
+        waitForYandexPageToFinish()
         let signIn = app.webViews.buttons["Sign in fixture"]
         XCTAssertTrue(signIn.waitForExistence(timeout: 10))
         XCTAssertFalse(continueButton.isEnabled, "A foreign anchor/subframe must not identify the account playlist")
-        signIn.tap()
+        tapWebElementAtItsFrameCenter(signIn)
         XCTAssertTrue(app.webViews.buttons["Signed in fixture"].waitForExistence(timeout: 5), "The actual page must receive the sign-in tap before testing discovery")
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: continueButton)], timeout: 10), .completed)
         screenshot("iPhone13-yandex-account-automatic-favorite-discovery")
         app.buttons["yandex.close"].tap()
         XCTAssertTrue(login.waitForExistence(timeout: 5), "Yandex sign-in must always have a working exit")
         login.tap()
+        waitForYandexPageToFinish()
         XCTAssertTrue(signIn.waitForExistence(timeout: 10))
         XCTAssertFalse(continueButton.isEnabled, "A closed browser must not retain the previous account selection")
-        signIn.tap()
+        tapWebElementAtItsFrameCenter(signIn)
         XCTAssertTrue(app.webViews.buttons["Signed in fixture"].waitForExistence(timeout: 5))
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: continueButton)], timeout: 10), .completed)
         continueButton.tap()
@@ -368,6 +370,25 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Account favorites"].exists)
         XCTAssertFalse(app.buttons["yandex.close"].exists)
         screenshot("iPhone13-yandex-account-preview-without-manual-link")
+    }
+
+    private func waitForYandexPageToFinish() {
+        let loading = app.descendants(matching: .any).matching(identifier: "yandex.loading").firstMatch
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: loading)], timeout: 10), .completed)
+    }
+
+    private func tapWebElementAtItsFrameCenter(_ element: XCUIElement) {
+        // On iOS 18.5 XCTest's remote WebKit hit-point occasionally targets
+        // the heading instead of this button (recorded x57/y185 vs its actual
+        // x56/y265/w175/h41). Use the current AX rectangle, not guessed pixels
+        // or JS invocation; the page must still acknowledge a real touch.
+        let window = app.windows.firstMatch
+        let frame = element.frame
+        XCTAssertFalse(frame.isEmpty)
+        XCTAssertTrue(window.frame.contains(frame), "The web button must be fully on screen")
+        window.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+            dx: frame.midX - window.frame.minX, dy: frame.midY - window.frame.minY)).tap()
     }
 
     func testLikedRowReplacesAnotherPlaylistQueueForNextAndPrevious() {
