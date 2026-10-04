@@ -693,11 +693,14 @@ private struct LaneUITestRoot: View {
                   !LaneUITestAudioServer.shared.finishedFullResponse else {
                 throw LaneAPIError.decoding("Playback waited for the whole slow HTTP audio file")
             }
+            if direct, !session.debugPlaybackUsesRangeLoader {
+                throw LaneAPIError.decoding("Range playback silently fell back to a complete local file: \(session.debugAudioState)")
+            }
             guard session.playbackBufferedDuration > 0, session.playbackDuration > 0 else {
                 throw LaneAPIError.decoding("Player did not publish loaded timeline ranges: position=\(session.playbackPosition), buffer=\(session.playbackBufferedDuration), duration=\(session.playbackDuration), \(session.debugAudioState)")
             }
             guard let nativeProgressAt = session.debugFirstPlaybackProgressAt else {
-                throw LaneAPIError.decoding("Native player did not report the first 0.1 seconds of actual media progress")
+                throw LaneAPIError.decoding("Native player did not report the first 0.1 seconds of actual media progress: \(session.debugAudioState), position=\(session.playbackPosition), buffer=\(session.playbackBufferedDuration)")
             }
             let startup = nativeProgressAt - started
             guard startup < 8 else {

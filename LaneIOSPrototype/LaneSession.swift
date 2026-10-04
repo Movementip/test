@@ -663,8 +663,9 @@ final class LaneSession: ObservableObject {
     #if DEBUG
     var debugHasPlaybackBackgroundTask: Bool { playbackBackgroundLease?.isActive == true }
     var debugAudioState: String {
-        "intent=\(playbackShouldPlay), interrupted=\(audioInterrupted), servicesLost=\(audioServicesLost), nativeState=\(player?.timeControlStatus.rawValue ?? -1), rate=\(player?.rate ?? -1), itemState=\(player?.currentItem?.status.rawValue ?? -1), duration=\(player?.currentItem?.duration.seconds ?? -1)"
+        "intent=\(playbackShouldPlay), interrupted=\(audioInterrupted), servicesLost=\(audioServicesLost), nativeState=\(player?.timeControlStatus.rawValue ?? -1), rate=\(player?.rate ?? -1), itemState=\(player?.currentItem?.status.rawValue ?? -1), duration=\(player?.currentItem?.duration.seconds ?? -1), rangeLoader=\(progressiveAudioLoader != nil), localFallback=\(playerRetriedWithLocalDownload)"
     }
+    var debugPlaybackUsesRangeLoader: Bool { progressiveAudioLoader != nil }
     func debugExpirePlaybackLease() {
         playbackBackgroundLease?.expireForTesting { [weak self] generation in
             self?.playbackTransitionExpired(generation: generation)
@@ -4543,12 +4544,15 @@ final class LaneSession: ObservableObject {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--lane-ui-test") {
             let probe = debugStartupProbe
-            debugStartupObserver = newPlayer.addBoundaryTimeObserver(
-                forTimes: [NSValue(time: CMTime(seconds: 0.1, preferredTimescale: 600))],
+            // A one-shot boundary callback can be missed/coalesced while an
+            // item becomes ready. Observe actual progressing media time on an
+            // independent serial queue instead, not a SwiftUI polling timer.
+            debugStartupObserver = newPlayer.addPeriodicTimeObserver(
+                forInterval: CMTime(seconds: 0.1, preferredTimescale: 600),
                 queue: LaneAudioStartProbe.queue
-            ) { [weak newPlayer] in
+            ) { [weak newPlayer] time in
                 guard let newPlayer, newPlayer.currentItem?.status == .readyToPlay,
-                      newPlayer.rate > 0, newPlayer.currentTime().seconds >= 0.05 else { return }
+                      newPlayer.rate > 0, time.seconds.isFinite, time.seconds >= 0.1 else { return }
                 probe.record(requestID)
             }
         }
