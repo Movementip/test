@@ -742,6 +742,31 @@ struct LanePricing: Decodable {
     let monthly: LanePricePlan
     let lifetime: LanePricePlan
     let yearly: LanePricePlan
+
+    // APK PremiumViewModel$onSubscribeClicked$1 opens the official Lane
+    // checkout with the signed-in Lane token, not a Play Billing purchase.
+    // This sensitive URL is transient: never log, share or persist it.
+    func checkoutURL(plan: LanePremiumPlan, token: String) throws -> URL {
+        guard !token.isEmpty, token.count <= 8192,
+              !token.unicodeScalars.contains(where: CharacterSet.whitespacesAndNewlines.contains),
+              !token.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              let encoded = token.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")) else {
+            throw LaneAPIError.decoding("Sign in to open the Lane checkout.")
+        }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = countryCode == "RU" ? "rupay.sk-lane.com" : "pay.sk-lane.com"
+        components.percentEncodedPath = "/\(plan.rawValue)/\(encoded)"
+        guard let url = components.url else { throw LaneAPIError.decoding("Lane checkout could not be opened.") }
+        return url
+    }
+}
+enum LanePremiumPlan: String, CaseIterable, Identifiable {
+    case monthly, yearly, lifetime
+    var id: String { rawValue }
+    var label: String {
+        switch self { case .monthly: return "Monthly"; case .yearly: return "Yearly"; case .lifetime: return "Lifetime" }
+    }
 }
 struct LaneSubscriptionCancellation: Decodable { let status: String }
 

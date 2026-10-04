@@ -968,6 +968,19 @@ struct LaneContractTestRunner {
         precondition(!events.last!.refreshesFriends && !events.last!.refreshesAccount)
         let prices = try await api.pricing(token: "test-token")
         precondition(prices.monthly.amount == 199 && prices.lifetime.premiumCurrency == "RUB")
+        for plan in LanePremiumPlan.allCases {
+            let url = try prices.checkoutURL(plan: plan, token: "fixture/?#percent%")
+            precondition(url.scheme == "https" && url.host == "rupay.sk-lane.com")
+            precondition(URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath == "/\(plan.rawValue)/fixture%2F%3F%23percent%25")
+            precondition(url.query == nil && url.fragment == nil)
+        }
+        let international = LanePricing(countryCode: "US", monthly: prices.monthly, lifetime: prices.lifetime, yearly: prices.yearly)
+        let internationalCheckout = try international.checkoutURL(plan: .yearly, token: "fixture")
+        precondition(internationalCheckout.host == "pay.sk-lane.com")
+        for invalid in ["", "fixture\nheader", "fixture token"] {
+            do { _ = try prices.checkoutURL(plan: .monthly, token: invalid); preconditionFailure("Unsafe checkout identity accepted") }
+            catch { precondition(!error.localizedDescription.contains(invalid) || invalid.isEmpty) }
+        }
         let cancellation = try await api.cancelSubscription(token: "test-token")
         precondition(cancellation.status == "cancelled")
         print("0.93 social/payment contracts passed: exact presence body, friend DTO defaults, known/unknown inert events, Lane pricing and mock-only cancellation.")

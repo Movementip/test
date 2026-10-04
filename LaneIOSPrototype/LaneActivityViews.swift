@@ -1,4 +1,5 @@
 import SwiftUI
+import SafariServices
 
 struct LaneFriendActivityScreen: View {
     @EnvironmentObject private var session: LaneSession
@@ -67,12 +68,17 @@ struct LaneFriendActivityScreen: View {
 
 struct LanePremiumScreen: View {
     @EnvironmentObject private var session: LaneSession
+    @Environment(\.scenePhase) private var phase
     @State private var pricing: LanePricing?
     @State private var loading = false
     @State private var cancelling = false
     @State private var confirmCancellation = false
     @State private var cancelled = false
     @State private var error: String?
+    @State private var selectedPlan: LanePremiumPlan = .yearly
+    @State private var confirmCheckout = false
+    @State private var checkoutIdentity = ""
+    @State private var checkout: LanePremiumCheckout?
     var body: some View {
         List {
             Section {
@@ -89,9 +95,15 @@ struct LanePremiumScreen: View {
             if loading { ProgressView("Loading prices…") }
             if let pricing {
                 Section("Plans · \(pricing.countryCode)") {
-                    plan("Monthly", pricing.monthly)
-                    plan("Yearly", pricing.yearly)
-                    plan("Lifetime", pricing.lifetime)
+                    plan(.monthly, pricing.monthly)
+                    plan(.yearly, pricing.yearly)
+                    plan(.lifetime, pricing.lifetime)
+                    Button("Continue to Lane checkout") {
+                        checkoutIdentity = session.token
+                        confirmCheckout = true
+                    }.disabled(session.isGuest || cancelling || loading).accessibilityIdentifier("premium.checkout")
+                    Text("Payment opens on Lane's official website, using your Lane sign-in. No purchase is made until you confirm it there.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             if let error {
@@ -107,27 +119,67 @@ struct LanePremiumScreen: View {
                 }
                 if cancelled { Text("Cancellation confirmed by Lane").accessibilityIdentifier("premium.cancelled") }
                 Button("Refresh subscription") { Task { await load() }; session.refreshAccount() }.disabled(cancelling)
-                Text("Prices come from Lane. This iOS build does not take payments; your existing Lane subscription works after sign-in.")
+                Text("Closing checkout does not confirm payment. Premium is active only after Lane updates your account.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Lane Premium").navigationBarTitleDisplayMode(.inline)
         .preferredColorScheme(.dark).laneIOSBackSwipe()
         .task { await load(); session.refreshAccount() }
-        .confirmationDialog("Cancel Lane auto-renewal?", isPresented: $confirmCancellation, titleVisibility: .visible) {
-            Button("Cancel auto-renewal", role: .destructive) {
-                cancelling = true; error = nil
-                Task {
-                    defer { cancelling = false }
-                    do { try await session.cancelSubscriptionConfirmed(); cancelled = true }
-                    catch { self.error = error.localizedDescription }
-                }
-            }.accessibilityIdentifier("premium.confirmCancellation")
-        } message: { Text("Your current paid period remains active. No purchase will be made.") }
+        .onChange(of: session.token) { _ in
+            checkout = nil; confirmCheckout = false; checkoutIdentity = ""; pricing = nil
+            error = "Lane sign-in changed. Refresh the plans before continuing."
+        }
+        .onChange(of: phase) { value in
+            if value == .active { session.refreshAccount() }
+        }
+        .sheet(item: $checkout, onDismiss: {
+            checkoutIdentity = ""
+            session.refreshAccount()
+        }) { item in LanePremiumBrowser(url: item.url) }
+        .confirmationDialog(confirmCheckout ? "Open Lane's \(selectedPlan.label.lowercased()) checkout?" : "Cancel Lane auto-renewal?",
+            isPresented: Binding(get: { confirmCheckout || confirmCancellation }, set: { if !$0 { confirmCheckout = false; confirmCancellation = false } }), titleVisibility: .visible) {
+            if confirmCheckout {
+                Button("Continue to checkout") { openCheckout() }.accessibilityIdentifier("premium.confirmCheckout")
+                Button("Cancel", role: .cancel) { checkoutIdentity = "" }
+            } else {
+                Button("Cancel auto-renewal", role: .destructive) {
+                    cancelling = true; error = nil
+                    Task {
+                        defer { cancelling = false }
+                        do { try await session.cancelSubscriptionConfirmed(); cancelled = true }
+                        catch { self.error = error.localizedDescription }
+                    }
+                }.accessibilityIdentifier("premium.confirmCancellation")
+            }
+        } message: {
+            Text(confirmCheckout ? "Lane's checkout receives your Lane sign-in. Confirm the price and purchase on that page; you can close it without paying." : "Your current paid period remains active. No purchase will be made.")
+        }
     }
-    private func plan(_ label: String, _ value: LanePricePlan) -> some View {
-        HStack { VStack(alignment: .leading) { Text(label); Text(value.periodName).font(.caption).foregroundStyle(.secondary) }; Spacer(); Text(value.displayPrice) }
-            .accessibilityIdentifier("premium.plan.\(label)")
+    private func plan(_ plan: LanePremiumPlan, _ value: LanePricePlan) -> some View {
+        Button { selectedPlan = plan } label: {
+            HStack {
+                Image(systemName: selectedPlan == plan ? "checkmark.circle.fill" : "circle")
+                VStack(alignment: .leading) { Text(plan.label); Text(value.periodName).font(.caption).foregroundStyle(.secondary) }
+                Spacer(); Text(value.displayPrice)
+            }.contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityIdentifier("premium.plan.\(plan.label)")
+            .accessibilityAddTraits(selectedPlan == plan ? .isSelected : [])
+    }
+    private func openCheckout() {
+        guard let pricing, session.token == checkoutIdentity else { checkoutIdentity = ""; return }
+        defer { checkoutIdentity = "" }
+        do {
+            let url = try pricing.checkoutURL(plan: selectedPlan, token: session.token)
+            #if DEBUG
+            // Automation must never send even a fixture token to a real
+            // payment page, nor accidentally create a real checkout session.
+            if ProcessInfo.processInfo.arguments.contains("--lane-ui-test") {
+                throw LaneAPIError.decoding("Automated tests do not open payment pages.")
+            }
+            #endif
+            checkout = LanePremiumCheckout(url: url)
+        } catch { self.error = error.localizedDescription }
     }
     private func load() async {
         guard !loading else { return }
@@ -135,5 +187,23 @@ struct LanePremiumScreen: View {
         defer { loading = false }
         do { pricing = try await session.fetchPricing() }
         catch is CancellationError {} catch { self.error = error.localizedDescription }
+    }
+}
+
+private struct LanePremiumCheckout: Identifiable { let id = UUID(); let url: URL }
+private struct LanePremiumBrowser: UIViewControllerRepresentable {
+    @Environment(\.dismiss) private var dismiss
+    let url: URL
+    func makeCoordinator() -> Coordinator { Coordinator { dismiss() } }
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        let controller = SFSafariViewController(url: url)
+        controller.delegate = context.coordinator
+        return controller
+    }
+    func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
+    final class Coordinator: NSObject, SFSafariViewControllerDelegate {
+        private let finish: () -> Void
+        init(finish: @escaping () -> Void) { self.finish = finish }
+        func safariViewControllerDidFinish(_ controller: SFSafariViewController) { finish() }
     }
 }

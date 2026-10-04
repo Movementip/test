@@ -517,6 +517,16 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["premium.error"].waitForExistence(timeout: 10))
         app.buttons["premium.retry"].tap()
         XCTAssertTrue(app.staticTexts["1 month"].waitForExistence(timeout: 10))
+        let monthly = app.buttons["premium.plan.Monthly"]
+        monthly.tap(); XCTAssertTrue(monthly.isSelected)
+        let checkout = app.buttons["premium.checkout"]
+        scrollTo(checkout); checkout.tap()
+        XCTAssertTrue(app.buttons["premium.confirmCheckout"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        XCTAssertFalse(app.buttons["premium.confirmCheckout"].exists)
+        checkout.tap(); app.buttons["premium.confirmCheckout"].tap()
+        XCTAssertTrue(app.staticTexts["premium.error"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["premium.error"].label.contains("Automated tests do not open payment pages"))
         let cancel = app.buttons["premium.cancel"]
         scrollTo(cancel); cancel.tap()
         XCTAssertTrue(app.buttons["Cancel"].waitForExistence(timeout: 5))
