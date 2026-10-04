@@ -4203,6 +4203,24 @@ final class LaneSession: ObservableObject {
         } else if playbackShouldPlay, !audioInterrupted { player.play() }
     }
 
+    private func updatePlaybackClock(_ time: CMTime, player: AVPlayer, requestID: UUID) {
+        guard self.player === player, playbackRequestID == requestID,
+              pendingStartPosition == nil, !seekingInitialPosition, time.seconds.isFinite else { return }
+        let seconds = max(0, time.seconds)
+        // A queued KVO pause can disagree with a resumed player's clock. Do
+        // not infer playback from its requested rate alone: require actual
+        // forward media-time progress, plus current user/interruption intent.
+        if playbackShouldPlay, !audioInterrupted, player.rate > 0,
+           seconds > playbackPosition + 0.05, !isPlaying {
+            recordAudioEvent("clock-playing")
+            isPlaying = true; isBuffering = false
+            endPlaybackTransition(requestID: requestID)
+            updatePlaybackState(true)
+        }
+        playbackPosition = seconds
+        if seconds >= 0.25, isPlaying { prepareNextStream(requestID: requestID) }
+    }
+
     private func mediaHeadProbe(_ url: URL) async -> Int? {
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
@@ -4623,11 +4641,7 @@ final class LaneSession: ObservableObject {
                       let newPlayer, self.player === newPlayer,
                       self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
-                let seconds = time.seconds
-                if seconds.isFinite, self.pendingStartPosition == nil, !self.seekingInitialPosition {
-                    self.playbackPosition = max(0, seconds)
-                    if seconds >= 0.25, self.isPlaying { self.prepareNextStream(requestID: requestID) }
-                }
+                self.updatePlaybackClock(time, player: newPlayer, requestID: requestID)
 
                 if let duration = self.player?.currentItem?.duration.seconds,
                    duration.isFinite,
@@ -4861,10 +4875,7 @@ final class LaneSession: ObservableObject {
                     Task { @MainActor in
                         guard let self, let localPlayer, self.player === localPlayer,
                               self.playbackRequestID == requestID, self.currentTrack?.id == track.id else { return }
-                        if time.seconds.isFinite, self.pendingStartPosition == nil, !self.seekingInitialPosition {
-                            self.playbackPosition = max(0, time.seconds)
-                            if time.seconds >= 0.25, self.isPlaying { self.prepareNextStream(requestID: requestID) }
-                        }
+                        self.updatePlaybackClock(time, player: localPlayer, requestID: requestID)
                     }
                 }
 
@@ -5030,10 +5041,7 @@ final class LaneSession: ObservableObject {
             Task { @MainActor in
                 guard let self, let localPlayer, self.player === localPlayer, self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
-                if time.seconds.isFinite, self.pendingStartPosition == nil, !self.seekingInitialPosition {
-                    self.playbackPosition = max(0, time.seconds)
-                    if time.seconds >= 0.25, self.isPlaying { self.prepareNextStream(requestID: requestID) }
-                }
+                self.updatePlaybackClock(time, player: localPlayer, requestID: requestID)
             }
         }
 

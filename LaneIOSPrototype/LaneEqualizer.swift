@@ -184,7 +184,14 @@ struct LaneEqualizerControls: View {
                     if label != LaneEqualizerPresets.labels.last { Spacer(minLength: 0) }
                 }
             }.padding(.top, -12)
-            DisclosureGroup("Fine adjustment", isExpanded: $fineAdjustment) {
+            Button { withAnimation { fineAdjustment.toggle() } } label: {
+                HStack {
+                    Text("Fine adjustment"); Spacer()
+                    Image(systemName: fineAdjustment ? "chevron.up" : "chevron.down")
+                }.contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityIdentifier("equalizer.fineAdjustment")
+                .accessibilityValue(fineAdjustment ? "Expanded" : "Collapsed")
+            if fineAdjustment {
                 ForEach(0..<6, id: \.self) { band in
                     VStack(alignment: .leading) {
                         HStack {
@@ -195,7 +202,7 @@ struct LaneEqualizerControls: View {
                             .disabled(!session.equalizerEnabled).accessibilityIdentifier("equalizer.band.\(band)")
                     }.padding(.top, 10)
                 }
-            }.accessibilityIdentifier("equalizer.fineAdjustment")
+            }
             Button("Reset equalizer") { session.resetEqualizer() }.accessibilityIdentifier("equalizer.reset")
             Text(session.equalizerStatus).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("equalizer.status")
             Text("Six bands, neutral at 0 dB. Positive gain reserves headroom to avoid clipping. Some adaptive streams do not support iOS audio filters; they continue playing without the equalizer.").font(.caption).foregroundStyle(.secondary)
