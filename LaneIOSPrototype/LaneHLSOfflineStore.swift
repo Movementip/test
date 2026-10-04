@@ -33,6 +33,7 @@ enum LaneHLSTestFixture {
     private var records: [String: Record] = [:]
     private var jobs: [Int: Job] = [:]
     private var locations: [Int: URL] = [:]
+    private var pendingLocations: [String: Data] = [:]
     private var inFlight: [String: Task<URL, Error>] = [:]
     private var pendingVerifications = 0
     private var eventsFinished = false
@@ -57,6 +58,7 @@ enum LaneHLSTestFixture {
     private override init() {
         super.init()
         if let data = UserDefaults.standard.data(forKey: "lane.hls.records"), let value = try? JSONDecoder().decode([String: Record].self, from: data) { records = value }
+        if let data = UserDefaults.standard.data(forKey: "lane.hls.pendingLocations"), let value = try? JSONDecoder().decode([String: Data].self, from: data) { pendingLocations = value }
     }
 
     // UIKit calls this after launch, not while SwiftUI's App is being built.
@@ -123,28 +125,47 @@ enum LaneHLSTestFixture {
         eventsFinished = false; backgroundCompletion = completion; _ = downloads
     }
     func urlSession(_ session: URLSession, assetDownloadTask: AVAssetDownloadTask, didFinishDownloadingTo location: URL) {
-        locations[assetDownloadTask.taskIdentifier] = location
+        remember(location, for: assetDownloadTask)
     }
     func urlSession(_ session: URLSession, assetDownloadTask: AVAssetDownloadTask, willDownloadTo location: URL) {
         trace("native-destination")
         // A destination is not proof of completion; validation is done below.
-        locations[assetDownloadTask.taskIdentifier] = location
+        remember(location, for: assetDownloadTask)
+    }
+    private func remember(_ location: URL, for task: AVAssetDownloadTask) {
+        locations[task.taskIdentifier] = location
+        guard let description = task.taskDescription?.data(using: .utf8).flatMap({ try? JSONDecoder().decode(Description.self, from: $0) }),
+              let bookmark = try? location.bookmarkData() else { return }
+        var stale = false
+        guard let restored = try? URL(resolvingBookmarkData: bookmark, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &stale),
+              ownsPackageLocation(restored) else { return }
+        pendingLocations[description.id.uuidString] = bookmark
+        savePendingLocations()
+    }
+    private func savePendingLocations() {
+        if let data = try? JSONEncoder().encode(pendingLocations) { UserDefaults.standard.set(data, forKey: "lane.hls.pendingLocations") }
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         trace(error.map { "native-completion \(($0 as NSError).domain) \(($0 as NSError).code)" } ?? "native-completion success")
         let job = jobs.removeValue(forKey: task.taskIdentifier)
-        // A restored task may have delivered willDownloadTo to the previous
-        // process. Its native destination remains available after reconnect.
-        let location = locations.removeValue(forKey: task.taskIdentifier) ?? (task as? AVAssetDownloadTask)?.destinationURL
+        var location = locations.removeValue(forKey: task.taskIdentifier)
         let restored = task.taskDescription.flatMap { $0.data(using: .utf8) }.flatMap { try? JSONDecoder().decode(Description.self, from: $0) }
         guard let description = job?.description ?? restored else { return }
-        if let error { job?.continuation.resume(throwing: error); return }
+        // willDownloadTo may have run in the previous process. A pending
+        // bookmark is not a completed download and never appears in tracks.
+        if location == nil, let bookmark = pendingLocations[description.id.uuidString] {
+            var stale = false
+            location = try? URL(resolvingBookmarkData: bookmark, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &stale)
+        }
+        func forgetPendingLocation() { pendingLocations[description.id.uuidString] = nil; savePendingLocations() }
+        if let error { forgetPendingLocation(); job?.continuation.resume(throwing: error); return }
         guard let location else {
+            forgetPendingLocation()
             job?.continuation.resume(throwing: LaneAPIError.decoding("iOS did not return a complete offline package.")); return
         }
         pendingVerifications += 1
         Task {
-            defer { pendingVerifications -= 1; completeBackgroundEventsIfReady() }
+            defer { forgetPendingLocation(); pendingVerifications -= 1; completeBackgroundEventsIfReady() }
             do {
                 // Native file URLs may carry /.nofollow or sandbox identity.
                 // Preserve Apple's bookmark instead of stripping/moving them.
