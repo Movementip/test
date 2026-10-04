@@ -4239,7 +4239,26 @@ final class LaneSession: ObservableObject {
             updatePlaybackState(true)
         }
         playbackPosition = seconds
+        if let item = player.currentItem { refreshPlaybackTimeline(item) }
         if seconds >= 0.25, isPlaying { prepareNextStream(requestID: requestID) }
+    }
+
+    /// Refresh from the current item on both KVO and the media clock. Range
+    /// notifications can be coalesced before the first clock callback; never
+    /// leave the displayed buffer at its initial zero while audio advances.
+    private func refreshPlaybackTimeline(_ item: AVPlayerItem) {
+        guard player?.currentItem === item else { return }
+        let duration = item.duration.seconds
+        if duration.isFinite, duration > 0 { playbackDuration = duration }
+        let bufferedEnd = item.loadedTimeRanges
+            .map(\.timeRangeValue)
+            .map { CMTimeGetSeconds(CMTimeRangeGetEnd($0)) }
+            .filter { $0.isFinite && $0 >= 0 }
+            .max() ?? 0
+        let upperBound = playbackDuration > 0 ? min(bufferedEnd, playbackDuration) : bufferedEnd
+        // Audio already heard is necessarily loaded; this does not invent a
+        // forward buffer or derive it from a requested playback rate.
+        playbackBufferedDuration = max(playbackPosition, upperBound)
     }
 
     private func mediaHeadProbe(_ url: URL) async -> Int? {
@@ -4405,15 +4424,7 @@ final class LaneSession: ObservableObject {
                       self.currentTrack?.id == track.id,
                       self.player?.currentItem === item else { return }
 
-                let bufferedEnd = item.loadedTimeRanges
-                    .map(\.timeRangeValue)
-                    .map { CMTimeGetSeconds(CMTimeRangeGetEnd($0)) }
-                    .filter { $0.isFinite && $0 >= 0 }
-                    .max() ?? 0
-                let upperBound = self.playbackDuration > 0
-                    ? min(bufferedEnd, self.playbackDuration)
-                    : bufferedEnd
-                self.playbackBufferedDuration = max(self.playbackPosition, upperBound)
+                self.refreshPlaybackTimeline(item)
             }
         }
     }

@@ -95,8 +95,8 @@ private final class LaneYandexAccountBrowser: NSObject, ObservableObject, WKNavi
         #endif
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
-        configuration.userContentController.add(LaneWeakYandexScriptHandler(self), name: messageName)
-        configuration.userContentController.addUserScript(WKUserScript(source: collectionScript,
+        webView.configuration.userContentController.add(LaneWeakYandexScriptHandler(self), name: messageName)
+        webView.configuration.userContentController.addUserScript(WKUserScript(source: collectionScript,
             injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -113,7 +113,8 @@ private final class LaneYandexAccountBrowser: NSObject, ObservableObject, WKNavi
         let allowed = fixture ? "location.protocol === 'http:' && location.hostname === '127.0.0.1' && location.pathname === '/yandex-account-fixture'" : "location.protocol === 'https:' && location.hostname === 'music.yandex.ru' && (/^\\/collection(?:\\/|$)/.test(location.pathname) || /^\\/playlists\\/lk[.]/.test(location.pathname))"
         return """
         (() => {
-          if (!(\(allowed)) || window.__laneYandexObserver) return;
+          if (!(\(allowed))) return;
+          if (window.__laneYandexFindPlaylist) { window.__laneYandexFindPlaylist(); return; }
           let last = '';
           function findPlaylist() {
             for (const anchor of document.querySelectorAll('a[href*="/playlists/lk."]')) {
@@ -129,6 +130,7 @@ private final class LaneYandexAccountBrowser: NSObject, ObservableObject, WKNavi
           const observer = new MutationObserver(findPlaylist);
           observer.observe(document.documentElement, {childList:true, subtree:true, attributes:true, attributeFilter:['href']});
           window.__laneYandexObserver = observer;
+          window.__laneYandexFindPlaylist = () => { last = ''; findPlaylist(); };
           findPlaylist();
         })();
         """
@@ -214,8 +216,13 @@ private final class LaneYandexAccountBrowser: NSObject, ObservableObject, WKNavi
         visibleHost = view.url?.host ?? "passport.yandex.ru"
     }
     func webView(_ view: WKWebView, didFinish navigation: WKNavigation!) {
+        guard !closed else { return }
         loading = false; canGoBack = view.canGoBack
         visibleHost = view.url?.host ?? "passport.yandex.ru"
+        // An atDocumentEnd message can precede the committed URL becoming
+        // visible to native validation. Rescan once after navigation finishes;
+        // the same top-frame/origin checks still apply to the returned message.
+        view.evaluateJavaScript(collectionScript, completionHandler: nil)
     }
     func webView(_ view: WKWebView, didFail navigation: WKNavigation!, withError failure: Error) { failed(failure) }
     func webView(_ view: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError failure: Error) { failed(failure) }
@@ -231,6 +238,10 @@ private final class LaneYandexAccountBrowser: NSObject, ObservableObject, WKNavi
     func webView(_ view: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { decisionHandler(.cancel); return }
         var allowed = url.scheme == "https" || url.absoluteString == "about:blank"
+        // Inline subframes are legitimate WebKit documents, not external
+        // navigation. They still cannot select a playlist: native messages
+        // require the approved origin AND a top-level frame.
+        if url.absoluteString == "about:srcdoc", action.targetFrame?.isMainFrame == false { allowed = true }
         #if DEBUG
         if fixture, url == LaneUITestAudioServer.shared.yandexFixtureURL { allowed = true }
         #endif
@@ -261,7 +272,7 @@ enum LaneYandexFixturePage {
         <h2>Yandex sign-in fixture</h2>
         <a href="https://music.yandex.ru.evil.test/playlists/lk.spoof">Untrusted anchor</a>
         <iframe style="height:1px" srcdoc="&lt;script&gt;window.webkit.messageHandlers.laneYandexPlaylist.postMessage('https://music.yandex.ru/playlists/lk.iframe-spoof');&lt;/script&gt;"></iframe>
-        <button style="font-size:22px;margin:24px" onclick="this.disabled=true;setTimeout(()=>{let a=document.createElement('a');a.href='https://music.yandex.ru/playlists/lk.fixture-account?ref_id=tracking';a.textContent='My favorite tracks';document.body.append(a)},1500)">Sign in fixture</button>
+        <button style="font-size:22px;margin:24px" onclick="this.textContent='Signed in fixture';this.disabled=true;setTimeout(()=>{let a=document.createElement('a');a.href='https://music.yandex.ru/playlists/lk.fixture-account?ref_id=tracking';a.textContent='My favorite tracks';document.body.append(a)},1500)">Sign in fixture</button>
         </body></html>
         """
 }

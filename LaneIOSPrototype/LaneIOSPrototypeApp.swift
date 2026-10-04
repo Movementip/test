@@ -694,7 +694,7 @@ private struct LaneUITestRoot: View {
                 throw LaneAPIError.decoding("Playback waited for the whole slow HTTP audio file")
             }
             guard session.playbackBufferedDuration > 0, session.playbackDuration > 0 else {
-                throw LaneAPIError.decoding("Player did not publish loaded timeline ranges")
+                throw LaneAPIError.decoding("Player did not publish loaded timeline ranges: position=\(session.playbackPosition), buffer=\(session.playbackBufferedDuration), duration=\(session.playbackDuration), \(session.debugAudioState)")
             }
             let startup = Date().timeIntervalSince(started)
             guard startup < 8 else {
