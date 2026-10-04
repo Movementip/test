@@ -4812,7 +4812,8 @@ final class LaneSession: ObservableObject {
 
                 playerItemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
                     Task { @MainActor in
-                        guard let self, self.playbackRequestID == requestID, self.currentTrack?.id == track.id else { return }
+                        guard let self, self.playbackRequestID == requestID, self.currentTrack?.id == track.id,
+                              self.player?.currentItem === item else { return }
                         switch item.status {
                         case .readyToPlay:
                             self.playerError = ""
@@ -4830,6 +4831,7 @@ final class LaneSession: ObservableObject {
 
                             self.isBuffering = false
                             self.isPlaying = false
+                            self.endPlaybackTransition(requestID: requestID)
                             self.playerError = "The track is temporarily unavailable."
                             self.output = "Playback error: \(detail)"
                         case .unknown:
@@ -4842,9 +4844,12 @@ final class LaneSession: ObservableObject {
 
                 playerTimeControlObserver = localPlayer.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
                     Task { @MainActor in
-                        guard let self, self.playbackRequestID == requestID, self.currentTrack?.id == track.id else { return }
+                        guard let self, self.playbackRequestID == requestID, self.currentTrack?.id == track.id,
+                              self.player === player else { return }
+                        if player.timeControlStatus == .playing, self.audioInterrupted { player.pause(); return }
                         self.isPlaying = player.timeControlStatus == .playing
                         self.isBuffering = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+                        if self.isPlaying { self.endPlaybackTransition(requestID: requestID) }
                         self.updatePlaybackState(self.isPlaying)
                     }
                 }
@@ -4852,11 +4857,13 @@ final class LaneSession: ObservableObject {
                 periodicTimeObserver = localPlayer.addPeriodicTimeObserver(
                     forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
                     queue: .main
-                ) { [weak self] time in
+                ) { [weak self, weak localPlayer] time in
                     Task { @MainActor in
-                        guard let self, self.playbackRequestID == requestID, self.currentTrack?.id == track.id else { return }
+                        guard let self, let localPlayer, self.player === localPlayer,
+                              self.playbackRequestID == requestID, self.currentTrack?.id == track.id else { return }
                         if time.seconds.isFinite, self.pendingStartPosition == nil, !self.seekingInitialPosition {
                             self.playbackPosition = max(0, time.seconds)
+                            if time.seconds >= 0.25, self.isPlaying { self.prepareNextStream(requestID: requestID) }
                         }
                     }
                 }
@@ -4967,7 +4974,8 @@ final class LaneSession: ObservableObject {
             Task { @MainActor in
                 guard let self,
                       self.playbackRequestID == requestID,
-                      self.currentTrack?.id == track.id else { return }
+                      self.currentTrack?.id == track.id,
+                      self.player?.currentItem === item else { return }
 
                 switch item.status {
                 case .readyToPlay:
@@ -5006,7 +5014,8 @@ final class LaneSession: ObservableObject {
         playerTimeControlObserver = localPlayer.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
             Task { @MainActor in
                 guard let self, self.playbackRequestID == requestID,
-                      self.currentTrack?.id == track.id else { return }
+                      self.currentTrack?.id == track.id, self.player === player else { return }
+                if player.timeControlStatus == .playing, self.audioInterrupted { player.pause(); return }
                 self.isPlaying = player.timeControlStatus == .playing
                 self.isBuffering = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
                 if self.isPlaying { self.endPlaybackTransition(requestID: requestID) }
@@ -5017,9 +5026,9 @@ final class LaneSession: ObservableObject {
         periodicTimeObserver = localPlayer.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
             queue: .main
-        ) { [weak self] time in
+        ) { [weak self, weak localPlayer] time in
             Task { @MainActor in
-                guard let self, self.playbackRequestID == requestID,
+                guard let self, let localPlayer, self.player === localPlayer, self.playbackRequestID == requestID,
                       self.currentTrack?.id == track.id else { return }
                 if time.seconds.isFinite, self.pendingStartPosition == nil, !self.seekingInitialPosition {
                     self.playbackPosition = max(0, time.seconds)
