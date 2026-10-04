@@ -258,36 +258,7 @@ struct LaneMemorialScreen: View {
                             .accessibilityIdentifier("memorial.retry")
                     }
                     if !composing || ownCandle != nil {
-                        Text("Candles from other users").font(.headline)
-                        let memories = (ownCandle.map { [$0] } ?? []) + candles.filter { $0.id != ownCandle?.id }
-                        let pageHeight = max(350, min(600, geometry.size.height - 150))
-                        if !memories.isEmpty {
-                            VStack(spacing: 8) {
-                                TabView(selection: $memoryPage) {
-                                    ForEach(Array(memories.enumerated()), id: \.element.id) { index, value in
-                                        candle(value).padding(.vertical, 14)
-                                            .frame(width: max(0, geometry.size.width - 36), height: pageHeight)
-                                            .rotationEffect(.degrees(-90))
-                                            .frame(width: pageHeight, height: max(0, geometry.size.width - 36))
-                                            .tag(index)
-                                    }
-                                }
-                                .tabViewStyle(.page(indexDisplayMode: .never))
-                                .frame(width: pageHeight, height: max(0, geometry.size.width - 36))
-                                .rotationEffect(.degrees(90))
-                                .frame(width: max(0, geometry.size.width - 36), height: pageHeight)
-                                .clipped()
-                                .accessibilityIdentifier("memorial.pager")
-                                HStack {
-                                    Button("Previous memory") { withAnimation { memoryPage = max(0, memoryPage - 1) } }.disabled(memoryPage == 0)
-                                    Spacer()
-                                    Text("\(memoryPage + 1) / \(memories.count)").font(.caption).accessibilityIdentifier("memorial.page")
-                                    Spacer()
-                                    Button("Next memory") { withAnimation { memoryPage = min(memories.count - 1, memoryPage + 1) } }.disabled(memoryPage >= memories.count - 1)
-                                }.font(.caption)
-                                Text("Swipe up or down to browse memories").font(.caption2).foregroundStyle(.secondary)
-                            }
-                        }
+                        memorialPages(width: geometry.size.width - 36, height: geometry.size.height)
                         if hasMore {
                             Button("Load more candles") { Task { await loadMore() } }
                                 .disabled(loading || saving).accessibilityIdentifier("memorial.more")
@@ -339,6 +310,42 @@ struct LaneMemorialScreen: View {
     private func actionLabel(_ title: String) -> some View {
         Text(title).font(.headline).foregroundStyle(.black).frame(maxWidth: .infinity).padding(15)
             .background(communityPink, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var displayedCandles: [LaneArtistCandle] {
+        guard let ownCandle else { return candles }
+        return [ownCandle] + candles.filter { $0.id != ownCandle.id }
+    }
+
+    @ViewBuilder private func memorialPages(width: CGFloat, height: CGFloat) -> some View {
+        Text("Candles from other users").font(.headline)
+        let memories = displayedCandles
+        let pageWidth: CGFloat = max(0, width)
+        let pageHeight: CGFloat = max(350, min(600, height - 150))
+        if !memories.isEmpty {
+            VStack(spacing: 8) {
+                TabView(selection: $memoryPage) {
+                    ForEach(Array(memories.enumerated()), id: \.element.id) { index, value in
+                        candle(value).padding(.vertical, 14)
+                            .frame(width: pageWidth, height: pageHeight)
+                            .rotationEffect(.degrees(-90))
+                            .frame(width: pageHeight, height: pageWidth).tag(index)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .frame(width: pageHeight, height: pageWidth).rotationEffect(.degrees(90))
+                .frame(width: pageWidth, height: pageHeight).clipped()
+                .accessibilityIdentifier("memorial.pager")
+                HStack {
+                    Button("Previous memory") { withAnimation { memoryPage = max(0, memoryPage - 1) } }.disabled(memoryPage == 0)
+                    Spacer()
+                    Text("\(memoryPage + 1) / \(memories.count)").font(.caption).accessibilityIdentifier("memorial.page")
+                    Spacer()
+                    Button("Next memory") { withAnimation { memoryPage = min(memories.count - 1, memoryPage + 1) } }.disabled(memoryPage >= memories.count - 1)
+                }.font(.caption)
+                Text("Swipe up or down to browse memories").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func candle(_ value: LaneArtistCandle) -> some View {
