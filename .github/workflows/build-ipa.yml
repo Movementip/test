@@ -8,6 +8,9 @@ on:
       - "LaneIOSPrototype.xcodeproj/**"
       - "LaneAssets/**"
       - "Tools/LaneContractTests.swift"
+      - "Tools/LaneEqualizerTests.swift"
+      - "Tools/LaneHLSOfflineTests.swift"
+      - "Tools/select_simulator_runtime.py"
       - "LaneIOSPrototypeUITests/**"
       - ".github/workflows/build-ipa.yml"
 

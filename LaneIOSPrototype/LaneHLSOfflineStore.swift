@@ -133,7 +133,9 @@ enum LaneHLSTestFixture {
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         trace(error.map { "native-completion \(($0 as NSError).domain) \(($0 as NSError).code)" } ?? "native-completion success")
         let job = jobs.removeValue(forKey: task.taskIdentifier)
-        let location = locations.removeValue(forKey: task.taskIdentifier)
+        // A restored task may have delivered willDownloadTo to the previous
+        // process. Its native destination remains available after reconnect.
+        let location = locations.removeValue(forKey: task.taskIdentifier) ?? (task as? AVAssetDownloadTask)?.destinationURL
         let restored = task.taskDescription.flatMap { $0.data(using: .utf8) }.flatMap { try? JSONDecoder().decode(Description.self, from: $0) }
         guard let description = job?.description ?? restored else { return }
         if let error { job?.continuation.resume(throwing: error); return }

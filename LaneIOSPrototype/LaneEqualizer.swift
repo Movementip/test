@@ -226,7 +226,7 @@ private struct LaneEqualizerCurve: View {
         GeometryReader { geometry in
             let width = max(1, geometry.size.width - 12), height = max(1, geometry.size.height - 12)
             let points = session.equalizerValues.enumerated().map { index, value in
-                CGPoint(x: 6 + width * Double(index) / 5, y: 6 + height * (1 - value))
+                CGPoint(x: 6 + width * CGFloat(index) / 5, y: 6 + height * CGFloat(1 - value))
             }
             ZStack {
                 Canvas { context, size in
@@ -255,7 +255,7 @@ private struct LaneEqualizerCurve: View {
                 .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
                     let band = draggedBand ?? min(5, max(0, Int(((gesture.startLocation.x - 6) / width * 5).rounded())))
                     draggedBand = band
-                    update(band, value: 1 - (gesture.location.y - 6) / height)
+                    update(band, value: 1 - Double((gesture.location.y - 6) / height))
                 }.onEnded { _ in draggedBand = nil })
                 .accessibilityElement(children: .contain).accessibilityIdentifier("equalizer.curve")
         }

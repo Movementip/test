@@ -14,6 +14,9 @@ jobs:
           RUNTIME=$(xcrun simctl list runtimes -j | python3 Tools/select_simulator_runtime.py "$LANE_SIMULATOR_SDK")
           echo "Testing Xcode SDK $LANE_SIMULATOR_SDK with runtime $RUNTIME"
           UDID=$(xcrun simctl create "Lane features iPhone 13" com.apple.CoreSimulator.SimDeviceType.iPhone-13 "$RUNTIME")
+          xcodebuild -project LaneIOSPrototype.xcodeproj -scheme LaneIOSPrototype -configuration Debug \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath /tmp/lane-feature-build \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="-" build-for-testing
           xcrun simctl boot "$UDID"
           xcrun simctl bootstatus "$UDID" -b
           mkdir -p Output
@@ -26,7 +29,7 @@ jobs:
             -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testImageCropCancelAndConfirmedJPEGUploadAndAnimatedGIF \
             -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testAudioInterruptionPauseMediaResetAndHeadphoneRemoval \
             -only-testing:LaneIOSPrototypeUITests/LaneNavigationTests/testEqualizerProcessesRealAudioAndRestoresNeutralWithoutStopping \
-            CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="-" test
+            CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="-" test-without-building
       - name: Native download diagnostics
         if: failure()
         run: |

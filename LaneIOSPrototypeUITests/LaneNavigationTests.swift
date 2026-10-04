@@ -190,7 +190,7 @@ final class LaneNavigationTests: XCTestCase {
         curve.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.5)).press(forDuration: 0.1,
             thenDragTo: curve.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.2)))
         XCTAssertTrue(app.buttons["equalizer.preset.Custom"].waitForExistence(timeout: 5))
-        app.buttons["equalizer.fineAdjustment"].tap()
+        app.buttons["Fine adjustment"].firstMatch.tap()
         XCTAssertTrue(app.sliders["equalizer.band.0"].exists)
         screenshot("iPhone13-six-band-equalizer")
     }
