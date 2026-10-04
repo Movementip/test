@@ -516,9 +516,8 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(cancel.exists, "Dismissing confirmation must not cancel the subscription")
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: cancel)], timeout: 10), .completed)
         cancel.tap()
-        let confirm = app.buttons.matching(identifier: "Cancel auto-renewal")
-        XCTAssertGreaterThan(confirm.count, 0)
-        let action = confirm.element(boundBy: confirm.count - 1)
+        let action = app.buttons["premium.confirmCancellation"]
+        XCTAssertTrue(action.waitForExistence(timeout: 5))
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: action)], timeout: 10), .completed)
         action.tap()
         XCTAssertTrue(app.staticTexts["premium.cancelled"].waitForExistence(timeout: 10))

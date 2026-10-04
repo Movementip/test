@@ -122,7 +122,7 @@ struct LanePremiumScreen: View {
                     do { try await session.cancelSubscriptionConfirmed(); cancelled = true }
                     catch { self.error = error.localizedDescription }
                 }
-            }
+            }.accessibilityIdentifier("premium.confirmCancellation")
         } message: { Text("Your current paid period remains active. No purchase will be made.") }
     }
     private func plan(_ label: String, _ value: LanePricePlan) -> some View {

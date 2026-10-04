@@ -196,7 +196,7 @@
 | GIF/редактор изображений | Добавлены ограниченное двухкадровое воспроизведение и pinch/drag/cancel/reset/подтверждение обрезки JPEG/GIF. Предварительный настоящий UI-прогон прошёл; расширенный прогон проверяет уменьшение изображений под экранный размер. Встроенный системный photo picker остаётся нативным iOS. |
 | Полная визуальная сверка | Оригинальные PNG/GIF/14 шрифтов включены в target; byte-compare выполняется до тестов. `TypeKt.a()` подтверждён как Manrope Medium и назначен базовым шрифтом приложения; роли Benzin/Inter/Noto назначены конкретным текстам. Используются реальные экраны с пустыми/ошибочными/загрузочными/успешными состояниями на iPhone 13. Проверка всех пикселей и всех данных APK не заявляется; нативные навигация, picker и safe area закономерно отличаются. |
 
-### Следующий проход типографики: подтверждённые точки APK
+### Подтверждённые роли типографики APK
 
 `presentation/theme/TypeKt.java`: `a()` и `h` → Manrope Medium, `b` → Benzin Regular, `c` → Benzin Semibold, `d` → Montserrat ExtraBold, `e` → Radio Canada Medium, `f` → Inter Bold, `g` → Inter Light, `i` → Manrope Light, `j` → Noto Serif Display. Все 14 файлов подключены в 0.93; подтверждённые роли назначены, остальные доступны без произвольной подмены ими текста. Простое наличие файлов не доказывает прохождение всех экранов.
 
@@ -204,7 +204,7 @@
 - `library/LibraryScreenKt.java:794`: заголовок импорта — `TypeKt.b` (Benzin Regular), 14 sp; описание на строке 803 — Manrope Medium, 10 sp с line height 12 sp. Размеры Android sp нельзя объявлять равными iOS pt без визуальной сверки.
 - `library/LibraryScreenKt.java:1034`: заголовок карточки — `TypeKt.f` (Inter Bold).
 - `player/FullScreenPlayerKt.java:5823`: стиль строки lyrics — `TypeKt.h` (Manrope Medium), основной размер 24 sp; активная строка меняет вес.
-- `rip/RipScreenKt.java:1909`: имя артиста — Noto Serif Display с glow; строки дат и eternal memory на 1926/1933 — Manrope Light. Список в 0.91 ещё не повторяет этот вертикальный Android-layout/эффект.
+- `rip/RipScreenKt.java:1909`: имя артиста — Noto Serif Display с glow; строки дат и eternal memory на 1926/1933 — Manrope Light. Эти роли, glow и вертикальное перелистывание назначены в 0.93; они проверяются отдельно от уже пройденного списка 0.91.
 
 ## Границы подтверждения
 

@@ -63,10 +63,15 @@ enum LaneHLSTestFixture {
         if let task = inFlight[id] { return try await task.value }
         let task = Task { @MainActor in
             let asset = AVURLAsset(url: remote)
-            guard let task = downloads.makeAssetDownloadTask(asset: asset, assetTitle: track.title,
-                assetArtworkData: nil, options: [AVAssetDownloadTaskMinimumRequiredMediaBitrateKey: 0]) else {
-                throw LaneAPIError.decoding("iOS could not prepare this adaptive offline download.")
+            guard try await asset.load(.isPlayable) else {
+                throw LaneAPIError.decoding("This adaptive stream is not playable.")
             }
+            // Load the selection before handing the asset to the native
+            // background service, as in Apple's current HLS persistence sample.
+            _ = try await asset.load(.preferredMediaSelection)
+            try Task.checkCancellation()
+            let configuration = AVAssetDownloadConfiguration(asset: asset, title: track.title)
+            let task = downloads.makeAssetDownloadTask(downloadConfiguration: configuration)
             let description = Description(id: UUID(), track: track, quality: quality)
             task.taskDescription = String(data: try JSONEncoder().encode(description), encoding: .utf8)
             return try await withTaskCancellationHandler(operation: {
