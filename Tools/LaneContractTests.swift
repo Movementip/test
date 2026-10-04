@@ -546,6 +546,11 @@ final class LaneMockURLProtocol: URLProtocol {
 @main
 struct LaneContractTestRunner {
     static func main() async throws {
+        #if LANE_HLS_NATIVE_TEST
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--lane-hls-reload" {
+            try await LaneHLSOfflineTests.restore(id: CommandLine.arguments[2]); return
+        }
+        #endif
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         precondition(LaneRateLimitPolicy.delay(headers: ["retry-after": "3"], data: Data(), now: now, deleting: true) == 60)
         precondition(LaneRateLimitPolicy.delay(headers: ["Retry-After": "90"], data: Data(), now: now, deleting: true) == 90)
@@ -966,6 +971,9 @@ struct LaneContractTestRunner {
         let cancellation = try await api.cancelSubscription(token: "test-token")
         precondition(cancellation.status == "cancelled")
         print("0.93 social/payment contracts passed: exact presence body, friend DTO defaults, known/unknown inert events, Lane pricing and mock-only cancellation.")
+        #if LANE_HLS_NATIVE_TEST
+        try await LaneHLSOfflineTests.run()
+        #endif
 
         let expectedPaths = [
             "/create-playlist",

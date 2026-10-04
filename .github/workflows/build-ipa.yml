@@ -89,6 +89,15 @@ jobs:
           swiftc -parse-as-library -swift-version 5 LaneIOSPrototype/LaneEqualizer.swift Tools/LaneEqualizerTests.swift -o /tmp/lane-equalizer-tests
           /tmp/lane-equalizer-tests
 
+      - name: Native HLS offline persistence tests
+        run: |
+          swiftc -parse-as-library -swift-version 5 -DLANE_HLS_NATIVE_TEST \
+            LaneIOSPrototype/LaneModels.swift LaneIOSPrototype/RequestSigner.swift \
+            LaneIOSPrototype/LaneAPI.swift LaneIOSPrototype/LaneHLSOfflineStore.swift \
+            Tools/LaneContractTests.swift Tools/LaneHLSOfflineTests.swift \
+            -o /tmp/lane-native-hls-tests -lz
+          /tmp/lane-native-hls-tests
+
       - name: Build unsigned app
         run: |
           set -euo pipefail

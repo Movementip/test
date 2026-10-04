@@ -1,8 +1,10 @@
 import Foundation
 import AVFoundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
-#if DEBUG
+#if DEBUG || LANE_HLS_NATIVE_TEST
 // Generated 440 Hz tone for actual AVAssetDownloadURLSession tests only.
 enum LaneHLSTestFixture {
     // RFC 8216 §3.4: packed AAC segments start with an ID3 PRIV timestamp.
@@ -25,7 +27,7 @@ enum LaneHLSTestFixture {
     static let shared = LaneHLSOfflineStore()
     static let identifier = "com.lane.ios.offline-hls"
     static let changed = Notification.Name("LaneHLSOfflineChanged")
-    private struct Record: Codable { let track: TrackCandidate; let path: String; let quality: String }
+    private struct Record: Codable { let track: TrackCandidate; let path: String; let quality: String; let bookmark: Data? }
     private struct Description: Codable { let id: UUID; let track: TrackCandidate; let quality: String }
     private struct Job { let description: Description; let task: AVAssetDownloadTask; let continuation: CheckedContinuation<URL, Error> }
     private var records: [String: Record] = [:]
@@ -47,15 +49,27 @@ enum LaneHLSTestFixture {
     private override init() {
         super.init()
         if let data = UserDefaults.standard.data(forKey: "lane.hls.records"), let value = try? JSONDecoder().decode([String: Record].self, from: data) { records = value }
-        _ = downloads // reconnect native background tasks with this identifier
     }
+
+    // UIKit calls this after launch, not while SwiftUI's App is being built.
+    func reconnect() { _ = downloads }
 
     var tracks: [TrackCandidate] { records.values.compactMap { fileURL(for: $0.track.trackID ?? $0.track.id) == nil ? nil : $0.track } }
     func fileURL(for id: String) -> URL? {
         guard let record = records[id], !record.path.hasPrefix("/"), !record.path.split(separator: "/").contains("..") else { return nil }
-        let url = library.appendingPathComponent(record.path).standardizedFileURL
-        guard url.path.hasPrefix(library.path + "/"), url.pathExtension == "movpkg", FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let url: URL
+        if let bookmark = record.bookmark {
+            var stale = false
+            guard let restored = try? URL(resolvingBookmarkData: bookmark, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &stale) else { return nil }
+            url = restored
+        } else { url = library.appendingPathComponent(record.path).standardizedFileURL }
+        guard ownsPackageLocation(url), (try? url.checkResourceIsReachable()) == true else { return nil }
         return url
+    }
+
+    private func ownsPackageLocation(_ url: URL) -> Bool {
+        url.isFileURL && url.pathExtension == "movpkg" &&
+        url.resolvingSymlinksInPath().path.hasPrefix(library.resolvingSymlinksInPath().path + "/")
     }
 
     func download(track: TrackCandidate, remote: URL, quality: String) async throws -> URL {
@@ -98,33 +112,48 @@ enum LaneHLSTestFixture {
     func urlSession(_ session: URLSession, assetDownloadTask: AVAssetDownloadTask, didFinishDownloadingTo location: URL) {
         locations[assetDownloadTask.taskIdentifier] = location
     }
+    func urlSession(_ session: URLSession, assetDownloadTask: AVAssetDownloadTask, willDownloadTo location: URL) {
+        // A destination is not proof of completion; validation is done below.
+        locations[assetDownloadTask.taskIdentifier] = location
+    }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         let job = jobs.removeValue(forKey: task.taskIdentifier)
         let location = locations.removeValue(forKey: task.taskIdentifier)
         let restored = task.taskDescription.flatMap { $0.data(using: .utf8) }.flatMap { try? JSONDecoder().decode(Description.self, from: $0) }
         guard let description = job?.description ?? restored else { return }
         if let error { job?.continuation.resume(throwing: error); return }
-        guard let location, location.pathExtension == "movpkg", location.standardizedFileURL.path.hasPrefix(library.path + "/") else {
+        guard let location else {
             job?.continuation.resume(throwing: LaneAPIError.decoding("iOS did not return a complete offline package.")); return
         }
         pendingVerifications += 1
         Task {
             defer { pendingVerifications -= 1; completeBackgroundEventsIfReady() }
             do {
-                let asset = AVURLAsset(url: location)
+                // Native file URLs may carry /.nofollow or sandbox identity.
+                // Preserve Apple's bookmark instead of stripping/moving them.
+                let bookmark = try location.bookmarkData()
+                var stale = false
+                let restored = try URL(resolvingBookmarkData: bookmark, options: .withoutUI, relativeTo: nil, bookmarkDataIsStale: &stale)
+                guard ownsPackageLocation(restored) else { throw LaneAPIError.decoding("The offline package is outside Lane's library.") }
+                let asset = AVURLAsset(url: restored)
                 let playable = try await asset.load(.isPlayable)
                 guard asset.assetCache?.isPlayableOffline == true, playable else {
                     throw LaneAPIError.decoding("The adaptive stream is not playable offline. It was not marked downloaded.")
                 }
                 let id = description.track.trackID ?? description.track.id
                 let previous = fileURL(for: id)
-                records[id] = Record(track: description.track, path: String(location.standardizedFileURL.path.dropFirst(library.path.count + 1)), quality: description.quality)
+                let relative = String(restored.resolvingSymlinksInPath().path.dropFirst(library.resolvingSymlinksInPath().path.count + 1))
+                records[id] = Record(track: description.track, path: relative, quality: description.quality, bookmark: bookmark)
                 save()
-                if let previous, previous != location { try? FileManager.default.removeItem(at: previous) }
-                let policy = AVMutableAssetDownloadStorageManagementPolicy()
-                policy.priority = .important; policy.expirationDate = .distantFuture
-                AVAssetDownloadStorageManager.shared().setStorageManagementPolicy(policy, for: location)
-                job?.continuation.resume(returning: location)
+                if let previous, previous != restored { try? FileManager.default.removeItem(at: previous) }
+                // Storage policies require an app bundle; a native CLI harness
+                // has no bundle identity. Every packaged iOS app has one.
+                if Bundle.main.bundleIdentifier != nil {
+                    let policy = AVMutableAssetDownloadStorageManagementPolicy()
+                    policy.priority = .important; policy.expirationDate = .distantFuture
+                    AVAssetDownloadStorageManager.shared().setStorageManagementPolicy(policy, for: restored)
+                }
+                job?.continuation.resume(returning: restored)
             } catch { job?.continuation.resume(throwing: error) }
         }
     }
@@ -141,9 +170,15 @@ enum LaneHLSTestFixture {
     }
 }
 
+#if canImport(UIKit)
 final class LaneApplicationDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        Task { @MainActor in LaneHLSOfflineStore.shared.reconnect() }
+        return true
+    }
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
         guard identifier == LaneHLSOfflineStore.identifier else { completionHandler(); return }
         Task { @MainActor in LaneHLSOfflineStore.shared.handleBackgroundEvents(completion: completionHandler) }
     }
 }
+#endif

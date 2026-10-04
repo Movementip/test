@@ -419,6 +419,7 @@ private struct LaneUITestRoot: View {
 
     private func checkHLSOffline() async {
         let track = TrackCandidate(id: "hls-fixture", title: "Offline adaptive fixture", subtitle: "Generated tone", trackID: "hls-fixture")
+        var beforeDownload = 0
         do {
             try session.removeDownload(track)
             session.requestStream(for: track)
@@ -428,6 +429,7 @@ private struct LaneUITestRoot: View {
             }
             guard session.isPlaying, session.playbackPosition > 0.2 else { throw LaneAPIError.decoding("HLS fixture does not play online: \(session.playerError)") }
             session.stop()
+            beforeDownload = LaneUITestAudioServer.shared.hlsRequestCount
             let streamRequests = LaneUITestURLProtocol.streamCount(for: "hls-fixture")
             try await session.debugDownloadTrack(track)
             guard let url = session.downloadedFileURL(for: track), url.pathExtension == "movpkg" else {
@@ -455,7 +457,7 @@ private struct LaneUITestRoot: View {
         } catch {
             let value = error as NSError
             let underlying = value.userInfo[NSUnderlyingErrorKey] as? NSError
-            result = "Adaptive offline checks failed: \(error.localizedDescription) [\(value.domain) \(value.code); underlying \(underlying?.domain ?? "none") \(underlying?.code ?? 0)]"
+            result = "Adaptive offline checks failed: \(error.localizedDescription) [\(value.domain) \(value.code); underlying \(underlying?.domain ?? "none") \(underlying?.code ?? 0); HLS HTTP before=\(beforeDownload) after=\(LaneUITestAudioServer.shared.hlsRequestCount)]"
         }
     }
 
@@ -568,12 +570,12 @@ private struct LaneUITestRoot: View {
     }
 
     private func checkAudioLifecycle() async {
-        func waitForAudio() async throws {
+        func waitForAudio(_ stage: String) async throws {
             for _ in 0..<120 {
                 if session.isPlaying && session.playbackPosition > 0.1 { return }
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
-            throw LaneAPIError.decoding("Audio did not recover: \(session.output)")
+            throw LaneAPIError.decoding("Audio did not recover at \(stage): playing=\(session.isPlaying), buffering=\(session.isBuffering), position=\(session.playbackPosition), error=\(session.playerError), \(session.output). \(LaneAudioDiagnostics.shared.report())")
         }
         func interruption(_ type: AVAudioSession.InterruptionType) {
             NotificationCenter.default.post(name: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(), userInfo: [
@@ -587,24 +589,24 @@ private struct LaneUITestRoot: View {
             }
             session.debugUseProgressiveTransport = true
             session.requestStream(for: LaneUITestFixtures.track)
-            try await waitForAudio()
+            try await waitForAudio("initial playback")
             interruption(.began)
             try await Task.sleep(nanoseconds: 300_000_000)
             guard !session.isPlaying, !session.debugHasPlaybackBackgroundTask else { throw LaneAPIError.decoding("Interruption leaked playback or assertion") }
             interruption(.ended)
-            try await waitForAudio()
+            try await waitForAudio("interruption resume")
             interruption(.began)
             try await Task.sleep(nanoseconds: 200_000_000)
             session.pause()
             interruption(.ended)
             try await Task.sleep(nanoseconds: 400_000_000)
             guard !session.isPlaying else { throw LaneAPIError.decoding("Ignored user pause during interruption") }
-            session.resume(); try await waitForAudio()
+            session.resume(); try await waitForAudio("manual resume after interruption")
             let position = session.playbackPosition
             NotificationCenter.default.post(name: AVAudioSession.mediaServicesWereResetNotification, object: nil)
             try await Task.sleep(nanoseconds: 300_000_000)
             guard !session.isPlaying else { throw LaneAPIError.decoding("Media reset resumed without user action") }
-            session.resume(); try await waitForAudio()
+            session.resume(); try await waitForAudio("media reset resume")
             guard session.playbackPosition >= position else { throw LaneAPIError.decoding("Media reset lost position") }
             NotificationCenter.default.post(name: AVAudioSession.routeChangeNotification, object: nil,
                 userInfo: [AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue])
@@ -729,6 +731,7 @@ final class LaneUITestAudioServer {
     private var port: UInt16?
     private var complete = false
     private var deliveredRanges: [Range<Int>] = []
+    private var hlsRequests = 0
     private let audio: Data
     private let shortAudio: Data
     private let longAudio: Data
@@ -738,6 +741,7 @@ final class LaneUITestAudioServer {
         return port.flatMap { URL(string: "http://127.0.0.1:\($0)/yandex-account-fixture") }
     }
     var finishedFullResponse: Bool { lock.lock(); defer { lock.unlock() }; return complete }
+    var hlsRequestCount: Int { lock.lock(); defer { lock.unlock() }; return hlsRequests }
 
     private init() {
         let sampleRate: UInt32 = 16000
@@ -799,6 +803,7 @@ final class LaneUITestAudioServer {
                 return
             }
             if text.contains("/hls/playlist.m3u8 ") || text.contains("/hls/media.m3u8 ") || text.contains("/hls/segment") {
+                self.lock.lock(); self.hlsRequests += 1; self.lock.unlock()
                 let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:3.065034,\nsegment1.aac\n#EXTINF:3.065034,\nsegment2.aac\n#EXT-X-ENDLIST\n"
                 let isPlaylist = text.contains("/hls/playlist.m3u8 ")
                 let isMedia = text.contains("/hls/media.m3u8 ")
@@ -1219,7 +1224,7 @@ private final class LaneUITestURLProtocol: URLProtocol {
                     data = Data(#"{"message":"Transient stream failure"}"#.utf8)
                 } else {
                     guard let url = LaneUITestAudioServer.shared.url else { throw URLError(.cannotConnectToHost) }
-                    let selectedURL = id == "hls-fixture" ? url.replacingOccurrences(of: "/audio.wav", with: "/hls/playlist.m3u8") : id == "background-first" ? url.replacingOccurrences(of: "/audio.wav", with: "/short.wav") : id == "background-next" ? url.replacingOccurrences(of: "/audio.wav", with: "/long.wav") : url
+                    let selectedURL = id == "hls-fixture" ? url.replacingOccurrences(of: "127.0.0.1", with: "localhost").replacingOccurrences(of: "/audio.wav", with: "/hls/playlist.m3u8") : id == "background-first" ? url.replacingOccurrences(of: "/audio.wav", with: "/short.wav") : id == "background-next" ? url.replacingOccurrences(of: "/audio.wav", with: "/long.wav") : url
                     if id.hasPrefix("background-") { delayResponse = true; responseDelay = 4 }
                     data = try JSONSerialization.data(withJSONObject: ["url": selectedURL, "trackId": id, "ttl": 90])
                 }
