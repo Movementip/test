@@ -3736,7 +3736,10 @@ final class LaneSession: ObservableObject {
                      UIApplication.didEnterBackgroundNotification, UIApplication.didBecomeActiveNotification,
                      UIApplication.didReceiveMemoryWarningNotification, UIApplication.willTerminateNotification] {
             audioLifecycleObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
-                Task { @MainActor in self?.handleAudioLifecycle(notification) }
+                // NotificationCenter delivers this observer on .main. Keep
+                // ordered begin/reset/end notifications synchronous instead
+                // of leaving old service events queued behind a fresh reset.
+                MainActor.assumeIsolated { self?.handleAudioLifecycle(notification) }
             })
         }
         _ = LaneAudioDiagnostics.shared
@@ -3873,8 +3876,10 @@ final class LaneSession: ObservableObject {
             // never arrive. Do not let it or old resolution/effect work revive
             // retired audio objects after reset.
             playbackRequestID = UUID(); effectRequestID = UUID()
+            if streamResolveTask != nil { busy = false }
             streamResolveTask?.cancel(); streamResolveTask = nil
             playbackWatchdogTask?.cancel(); playbackWatchdogTask = nil
+            trackEffectIsLoading = false; trackEffectError = ""
             cancelPreparedStream(); endPlaybackTransition(); playerError = ""
             try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
             try? AVAudioSession.sharedInstance().setActive(false)
