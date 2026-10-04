@@ -799,11 +799,11 @@ final class LaneUITestAudioServer {
                 return
             }
             if text.contains("/hls/playlist.m3u8 ") || text.contains("/hls/media.m3u8 ") || text.contains("/hls/segment") {
-                let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:3.018667,\nsegment1.aac\n#EXTINF:3.018667,\nsegment2.aac\n#EXT-X-ENDLIST\n"
+                let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:3.065034,\nsegment1.aac\n#EXTINF:3.065034,\nsegment2.aac\n#EXT-X-ENDLIST\n"
                 let isPlaylist = text.contains("/hls/playlist.m3u8 ")
                 let isMedia = text.contains("/hls/media.m3u8 ")
                 let master = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=80000,CODECS=\"mp4a.40.2\"\nmedia.m3u8\n"
-                let payload = isPlaylist ? Data(master.utf8) : isMedia ? Data(playlist.utf8) : LaneHLSTestFixture.audio
+                let payload = isPlaylist ? Data(master.utf8) : isMedia ? Data(playlist.utf8) : LaneHLSTestFixture.segment(timestamp: text.contains("segment2.aac") ? 275853 : 0)
                 let type = isPlaylist || isMedia ? "application/vnd.apple.mpegurl" : "audio/aac"
                 let header = "HTTP/1.1 200 OK\r\nContent-Type: \(type)\r\nContent-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
                 connection.send(content: Data(header.utf8) + (text.hasPrefix("HEAD ") ? Data() : payload), completion: .contentProcessed { _ in connection.cancel() })
