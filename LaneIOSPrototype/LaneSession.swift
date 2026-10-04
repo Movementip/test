@@ -1496,9 +1496,10 @@ final class LaneSession: ObservableObject {
     func loadPrivacySettings() async throws -> LanePrivacySettings {
         guard !isGuest else { throw LaneAPIError.decoding("Sign in to change privacy settings.") }
         let requestToken = token
+        let generation = profileMutationGeneration
         await configureAPI()
         let value = try await LaneAPI.shared.account(token: requestToken, deviceLanguage: Locale.current.language.languageCode?.identifier ?? "en")
-        guard token == requestToken else { throw CancellationError() }
+        guard token == requestToken, profileMutationGeneration == generation else { throw CancellationError() }
         account = value
         return value.privacySettings ?? LanePrivacySettings()
     }
@@ -3767,10 +3768,16 @@ final class LaneSession: ObservableObject {
     func cancelSubscriptionConfirmed() async throws {
         let identity = token
         guard !identity.isEmpty else { throw LaneAPIError.decoding("Sign in to manage Lane Premium.") }
+        profileMutationGeneration = UUID()
+        let generation = profileMutationGeneration
         await configureAPI()
+        guard token == identity, profileMutationGeneration == generation, !Task.isCancelled else { throw CancellationError() }
         _ = try await LaneAPI.shared.cancelSubscription(token: identity)
         let value = try await LaneAPI.shared.account(token: identity, deviceLanguage: Locale.current.language.languageCode?.identifier ?? "en")
-        guard token == identity, !Task.isCancelled else { throw CancellationError() }
+        guard token == identity, profileMutationGeneration == generation, !Task.isCancelled else { throw CancellationError() }
+        // Invalidate reads started before or during this mutation. A late
+        // account snapshot must not turn confirmed auto-renewal back on.
+        profileMutationGeneration = UUID()
         account = value
         guard value.isAutoRenewalActive == false else { throw LaneAPIError.decoding("Lane accepted the request but has not confirmed cancellation yet. Refresh the subscription status.") }
     }
