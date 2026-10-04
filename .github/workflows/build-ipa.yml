@@ -14,13 +14,15 @@ on:
 jobs:
   simulator:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - name: iPhone 13 navigation and persistence regression tests
         run: |
           set -euo pipefail
-          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; print(next(x["identifier"] for x in reversed(json.load(sys.stdin)["runtimes"]) if x.get("isAvailable") and "iOS" in x["name"]))')
+          LANE_SIMULATOR_SDK=$(xcrun --sdk iphonesimulator --show-sdk-version)
+          RUNTIME=$(xcrun simctl list runtimes -j | python3 Tools/select_simulator_runtime.py "$LANE_SIMULATOR_SDK")
+          echo "Testing Xcode SDK $LANE_SIMULATOR_SDK with runtime $RUNTIME"
           UDID=$(xcrun simctl create "Lane iPhone 13" com.apple.CoreSimulator.SimDeviceType.iPhone-13 "$RUNTIME")
           mkdir -p Output
           xcodebuild -project LaneIOSPrototype.xcodeproj -scheme LaneIOSPrototype \

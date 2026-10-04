@@ -4,13 +4,15 @@ on:
 jobs:
   feature-tests:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Build and test new native features on iPhone 13
         run: |
           set -euo pipefail
-          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; print(next(x["identifier"] for x in reversed(json.load(sys.stdin)["runtimes"]) if x.get("isAvailable") and "iOS" in x["name"]))')
+          LANE_SIMULATOR_SDK=$(xcrun --sdk iphonesimulator --show-sdk-version)
+          RUNTIME=$(xcrun simctl list runtimes -j | python3 Tools/select_simulator_runtime.py "$LANE_SIMULATOR_SDK")
+          echo "Testing Xcode SDK $LANE_SIMULATOR_SDK with runtime $RUNTIME"
           UDID=$(xcrun simctl create "Lane features iPhone 13" com.apple.CoreSimulator.SimDeviceType.iPhone-13 "$RUNTIME")
           xcrun simctl boot "$UDID"
           xcrun simctl bootstatus "$UDID" -b
