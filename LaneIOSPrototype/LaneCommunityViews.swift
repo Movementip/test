@@ -246,7 +246,7 @@ struct LaneMemorialScreen: View {
                         Text("Eternal memory").font(LaneTypography.light(16)).foregroundStyle(.secondary)
                         Button { composing = true; error = nil } label: { actionLabel("Leave a candle") }
                             .buttonStyle(.plain).disabled(session.isGuest || artist.id == nil)
-                            .accessibilityIdentifier("memorial.compose")
+                            .accessibilityIdentifier("memorial.compose.inline")
                         if session.isGuest { Text("Sign in to leave a candle.").font(.caption).foregroundStyle(.secondary) }
                     }
                     if let count {
@@ -312,6 +312,12 @@ struct LaneMemorialScreen: View {
         } }
         .toolbar { ToolbarItemGroup(placement: .keyboard) {
             Spacer(); Button("Done") { messageFocused = false }
+        } }
+        .toolbar { ToolbarItem(placement: .navigationBarTrailing) {
+            if !composing, ownCandle == nil, !session.isGuest, artist.id != nil {
+                Button("Leave a candle") { composing = true; error = nil }
+                    .disabled(loading || saving).accessibilityIdentifier("memorial.compose")
+            }
         } }
         .onChange(of: candles.count) { _ in memoryPage = min(memoryPage, max(0, candles.count - 1)) }
         .onChange(of: ownCandle?.id) { _ in memoryPage = 0 }

@@ -106,7 +106,6 @@ final class LaneNavigationTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Second memory"].waitForExistence(timeout: 10))
         XCTAssertFalse(more.exists, "No page 3 after the final page")
         screenshot("iPhone13-memorial-pagination")
-        for _ in 0..<5 { app.swipeDown() }
         let compose = app.buttons["memorial.compose"]
         XCTAssertTrue(compose.isHittable); compose.tap()
         let submit = app.buttons["memorial.submit"]
